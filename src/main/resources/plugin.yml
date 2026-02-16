@@ -1,0 +1,62 @@
+name: Trenched
+version: '1'
+main: org.flintstqne.entrenched.Trenched
+api-version: '1.21'
+depend: [BlueMap, InventoryFramework]
+commands:
+  team:
+    description: Team commands
+    usage: /team list|join <id> |leave|spawn
+    aliases: [t]
+  teamgui:
+    description: Opens team selection GUI
+    usage: /teamgui
+  round:
+    description: Manage rounds
+    usage: /round <info|start|phase|end|history>
+    permission: entrenched.round
+  division:
+    description: Division commands
+    usage: /division <create|join|leave|info|list|roster>
+    aliases: [div]
+  dc:
+    description: Division chat - switch to channel or send message
+    usage: /dc [message]
+    aliases: [divisionchat]
+  g:
+    description: General chat - switch to channel or send message
+    usage: /g [message]
+    aliases: [gen, general]
+  tc:
+    description: Team chat - switch to channel or send message to your team
+    usage: /tc [message]
+    aliases: [teamchat]
+  pc:
+    description: Party chat - switch to channel or send message
+    usage: /pc [message]
+    aliases: [partychat]
+  party:
+    description: Party commands
+    usage: /party <create|invite|accept|deny|leave|list|kick|transfer|disband>
+    aliases: [p]
+  rc:
+    description: Region chat - switch to channel or send message to players in your region
+    usage: /rc [message]
+    aliases: [regionchat, local]
+  region:
+    description: View region information and status
+    usage: /region <info|map|list|supply>
+    aliases: [r]
+  supply:
+    description: View supply status and find road gaps
+    usage: /supply <gaps|status|help>
+    aliases: [sup]
+  admin:
+    description: Admin commands for server management
+    usage: /admin <round|phase|region|team|player|supply|reload|status>
+    permission: entrenched.admin
+
+permissions:
+  entrenched.admin:
+    description: Access to admin commands
+    default: op

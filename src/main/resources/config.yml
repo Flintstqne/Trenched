@@ -1,0 +1,222 @@
+# BlockHole TerrainGen Configuration
+# ===================================
+
+# Round Settings
+round:
+  # Phase duration in minutes (default: 10080 = 1 week)
+  # Set to 0 to disable auto-advancement (manual only via /round phase)
+  phase-duration-minutes: 10080
+
+  # Maximum number of phases per round
+  max-phases: 3
+
+  # Auto-start a new round on server startup if none exists
+  auto-start-round: true
+
+# World Settings
+world:
+  # The name of the game world
+  name: "world"
+
+  # World border size in blocks (diameter)
+  border-size: 2048
+
+  # World border center coordinates
+  border-center-x: 0
+  border-center-z: 0
+
+  # World border damage settings
+  border-damage-amount: 0.2
+  border-damage-buffer: 5.0
+  border-warning-distance: 10
+
+# Chunk Pregeneration Settings (requires Chunky plugin)
+pregeneration:
+  # Enable chunk pregeneration on new round
+  enabled: true
+
+  # Radius in chunks to pregenerate (2048 chunks = 32768 blocks)
+  radius-chunks: 1024
+
+  # Estimated chunks per second for time calculation
+  chunks-per-second: 250
+
+# Team Settings
+teams:
+  # Team spawn coordinates (center of team's home region)
+  red:
+    spawn-x: -767
+    spawn-z: -767
+  blue:
+    spawn-x: 767
+    spawn-z: 767
+
+  # Region size in blocks (for claiming)
+  region-size: 512
+
+# Player Settings
+player:
+  # Teleport players to team spawn on respawn
+  respawn-at-team-spawn: true
+
+  # Teleport players to world spawn if they have no team
+  no-team-to-world-spawn: true
+
+  # Show team selection GUI to players without a team on join
+  show-team-gui-on-join: true
+
+  # Delay (in ticks) before showing team GUI after join (20 ticks = 1 second)
+  team-gui-delay-ticks: 20
+
+# Messages
+messages:
+  # Prefix for plugin messages
+  prefix: "&6[BlockHole] "
+
+  # Phase advancement message
+  phase-advanced: "&aPhase {phase} has begun!"
+
+  # Round start message
+  round-started: "&aRound {round} has started!"
+
+  # Round end message
+  round-ended: "&6Round {round} has ended! Winner: {winner}"
+
+  # New round kick message
+  new-round-kick: "&6&l[BlockHole] &eServer is resetting for a new war!\n&7World is regenerating. Please reconnect in ~20-30 minutes."
+
+# BlueMap Integration
+bluemap:
+  # Enable BlueMap region rendering
+  enabled: true
+
+  # Marker refresh interval in seconds
+  marker-refresh-seconds: 30
+
+# Division Settings
+divisions:
+  # Enable division system
+  enabled: true
+
+  # Maximum divisions per team
+  max-per-team: 5
+
+  # Cooldown in hours before a player can create another division
+  founder-cooldown-hours: 48
+
+# Party Settings
+parties:
+  # Enable party system
+  enabled: true
+
+  # Maximum party size
+  max-size: 6
+
+  # Party features
+  features:
+    # Enable party chat (/pc)
+    party-chat: true
+
+    # Compass points to nearest party member
+    compass-to-party: true
+
+    # Show party members on BlueMap
+    bluemap-markers: true
+
+# Region Capture Settings
+regions:
+  # Influence point thresholds
+  influence:
+    # IP required to capture a neutral region
+    neutral-capture: 500
+    # IP required to capture an enemy region
+    enemy-capture: 1000
+    # IP decay per minute when no activity in contested region
+    decay-per-minute: 5
+
+  # Actions in enemy regions
+  enemy-actions:
+    # Points for killing an enemy player
+    kill-points: 50
+    # Reduction multiplier for killing the same player again (0.5 = 50% reduction per kill)
+    kill-same-player-reduction: 0.5
+    # Points for placing a team banner
+    banner-place: 25
+    # Points for removing an enemy banner
+    banner-remove-enemy: 15
+    # Points per enemy player-placed block mined
+    mine-enemy-blocks: 1
+    # Maximum blocks that count per second (anti-spam)
+    mine-cap-per-second: 5
+
+  # Actions in neutral regions
+  neutral-actions:
+    # Points per defensive block placed (walls, fences)
+    defensive-block: 2
+    # Maximum defensive blocks per second (anti-spam)
+    defensive-cap-per-second: 10
+    # Points for placing a workstation
+    workstation: 15
+    # Maximum workstations that count per minute (anti-spam)
+    workstation-cap-per-minute: 3
+    # Points for placing a torch
+    torch: 1
+    # Maximum torches that count per minute (anti-spam)
+    torch-cap-per-minute: 10
+    # Points for killing a hostile mob
+    mob-kill: 5
+
+  # Defense settings
+  defense:
+    # Minutes region is immune after capture
+    fortification-minutes: 10
+
+  # Physical road supply line settings
+  supply:
+    # Valid path block types for roads
+    path-blocks:
+      - DIRT_PATH
+      #- GRAVEL
+      #- COBBLESTONE
+      - STONE_BRICKS
+      - POLISHED_ANDESITE
+    # Maximum horizontal (X/Z) distance between path blocks to count as connected
+    # Keeps roads tight horizontally - must be close neighbors
+    # Recommended: 3-5 for strict roads, 5-8 for more forgiving
+    # NOTE: Higher values cause more lag during recalculation
+    adjacency-radius: 5
+    # Maximum vertical (Y) distance between path blocks to count as connected
+    # Allows roads to go up/down hills, bridges, tunnels without needing a ramp every 3 blocks
+    y-tolerance: 32
+    # How far from the border line to search for road blocks (in blocks)
+    # Higher = more forgiving for roads that don't go right up to the border
+    border-width: 32
+    # Respawn delay penalties (in seconds)
+    partial-supply-respawn-delay: 5     # Connected via regions but no road
+    unsupplied-respawn-delay: 15        # No road connection to home
+    isolated-respawn-delay: 30          # No owned adjacent regions
+    # Health regen multipliers (1.0 = normal)
+    unsupplied-health-regen: 0.5        # 50% slower
+    isolated-health-regen: 0.25         # 75% slower
+
+  # Adjacency rules
+  adjacency:
+    # Only allow capturing adjacent regions (N/S/E/W)
+    strict: true
+    # Allow diagonal adjacency
+    allow-diagonal: false
+
+  # Home region settings
+  home:
+    # Red team home region
+    red: "A1"
+    # Blue team home region
+    blue: "D4"
+    # Enemy must have this many or fewer regions to attack home
+    min-regions-to-attack: 2
+
+# Debug Settings
+debug:
+  # Enable verbose logging
+  verbose: false
+
