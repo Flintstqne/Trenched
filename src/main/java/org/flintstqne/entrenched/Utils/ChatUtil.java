@@ -12,7 +12,10 @@ import org.bukkit.event.player.PlayerQuitEvent;
 import org.flintstqne.entrenched.BlueMapHook.RegionRenderer;
 import org.flintstqne.entrenched.ChatLogic.ChatChannel;
 import org.flintstqne.entrenched.ChatLogic.ChatChannelManager;
+import org.flintstqne.entrenched.ConfigManager;
 import org.flintstqne.entrenched.DivisionLogic.*;
+import org.flintstqne.entrenched.MeritLogic.MeritRank;
+import org.flintstqne.entrenched.MeritLogic.MeritService;
 import org.flintstqne.entrenched.PartyLogic.*;
 import org.flintstqne.entrenched.TeamLogic.TeamService;
 
@@ -26,15 +29,20 @@ public final class ChatUtil implements Listener {
     private final PartyService partyService;
     private final ChatChannelManager channelManager;
     private final RegionRenderer regionRenderer; // May be null if BlueMap not available
+    private final ConfigManager configManager;
+    private final MeritService meritService;
 
     public ChatUtil(TeamService teamService, DivisionService divisionService,
                     PartyService partyService, ChatChannelManager channelManager,
-                    RegionRenderer regionRenderer) {
+                    RegionRenderer regionRenderer, ConfigManager configManager,
+                    MeritService meritService) {
         this.teamService = teamService;
         this.divisionService = divisionService;
         this.partyService = partyService;
         this.channelManager = channelManager;
         this.regionRenderer = regionRenderer;
+        this.configManager = configManager;
+        this.meritService = meritService;
     }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
@@ -53,30 +61,93 @@ public final class ChatUtil implements Listener {
         }
     }
 
+    /**
+     * Formats a chat message using the configurable format from config.yml.
+     * Replaces placeholders: {division}, {division_name}, {division_tag}, {rank}, {team_color}, {player}, {message}
+     */
+    private String formatChatMessage(Player player, UUID playerId, String message) {
+        Optional<String> teamOpt = teamService.getPlayerTeam(playerId);
+        Optional<Division> divisionOpt = divisionService != null ?
+                divisionService.getPlayerDivision(playerId) : Optional.empty();
+
+        // Get the appropriate format from config
+        String format;
+        if (divisionOpt.isPresent()) {
+            format = configManager.getChatFormatWithDivision();
+        } else if (teamOpt.isPresent()) {
+            format = configManager.getChatFormatWithoutDivision();
+        } else {
+            format = configManager.getChatFormatNoTeam();
+        }
+
+        // Get team color
+        String teamColorCode = ChatColor.GRAY.toString();
+        if (teamOpt.isPresent()) {
+            String team = teamOpt.get();
+            teamColorCode = team.equalsIgnoreCase("red") ? ChatColor.RED.toString() : ChatColor.BLUE.toString();
+        }
+
+        // Get rank
+        MeritRank rank = MeritRank.PRIVATE; // Default
+        if (meritService != null) {
+            rank = meritService.getPlayerData(playerId)
+                    .map(data -> data.getRank())
+                    .orElse(MeritRank.PRIVATE);
+        }
+
+        // Replace division placeholders
+        if (divisionOpt.isPresent()) {
+            Division div = divisionOpt.get();
+            String divTeamColor = div.team().equalsIgnoreCase("red") ?
+                    ChatColor.RED.toString() : ChatColor.BLUE.toString();
+            format = format.replace("{division}", divTeamColor + "[" + div.tag() + "]" + ChatColor.RESET);
+            format = format.replace("{division_name}", div.name());
+            format = format.replace("{division_tag}", div.tag());
+        } else {
+            format = format.replace("{division}", "");
+            format = format.replace("{division_name}", "");
+            format = format.replace("{division_tag}", "");
+        }
+
+        // Replace common placeholders
+        format = format.replace("{rank}", rank.getFormattedTag());
+        format = format.replace("{rank_name}", rank.getDisplayName());
+        format = format.replace("{rank_tag}", rank.getTag());
+        format = format.replace("{team_color}", teamColorCode);
+        format = format.replace("{player}", player.getName());
+        format = format.replace("{message}", message);
+
+        // Translate color codes (& to §)
+        format = translateColors(format);
+
+        // Clean up any double spaces from empty placeholders
+        format = format.replaceAll("  +", " ").trim();
+
+        return format;
+    }
+
+    /**
+     * Translates & color codes to § color codes.
+     */
+    private String translateColors(String text) {
+        if (text == null) return "";
+        return ChatColor.translateAlternateColorCodes('&', text);
+    }
+
     private void handleGeneralChat(AsyncPlayerChatEvent event, Player player, UUID playerId) {
-        ChatColor teamColor = ChatColor.GRAY;
-        String divisionTag = "";
+        // Use configurable format
+        String formattedMessage = formatChatMessage(player, playerId, event.getMessage());
 
-        Optional<String> teamId = teamService.getPlayerTeam(playerId);
-        if (teamId.isPresent()) {
-            String team = teamId.get();
-            if (team.equalsIgnoreCase("red")) {
-                teamColor = ChatColor.RED;
-            } else if (team.equalsIgnoreCase("blue")) {
-                teamColor = ChatColor.BLUE;
-            }
+        // Cancel original event and send our formatted message
+        event.setCancelled(true);
+
+        // Broadcast to all players
+        for (Player online : Bukkit.getOnlinePlayers()) {
+            online.sendMessage(formattedMessage);
         }
 
-        // Get division tag if player is in a division
-        if (divisionService != null) {
-            Optional<Division> divOpt = divisionService.getPlayerDivision(playerId);
-            if (divOpt.isPresent()) {
-                divisionTag = teamColor + divOpt.get().formattedTag() + " ";
-            }
-        }
-
-        // Format: [TAG] Username: message (tag in team color)
-        event.setFormat(divisionTag + teamColor + "%s" + ChatColor.WHITE + ": %s");
+        // Log to console
+        Bukkit.getConsoleSender().sendMessage(formattedMessage);
     }
 
     private void handleTeamChat(AsyncPlayerChatEvent event, Player player, UUID playerId) {
@@ -97,17 +168,11 @@ public final class ChatUtil implements Listener {
         ChatColor teamColor = team.equalsIgnoreCase("red") ? ChatColor.RED : ChatColor.BLUE;
         String teamName = team.equalsIgnoreCase("red") ? "Red" : "Blue";
 
-        // Get division tag if in a division
-        String divisionTag = "";
-        Optional<Division> divOpt = divisionService.getPlayerDivision(playerId);
-        if (divOpt.isPresent()) {
-            divisionTag = teamColor + divOpt.get().formattedTag() + " ";
-        }
+        // Use configurable format for the player portion
+        String playerFormat = formatChatMessage(player, playerId, event.getMessage());
+        String formattedMessage = ChatColor.DARK_GRAY + "[" + teamColor + teamName + ChatColor.DARK_GRAY + "] " + playerFormat;
 
-        String formattedMessage = ChatColor.DARK_GRAY + "[" + teamColor + teamName + ChatColor.DARK_GRAY + "] " +
-                divisionTag + teamColor + player.getName() + ChatColor.WHITE + ": " + event.getMessage();
-
-        // Send to all players on the same team (from main thread for safety)
+        // Send to all players on the same team
         final String finalMessage = formattedMessage;
         final String finalTeam = team;
 
@@ -129,7 +194,6 @@ public final class ChatUtil implements Listener {
         if (divOpt.isEmpty()) {
             player.sendMessage(ChatColor.RED + "You are not in a division. Switching to general chat.");
             channelManager.setChannel(playerId, ChatChannel.GENERAL);
-            // Resend message in general chat
             Bukkit.getScheduler().runTask(Bukkit.getPluginManager().getPlugins()[0], () -> {
                 player.chat(event.getMessage());
             });
@@ -169,7 +233,6 @@ public final class ChatUtil implements Listener {
         if (partyOpt.isEmpty()) {
             player.sendMessage(ChatColor.RED + "You are not in a party. Switching to general chat.");
             channelManager.setChannel(playerId, ChatChannel.GENERAL);
-            // Resend message in general chat
             Bukkit.getScheduler().runTask(Bukkit.getPluginManager().getPlugins()[0], () -> {
                 player.chat(event.getMessage());
             });
@@ -220,25 +283,11 @@ public final class ChatUtil implements Listener {
         String regionName = regionRenderer.getRegionNameForBlock(
                 player.getLocation().getBlockX(), player.getLocation().getBlockZ()).orElse("Unknown");
 
-        // Get sender's team color
-        ChatColor teamColor = ChatColor.GRAY;
-        Optional<String> teamOpt = teamService.getPlayerTeam(playerId);
-        if (teamOpt.isPresent()) {
-            String team = teamOpt.get();
-            teamColor = team.equalsIgnoreCase("red") ? ChatColor.RED : ChatColor.BLUE;
-        }
+        // Use configurable format for the player portion
+        String playerFormat = formatChatMessage(player, playerId, event.getMessage());
+        String formattedMessage = ChatColor.DARK_GRAY + "[" + ChatColor.GOLD + regionName + ChatColor.DARK_GRAY + "] " + playerFormat;
 
-        // Get division tag if in a division
-        String divisionTag = "";
-        Optional<Division> divOpt = divisionService.getPlayerDivision(playerId);
-        if (divOpt.isPresent()) {
-            divisionTag = teamColor + divOpt.get().formattedTag() + " ";
-        }
-
-        String formattedMessage = ChatColor.DARK_GRAY + "[" + ChatColor.GOLD + regionName + ChatColor.DARK_GRAY + "] " +
-                divisionTag + teamColor + player.getName() + ChatColor.WHITE + ": " + event.getMessage();
-
-        // Send to all players in the same region (from main thread for safety)
+        // Send to all players in the same region
         final String finalSenderRegionId = senderRegionId;
         final String finalMessage = formattedMessage;
 

@@ -220,3 +220,194 @@ debug:
   # Enable verbose logging
   verbose: false
 
+# Merit System Settings
+merit:
+  # Enable the merit system
+  enabled: true
+
+  # Display rank tag above player's head (name tag)
+  show-rank-nametag: true
+
+  # Display rank in chat
+  show-rank-in-chat: true
+
+  # Broadcast merit recognition messages server-wide
+  broadcast-recognition: true
+
+  # Broadcast promotions server-wide
+  broadcast-promotions: true
+
+  # Chat format settings
+  # These formats use internal placeholders (not PAPI) for efficiency
+  # Available placeholders:
+  #   {rank}           - Formatted rank tag with color (e.g., "§7[PFC]§r")
+  #   {rank_name}      - Full rank name (e.g., "Private First Class")
+  #   {rank_tag}       - Rank abbreviation only (e.g., "PFC")
+  #   {division}       - Formatted division tag with team color (e.g., "§c[1ST]§r")
+  #   {division_name}  - Division name (e.g., "1st Infantry")
+  #   {division_tag}   - Division tag only (e.g., "1ST")
+  #   {team_color}     - Team color code (§c for red, §9 for blue)
+  #   {player}         - Player name
+  #   {message}        - Chat message
+  # Color codes: Use & for colors (e.g., &c = red, &f = white, &7 = gray)
+  chat:
+    # Format for players with a division
+    # Default: [DIV] [RANK] PlayerName: message
+    with-division: "{division} {rank} {team_color}{player}&7: &f{message}"
+
+    # Format for players without a division
+    # Default: [RANK] PlayerName: message
+    without-division: "{rank} {team_color}{player}&7: &f{message}"
+
+    # Format for players with no team
+    # Default: [RANK] PlayerName: message (gray)
+    no-team: "{rank} &7{player}&7: &f{message}"
+
+  # Token earning settings
+  tokens:
+    # Combat tokens
+    kills-for-token-enemy-territory: 5   # Kills needed in enemy territory for 1 token
+    kills-for-token-general: 10          # Kills needed anywhere for 1 token
+    kill-streak-5-tokens: 1              # Tokens for 5 kill streak
+    kill-streak-10-tokens: 2             # Tokens for 10 kill streak
+    first-blood-tokens: 2                # Tokens for first kill of round
+    shutdown-tokens: 1                   # Tokens for ending enemy streak
+
+    # Territory tokens
+    capture-neutral-tokens: 3            # Tokens for capturing neutral region
+    capture-enemy-tokens: 5              # Tokens for capturing enemy region
+    participation-tokens: 1              # Tokens for participating (100+ IP)
+    major-contributor-tokens: 2          # Tokens for top 3 contributor
+    defend-region-tokens: 2              # Tokens for defending a region
+
+    # Logistics tokens
+    supply-route-tokens: 2               # Tokens for completing supply route
+    region-supplied-tokens: 1            # Tokens for first time 100% supply
+    road-blocks-per-token: 100           # Road blocks placed for 1 token
+
+    # Sabotage tokens
+    disrupt-supply-tokens: 1             # Tokens for disrupting supply
+    major-sabotage-tokens: 2             # Tokens for disrupting 3+ regions
+
+    # Time-based tokens
+    daily-login-tokens: 1                # Tokens for daily login (15+ min play)
+    login-streak-7-tokens: 2             # Tokens for 7-day streak
+    login-streak-30-tokens: 5            # Tokens for 30-day streak
+    round-completion-tokens: 1           # Tokens for completing round (100+ IP)
+    active-playtime-minutes: 120         # Minutes of playtime for 1 token (2 hours)
+
+  # Anti-farming settings
+  anti-farm:
+    # Cooldown in minutes before same player kill counts again
+    kill-cooldown-minutes: 5
+    # Max merits givable to same player per day
+    same-player-daily-limit: 3
+    # Max merits receivable per day
+    daily-receive-limit: 10
+    # Max merits givable to enemy team per day
+    cross-team-daily-limit: 2
+    # Minutes playtime required before giving merits
+    giver-playtime-required: 120         # 2 hours
+    # Minutes playtime required before receiving merits
+    receiver-playtime-required: 60       # 1 hour
+    # Minutes of interaction required in same region
+    interaction-requirement-minutes: 30
+    # Max merits givable per day total
+    daily-give-limit: 5
+
+  # Debug/Testing options (for admins)
+  debug:
+    # Enable merit debug logging
+    verbose: false
+    # Skip anti-farming checks (for testing)
+    skip-anti-farm: false
+    # Multiply all token earnings (1.0 = normal, 2.0 = double)
+    token-multiplier: 1.0
+    # Skip playtime requirements
+    skip-playtime-requirements: false
+    # Allow self-meriting (for testing)
+    allow-self-merit: false
+
+# ===================================
+# PlaceholderAPI Placeholders
+# ===================================
+# Requires PlaceholderAPI plugin to be installed.
+# Use these placeholders in any PAPI-compatible plugin (TAB, chat plugins, etc.)
+#
+# === RANK PLACEHOLDERS ===
+# %entrenched_rank%            - Full rank name (e.g., "Private First Class")
+# %entrenched_rank_tag%        - Rank abbreviation (e.g., "PFC")
+# %entrenched_rank_formatted%  - Colored tag with brackets (e.g., "§7[PFC]§r")
+# %entrenched_rank_color%      - Rank color code (e.g., "§7")
+#
+# === TOKEN/MERIT PLACEHOLDERS ===
+# %entrenched_tokens%          - Current spendable token balance
+# %entrenched_merits%          - Total received merits (determines rank)
+# %entrenched_merits_today%    - Merits received today
+# %entrenched_tokens_earned%   - Lifetime tokens earned
+# %entrenched_merits_given%    - Lifetime merits given to others
+# %entrenched_tokens_today%    - Tokens earned today
+# %entrenched_given_today%     - Merits given today
+#
+# === PROGRESSION PLACEHOLDERS ===
+# %entrenched_next_rank%       - Next rank name (or "Max Rank")
+# %entrenched_merits_to_next%  - Merits needed for next rank
+# %entrenched_progress%        - Progress to next rank as percentage (0-100)
+#
+# === STAT PLACEHOLDERS ===
+# %entrenched_kills%           - Lifetime kills
+# %entrenched_captures%        - Lifetime region captures
+# %entrenched_road_blocks%     - Lifetime road blocks placed
+# %entrenched_rounds%          - Rounds completed
+# %entrenched_playtime%        - Formatted playtime (e.g., "5d 12h")
+# %entrenched_playtime_hours%  - Playtime in hours
+# %entrenched_playtime_minutes%- Playtime in minutes
+# %entrenched_streak%          - Login streak in days
+#
+# === DIVISION PLACEHOLDERS ===
+# %entrenched_division%        - Division name (empty if none)
+# %entrenched_division_tag%    - Division tag (e.g., "1ST")
+# %entrenched_division_formatted% - Colored tag (e.g., "§c[1ST]§r")
+# %entrenched_division_name%   - Division name (same as division)
+# %entrenched_division_description% - Division description
+# %entrenched_division_team%   - Division's team (red/blue)
+# %entrenched_division_id%     - Division ID (internal)
+# %entrenched_division_role%   - Player's role (COMMANDER/OFFICER/MEMBER)
+# %entrenched_division_role_short% - Short role (CMD/OFF/MEM)
+# %entrenched_division_role_display% - Display role (Commander/Officer/Member)
+# %entrenched_division_members%- Member count in division
+#
+# === BOOLEAN PLACEHOLDERS ===
+# %entrenched_has_division%    - true/false if player has a division
+# %entrenched_is_commander%    - true/false if player is division commander
+# %entrenched_is_div_officer%  - true/false if player is division officer+
+# %entrenched_is_officer%      - true/false if player is military officer rank
+# %entrenched_is_general%      - true/false if player is general rank
+# %entrenched_is_nco%          - true/false if player is NCO rank
+# %entrenched_rank_level%      - Rank ordinal number (0-17)
+#
+# === PREFIX PLACEHOLDERS (for chat/tab) ===
+# %entrenched_prefix%          - Rank tag only (e.g., "§7[PFC]§r")
+# %entrenched_team_prefix%     - Rank + team color (e.g., "§7[PFC]§r §c")
+# %entrenched_division_prefix% - Division tag with team color (e.g., "§c[1ST]§r")
+# %entrenched_full_prefix%     - [DIV] [RANK] format (e.g., "§c[1ST] §7[PFC]§r ")
+# %entrenched_chat_prefix%     - Full chat prefix: [DIV] [RANK] with colors
+# %entrenched_name_prefix%     - For tab/nametag: [DIV] [RANK] TEAMCOLOR
+# %entrenched_chat_format%     - Dynamic chat format from config (see merit.chat section)
+#                                Uses config settings based on player's division/team status
+#                                Includes {message} placeholder for the chat message
+#
+# === EXAMPLE TAB PLUGIN CONFIG ===
+# tablist-name-format: "%entrenched_chat_prefix%%player%"
+#
+# === EXAMPLE CHAT FORMAT ===
+# format: "%entrenched_chat_prefix%&f%player%&7: &f%message%"
+#
+# === USING DYNAMIC CHAT FORMAT ===
+# The %entrenched_chat_format% placeholder uses the formats defined in merit.chat section
+# It automatically picks the right format based on player status:
+#   - Has division: uses merit.chat.with-division
+#   - No division but has team: uses merit.chat.without-division
+#   - No team: uses merit.chat.no-team
+# The format includes {message} which should be replaced with the actual chat message
+

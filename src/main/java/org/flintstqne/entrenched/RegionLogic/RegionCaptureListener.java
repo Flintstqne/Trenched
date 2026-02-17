@@ -140,7 +140,6 @@ public final class RegionCaptureListener implements Listener {
         if (regionId != null) {
             Optional<RegionStatus> statusOpt = regionService.getRegionStatus(regionId);
             if (statusOpt.isPresent() && !statusOpt.get().isOwnedBy(killerTeam)) {
-            if (statusOpt.isPresent() && !statusOpt.get().isOwnedBy(killerTeam)) {
                 double multiplier = regionService.getKillMultiplier(killer.getUniqueId(), victim.getUniqueId(), regionId);
                 int points = (int) (configManager.getRegionKillPoints() * multiplier);
                 String regionName = getRegionDisplayName(regionId);

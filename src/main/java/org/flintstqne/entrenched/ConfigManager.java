@@ -362,6 +362,180 @@ public final class ConfigManager {
         return config.getBoolean("debug.verbose", false);
     }
 
+    // ==================== Merit System Settings ====================
+
+    public boolean isMeritEnabled() {
+        return config.getBoolean("merit.enabled", true);
+    }
+
+    public boolean showRankNametag() {
+        return config.getBoolean("merit.show-rank-nametag", true);
+    }
+
+    public boolean showRankInChat() {
+        return config.getBoolean("merit.show-rank-in-chat", true);
+    }
+
+    public boolean broadcastMeritRecognition() {
+        return config.getBoolean("merit.broadcast-recognition", true);
+    }
+
+    public boolean broadcastPromotions() {
+        return config.getBoolean("merit.broadcast-promotions", true);
+    }
+
+    // Chat format settings
+    public String getChatFormatWithDivision() {
+        return config.getString("merit.chat.with-division", "{division} {rank} {team_color}{player}&7: &f{message}");
+    }
+
+    public String getChatFormatWithoutDivision() {
+        return config.getString("merit.chat.without-division", "{rank} {team_color}{player}&7: &f{message}");
+    }
+
+    public String getChatFormatNoTeam() {
+        return config.getString("merit.chat.no-team", "{rank} &7{player}&7: &f{message}");
+    }
+
+    // Merit token settings
+    public int getMeritKillsForTokenEnemyTerritory() {
+        return config.getInt("merit.tokens.kills-for-token-enemy-territory", 5);
+    }
+
+    public int getMeritKillsForTokenGeneral() {
+        return config.getInt("merit.tokens.kills-for-token-general", 10);
+    }
+
+    public int getMeritKillStreak5Tokens() {
+        return config.getInt("merit.tokens.kill-streak-5-tokens", 1);
+    }
+
+    public int getMeritKillStreak10Tokens() {
+        return config.getInt("merit.tokens.kill-streak-10-tokens", 2);
+    }
+
+    public int getMeritFirstBloodTokens() {
+        return config.getInt("merit.tokens.first-blood-tokens", 2);
+    }
+
+    public int getMeritShutdownTokens() {
+        return config.getInt("merit.tokens.shutdown-tokens", 1);
+    }
+
+    public int getMeritCaptureNeutralTokens() {
+        return config.getInt("merit.tokens.capture-neutral-tokens", 3);
+    }
+
+    public int getMeritCaptureEnemyTokens() {
+        return config.getInt("merit.tokens.capture-enemy-tokens", 5);
+    }
+
+    public int getMeritParticipationTokens() {
+        return config.getInt("merit.tokens.participation-tokens", 1);
+    }
+
+    public int getMeritMajorContributorTokens() {
+        return config.getInt("merit.tokens.major-contributor-tokens", 2);
+    }
+
+    public int getMeritDefendRegionTokens() {
+        return config.getInt("merit.tokens.defend-region-tokens", 2);
+    }
+
+    public int getMeritSupplyRouteTokens() {
+        return config.getInt("merit.tokens.supply-route-tokens", 2);
+    }
+
+    public int getMeritRegionSuppliedTokens() {
+        return config.getInt("merit.tokens.region-supplied-tokens", 1);
+    }
+
+    public int getMeritRoadBlocksPerToken() {
+        return config.getInt("merit.tokens.road-blocks-per-token", 100);
+    }
+
+    public int getMeritDisruptSupplyTokens() {
+        return config.getInt("merit.tokens.disrupt-supply-tokens", 1);
+    }
+
+    public int getMeritMajorSabotageTokens() {
+        return config.getInt("merit.tokens.major-sabotage-tokens", 2);
+    }
+
+    public int getMeritDailyLoginTokens() {
+        return config.getInt("merit.tokens.daily-login-tokens", 1);
+    }
+
+    public int getMeritLoginStreak7Tokens() {
+        return config.getInt("merit.tokens.login-streak-7-tokens", 2);
+    }
+
+    public int getMeritLoginStreak30Tokens() {
+        return config.getInt("merit.tokens.login-streak-30-tokens", 5);
+    }
+
+    public int getMeritRoundCompletionTokens() {
+        return config.getInt("merit.tokens.round-completion-tokens", 1);
+    }
+
+    public int getMeritActivePlaytimeMinutes() {
+        return config.getInt("merit.tokens.active-playtime-minutes", 120);
+    }
+
+    // Anti-farming settings
+    public int getMeritKillCooldownMinutes() {
+        return config.getInt("merit.anti-farm.kill-cooldown-minutes", 5);
+    }
+
+    public int getMeritSamePlayerDailyLimit() {
+        return config.getInt("merit.anti-farm.same-player-daily-limit", 3);
+    }
+
+    public int getMeritDailyReceiveLimit() {
+        return config.getInt("merit.anti-farm.daily-receive-limit", 10);
+    }
+
+    public int getMeritCrossTeamDailyLimit() {
+        return config.getInt("merit.anti-farm.cross-team-daily-limit", 2);
+    }
+
+    public int getMeritGiverPlaytimeRequired() {
+        return config.getInt("merit.anti-farm.giver-playtime-required", 120);
+    }
+
+    public int getMeritReceiverPlaytimeRequired() {
+        return config.getInt("merit.anti-farm.receiver-playtime-required", 60);
+    }
+
+    public int getMeritInteractionRequirementMinutes() {
+        return config.getInt("merit.anti-farm.interaction-requirement-minutes", 30);
+    }
+
+    public int getMeritDailyGiveLimit() {
+        return config.getInt("merit.anti-farm.daily-give-limit", 5);
+    }
+
+    // Debug settings
+    public boolean isMeritVerbose() {
+        return config.getBoolean("merit.debug.verbose", false);
+    }
+
+    public boolean skipMeritAntiFarm() {
+        return config.getBoolean("merit.debug.skip-anti-farm", false);
+    }
+
+    public double getMeritTokenMultiplier() {
+        return config.getDouble("merit.debug.token-multiplier", 1.0);
+    }
+
+    public boolean skipMeritPlaytimeRequirements() {
+        return config.getBoolean("merit.debug.skip-playtime-requirements", false);
+    }
+
+    public boolean allowSelfMerit() {
+        return config.getBoolean("merit.debug.allow-self-merit", false);
+    }
+
     // ==================== Utility Methods ====================
 
     private String translateColors(String text) {

@@ -3,6 +3,7 @@ version: '1'
 main: org.flintstqne.entrenched.Trenched
 api-version: '1.21'
 depend: [BlueMap, InventoryFramework]
+softdepend: [PlaceholderAPI]
 commands:
   team:
     description: Team commands
@@ -55,6 +56,17 @@ commands:
     description: Admin commands for server management
     usage: /admin <round|phase|region|team|player|supply|reload|status>
     permission: entrenched.admin
+  merit:
+    description: Give a merit token to another player to recognize their efforts
+    usage: /merit <player> [reason]
+    aliases: [recognize]
+  merits:
+    description: View merit stats for yourself or another player
+    usage: /merits [player]
+    aliases: [meritstats]
+  ranks:
+    description: View all military ranks and merit requirements
+    usage: /ranks
 
 permissions:
   entrenched.admin:

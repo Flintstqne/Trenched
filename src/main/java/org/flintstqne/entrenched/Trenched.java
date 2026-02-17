@@ -11,6 +11,7 @@ import org.flintstqne.entrenched.BlueMapHook.BlueMapIntegration;
 import org.flintstqne.entrenched.ChatLogic.ChatChannelManager;
 import org.flintstqne.entrenched.ChatLogic.ChatCommand;
 import org.flintstqne.entrenched.DivisionLogic.*;
+import org.flintstqne.entrenched.MeritLogic.*;
 import org.flintstqne.entrenched.PartyLogic.*;
 import org.flintstqne.entrenched.RegionLogic.*;
 import org.flintstqne.entrenched.RoadLogic.*;
@@ -22,6 +23,7 @@ import org.flintstqne.entrenched.RoundLogic.NewRoundInitializer;
 import org.flintstqne.entrenched.RoundLogic.PhaseScheduler;
 import org.flintstqne.entrenched.TeamLogic.*;
 import org.flintstqne.entrenched.Utils.ChatUtil;
+import org.flintstqne.entrenched.Utils.PlaceholderExpansion;
 import org.flintstqne.entrenched.Utils.ScoreboardUtil;
 
 import java.util.Objects;
@@ -55,6 +57,9 @@ public final class Trenched extends JavaPlugin {
     private RoadListener roadListener;
     private DeathListener deathListener;
     private SupplyPenaltyListener supplyPenaltyListener;
+    private MeritDb meritDb;
+    private MeritService meritService;
+    private MeritListener meritListener;
 
     @Override
     public void onEnable() {
@@ -165,6 +170,28 @@ public final class Trenched extends JavaPlugin {
         });
         getLogger().info("[TerrainGen] Road/supply line system initialized");
 
+        // Initialize Merit System
+        meritDb = new MeritDb(this);
+        meritService = new SqlMeritService(meritDb, configManager);
+        meritListener = new MeritListener(this, meritService, teamService, regionService, roundService, configManager);
+
+        // Initialize nametag manager for rank display above heads
+        MeritNametagManager nametagManager = new MeritNametagManager(this, meritService, teamService, configManager);
+        nametagManager.start();
+        meritListener.setNametagManager(nametagManager);
+
+        // Connect scoreboard to merit service for rank/token display
+        scoreboardUtil.setMeritService(meritService);
+        getLogger().info("[TerrainGen] Merit system initialized");
+
+        // Register PlaceholderAPI expansion if available
+        if (Bukkit.getPluginManager().getPlugin("PlaceholderAPI") != null) {
+            new org.flintstqne.entrenched.Utils.PlaceholderExpansion(meritService, teamService, divisionService, configManager).register();
+            getLogger().info("[TerrainGen] PlaceholderAPI expansion registered");
+        } else {
+            getLogger().info("[TerrainGen] PlaceholderAPI not found - placeholders not available");
+        }
+
         // Recalculate supply for both teams on startup to ensure correct values
         // This is especially important after server restarts when road data persists
         Bukkit.getScheduler().runTaskLaterAsynchronously(this, () -> {
@@ -241,11 +268,25 @@ public final class Trenched extends JavaPlugin {
         adminCmd.setExecutor(adminCommand);
         adminCmd.setTabCompleter(adminCommand);
 
+        // Merit commands
+        MeritCommand meritCommand = new MeritCommand(meritService, teamService, configManager);
+        var meritCmd = Objects.requireNonNull(getCommand("merit"), "Command `merit` missing from plugin.yml");
+        meritCmd.setExecutor(meritCommand);
+        meritCmd.setTabCompleter(meritCommand);
+
+        var meritsCmd = Objects.requireNonNull(getCommand("merits"), "Command `merits` missing from plugin.yml");
+        meritsCmd.setExecutor(meritCommand);
+        meritsCmd.setTabCompleter(meritCommand);
+
+        var ranksCmd = Objects.requireNonNull(getCommand("ranks"), "Command `ranks` missing from plugin.yml");
+        ranksCmd.setExecutor(meritCommand);
+
 
         // Events registration
         getServer().getPluginManager().registerEvents(new TeamListener(teamService, scoreboardUtil, this), this);
-        getServer().getPluginManager().registerEvents(new ChatUtil(teamService, divisionService, partyService, chatChannelManager, regionRenderer), this);
+        getServer().getPluginManager().registerEvents(new ChatUtil(teamService, divisionService, partyService, chatChannelManager, regionRenderer, configManager, meritService), this);
         getServer().getPluginManager().registerEvents(regionCaptureListener, this);
+        getServer().getPluginManager().registerEvents(meritListener, this);
         getServer().getPluginManager().registerEvents(roadListener, this);
         getServer().getPluginManager().registerEvents(deathListener, this);
         getServer().getPluginManager().registerEvents(supplyPenaltyListener, this);

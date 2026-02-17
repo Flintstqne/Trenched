@@ -710,3 +710,130 @@ The Merit System provides:
 
 This creates a long-term progression system that complements the round-based warfare gameplay!
 
+---
+
+## PlaceholderAPI Integration
+
+The merit system integrates with **PlaceholderAPI** to provide placeholders for use with any plugin that supports PAPI (tab plugins, chat formatters, scoreboards, etc.).
+
+### Available Placeholders
+
+#### Rank Information
+| Placeholder | Description | Example |
+|-------------|-------------|---------|
+| `%entrenched_rank%` | Full rank name | `Private First Class` |
+| `%entrenched_rank_tag%` | Rank abbreviation | `PFC` |
+| `%entrenched_rank_formatted%` | Colored tag with brackets | `§7[PFC]§r` |
+| `%entrenched_rank_color%` | Rank color code | `§7` |
+
+#### Token & Merit Counts
+| Placeholder | Description | Example |
+|-------------|-------------|---------|
+| `%entrenched_tokens%` | Current token balance | `15` |
+| `%entrenched_merits%` | Total received merits | `127` |
+| `%entrenched_merits_today%` | Merits received today | `3` |
+| `%entrenched_tokens_earned%` | Lifetime tokens earned | `256` |
+| `%entrenched_merits_given%` | Lifetime merits given | `89` |
+
+#### Progression
+| Placeholder | Description | Example |
+|-------------|-------------|---------|
+| `%entrenched_next_rank%` | Next rank name | `Corporal` |
+| `%entrenched_merits_to_next%` | Merits needed for next rank | `23` |
+| `%entrenched_progress%` | Progress to next rank (%) | `54` |
+
+#### Lifetime Stats
+| Placeholder | Description | Example |
+|-------------|-------------|---------|
+| `%entrenched_kills%` | Total kills | `432` |
+| `%entrenched_captures%` | Regions captured | `15` |
+| `%entrenched_road_blocks%` | Road blocks placed | `1250` |
+| `%entrenched_rounds%` | Rounds completed | `12` |
+| `%entrenched_playtime%` | Formatted playtime | `5d 12h` |
+| `%entrenched_playtime_hours%` | Playtime in hours | `132` |
+| `%entrenched_streak%` | Login streak in days | `7` |
+
+#### Division Information
+| Placeholder | Description | Example |
+|-------------|-------------|---------|
+| `%entrenched_division%` | Division name | `1st Infantry` |
+| `%entrenched_division_tag%` | Division tag | `1ST` |
+| `%entrenched_division_formatted%` | Colored tag with brackets | `§c[1ST]§r` |
+| `%entrenched_division_name%` | Division name (same as division) | `1st Infantry` |
+| `%entrenched_division_description%` | Division description | `Elite combat unit` |
+| `%entrenched_division_team%` | Division's team | `red` |
+| `%entrenched_division_id%` | Division ID (internal) | `5` |
+| `%entrenched_division_role%` | Player's role | `COMMANDER` |
+| `%entrenched_division_role_short%` | Short role | `CMD` |
+| `%entrenched_division_role_display%` | Display role | `Commander` |
+| `%entrenched_division_members%` | Member count | `12` |
+| `%entrenched_has_division%` | Has a division? | `true/false` |
+| `%entrenched_is_commander%` | Is division commander? | `true/false` |
+| `%entrenched_is_div_officer%` | Is division officer+? | `true/false` |
+
+#### Prefixes (for chat/tab plugins)
+| Placeholder | Description | Example |
+|-------------|-------------|---------|
+| `%entrenched_prefix%` | Rank tag only | `§7[PFC]§r` |
+| `%entrenched_team_prefix%` | Rank + team color | `§7[PFC]§r §c` |
+| `%entrenched_division_prefix%` | Division tag with team color | `§c[1ST]§r` |
+| `%entrenched_full_prefix%` | [DIV] [RANK] format | `§c[1ST] §7[PFC]§r ` |
+| `%entrenched_chat_prefix%` | Full chat prefix: [DIV] [RANK] | `§c[1ST]§r §7[PFC]§r ` |
+| `%entrenched_name_prefix%` | For tab/nametag: [DIV] [RANK] TEAMCOLOR | `§c[1ST] §7[PFC]§r §c` |
+| `%entrenched_chat_format%` | Dynamic format from config with {message} | See below |
+
+### Configurable Chat Format
+
+The `%entrenched_chat_format%` placeholder uses formats defined in `config.yml` under `merit.chat`:
+
+```yaml
+merit:
+  chat:
+    # Format for players with a division
+    with-division: "{division} {rank} {team_color}{player}&7: &f{message}"
+    
+    # Format for players without a division  
+    without-division: "{rank} {team_color}{player}&7: &f{message}"
+    
+    # Format for players with no team
+    no-team: "{rank} &7{player}&7: &f{message}"
+```
+
+#### Available Format Placeholders:
+| Placeholder | Description |
+|-------------|-------------|
+| `{rank}` | Formatted rank tag with color (e.g., `§7[PFC]§r`) |
+| `{rank_name}` | Full rank name (e.g., `Private First Class`) |
+| `{rank_tag}` | Rank abbreviation only (e.g., `PFC`) |
+| `{division}` | Formatted division tag with team color (e.g., `§c[1ST]§r`) |
+| `{division_name}` | Division name (e.g., `1st Infantry`) |
+| `{division_tag}` | Division tag only (e.g., `1ST`) |
+| `{team_color}` | Team color code (`§c` for red, `§9` for blue) |
+| `{player}` | Player name |
+| `{message}` | Chat message |
+
+Color codes use `&` prefix (e.g., `&c` = red, `&f` = white, `&7` = gray).
+
+#### Boolean Checks
+| Placeholder | Description | Example |
+|-------------|-------------|---------|
+| `%entrenched_is_officer%` | Is player an officer? | `true/false` |
+| `%entrenched_is_general%` | Is player a general? | `true/false` |
+| `%entrenched_is_nco%` | Is player an NCO? | `true/false` |
+| `%entrenched_rank_level%` | Rank ordinal (0-18) | `5` |
+
+### Example: TAB Plugin Format
+
+```yaml
+# TAB plugin config example
+tablist-name-format: "%entrenched_rank_formatted% %player%"
+chat-format: "%entrenched_team_prefix%%player%&7: &f%message%"
+```
+
+### Example: LuckPerms Chat Meta
+
+```
+/lp group default meta addprefix 1 "%entrenched_prefix% "
+```
+
+

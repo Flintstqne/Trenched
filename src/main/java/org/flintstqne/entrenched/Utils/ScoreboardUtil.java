@@ -9,6 +9,9 @@ import org.bukkit.scheduler.BukkitTask;
 import org.bukkit.scoreboard.*;
 import org.flintstqne.entrenched.BlueMapHook.RegionRenderer;
 import org.flintstqne.entrenched.ConfigManager;
+import org.flintstqne.entrenched.MeritLogic.MeritRank;
+import org.flintstqne.entrenched.MeritLogic.MeritService;
+import org.flintstqne.entrenched.MeritLogic.PlayerMeritData;
 import org.flintstqne.entrenched.RegionLogic.RegionService;
 import org.flintstqne.entrenched.RegionLogic.RegionState;
 import org.flintstqne.entrenched.RegionLogic.RegionStatus;
@@ -30,6 +33,7 @@ public class ScoreboardUtil {
     private final RegionService regionService;
     private final ConfigManager configManager;
     private RoadService roadService; // May be set after construction
+    private MeritService meritService; // May be set after construction
 
     private BukkitTask updateTask;
 
@@ -49,6 +53,14 @@ public class ScoreboardUtil {
      */
     public void setRoadService(RoadService roadService) {
         this.roadService = roadService;
+    }
+
+    /**
+     * Sets the MeritService for rank/token display.
+     * Called after MeritService is initialized.
+     */
+    public void setMeritService(MeritService meritService) {
+        this.meritService = meritService;
     }
 
     /**
@@ -147,6 +159,34 @@ public class ScoreboardUtil {
         Score teamLine = objective.getScore(ChatColor.WHITE + "" + ChatColor.BOLD + "Team: " + teamColor + teamDisplay);
         teamLine.setScore(scoreIndex--);
 
+        // Line: Merit Rank (if MeritService available)
+        if (meritService != null) {
+            Optional<PlayerMeritData> meritData = meritService.getPlayerData(player.getUniqueId());
+            if (meritData.isPresent()) {
+                PlayerMeritData data = meritData.get();
+                MeritRank rank = data.getRank();
+
+                // Rank line
+                Score rankLine = objective.getScore(ChatColor.GRAY + "Rank: " + rank.getFormattedTag() + " " + ChatColor.GRAY + rank.getDisplayName());
+                rankLine.setScore(scoreIndex--);
+
+                // Tokens available
+                Score tokenLine = objective.getScore(ChatColor.GRAY + "Tokens: " + ChatColor.AQUA + data.tokenBalance() + ChatColor.DARK_GRAY + " available");
+                tokenLine.setScore(scoreIndex--);
+
+                // Progress to next rank
+                MeritRank nextRank = rank.getNextRank();
+                if (nextRank != null) {
+                    int toNext = data.getMeritsToNextRank();
+                    Score progressLine = objective.getScore(ChatColor.DARK_GRAY + "Next: " + toNext + " merits → " + nextRank.getTag());
+                    progressLine.setScore(scoreIndex--);
+                }
+            }
+        }
+
+        Score separator2 = objective.getScore(ChatColor.DARK_GRAY + "- - - - - - - - -");
+        separator2.setScore(scoreIndex--);
+
         // Line: Region Name
         Score regionLine = objective.getScore(ChatColor.WHITE + "" + ChatColor.BOLD + "Region: " + ChatColor.GRAY + regionName);
         regionLine.setScore(scoreIndex--);
@@ -154,8 +194,7 @@ public class ScoreboardUtil {
         // === Region Status Section ===
         if (regionStatus != null) {
             // Separator
-            Score separator2 = objective.getScore(ChatColor.DARK_GRAY + "- - - - - - - - -");
-            separator2.setScore(scoreIndex--);
+
 
             // Region Owner
             String ownerDisplay;
