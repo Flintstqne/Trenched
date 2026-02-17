@@ -37,7 +37,7 @@ public enum MeritTokenSource {
     LOGIN_STREAK_7("7-Day Login Streak", "time", 1),
     LOGIN_STREAK_30("30-Day Login Streak", "time", 1),
     ROUND_COMPLETION("Round Completion", "time", 1),
-    ACTIVE_PLAYTIME("Active Playtime", "time", 1),  // Per 2 hours
+    ACTIVE_PLAYTIME("Active Playtime", "time", 120),  // Per 2 hours (120 minutes)
 
     // Achievement (one-time unlocks)
     ACHIEVEMENT("Achievement", "achievement", 1);

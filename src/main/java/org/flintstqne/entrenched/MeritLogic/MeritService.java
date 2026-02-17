@@ -2,6 +2,7 @@ package org.flintstqne.entrenched.MeritLogic;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -169,6 +170,24 @@ public interface MeritService {
      * Gets top players by received merits.
      */
     List<PlayerMeritData> getLeaderboard(int limit);
+
+    // ==================== ACHIEVEMENTS ====================
+
+    /**
+     * Gets all achievements unlocked by a player.
+     */
+    Set<Achievement> getUnlockedAchievements(UUID uuid);
+
+    /**
+     * Checks if a player has unlocked a specific achievement.
+     */
+    boolean hasAchievement(UUID uuid, Achievement achievement);
+
+    /**
+     * Awards an achievement to a player (if not already unlocked).
+     * Returns the token reward if newly unlocked, 0 if already had.
+     */
+    int awardAchievement(UUID uuid, Achievement achievement);
 
     // ==================== ADMIN ====================
 

@@ -70,8 +70,16 @@ public class MeritListener implements Listener {
         Player player = event.getPlayer();
         UUID uuid = player.getUniqueId();
 
+        // Check if first-ever login (before creating data)
+        boolean isFirstLogin = meritService.getPlayerData(uuid).isEmpty();
+
         // Ensure player data exists
         meritService.getOrCreatePlayerData(uuid);
+
+        // Award first login achievement if applicable
+        if (isFirstLogin && meritService instanceof SqlMeritService sqlMeritService) {
+            sqlMeritService.checkFirstLoginAchievement(uuid);
+        }
 
         // Track session start
         sessionStartTimes.put(uuid, System.currentTimeMillis());

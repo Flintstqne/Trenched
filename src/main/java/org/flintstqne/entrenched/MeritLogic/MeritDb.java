@@ -117,10 +117,21 @@ public class MeritDb {
                 )
             """);
 
+            // Player achievements
+            stmt.execute("""
+                CREATE TABLE IF NOT EXISTS player_achievements (
+                    uuid TEXT NOT NULL,
+                    achievement TEXT NOT NULL,
+                    unlocked_at INTEGER DEFAULT (strftime('%s', 'now') * 1000),
+                    PRIMARY KEY (uuid, achievement)
+                )
+            """);
+
             // Create indexes
             stmt.execute("CREATE INDEX IF NOT EXISTS idx_merit_log_uuid ON merit_log(uuid)");
             stmt.execute("CREATE INDEX IF NOT EXISTS idx_merit_log_timestamp ON merit_log(timestamp)");
             stmt.execute("CREATE INDEX IF NOT EXISTS idx_interactions_players ON player_interactions(player1_uuid, player2_uuid)");
+            stmt.execute("CREATE INDEX IF NOT EXISTS idx_achievements_uuid ON player_achievements(uuid)");
 
             logger.info("[MeritDb] Database tables created/verified");
         } catch (SQLException e) {
@@ -303,6 +314,88 @@ public class MeritDb {
 
         // Log giving
         logTransaction(giver, "GIVE_MERIT", amount, "peer", reason, receiver.toString(), roundId);
+    }
+
+    /**
+     * Sets a player's received merits to a specific value.
+     */
+    public void setReceivedMerits(UUID uuid, int amount) {
+        try (PreparedStatement ps = connection.prepareStatement("""
+            UPDATE player_merits SET received_merits = ? WHERE uuid = ?
+        """)) {
+            ps.setInt(1, amount);
+            ps.setString(2, uuid.toString());
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            logger.warning("[MeritDb] Failed to set received merits: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Sets a player's token balance to a specific value.
+     */
+    public void setTokenBalance(UUID uuid, int amount) {
+        try (PreparedStatement ps = connection.prepareStatement("""
+            UPDATE player_merits SET token_balance = ? WHERE uuid = ?
+        """)) {
+            ps.setInt(1, amount);
+            ps.setString(2, uuid.toString());
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            logger.warning("[MeritDb] Failed to set token balance: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Completely resets a player's merit data.
+     */
+    public void resetPlayerData(UUID uuid) {
+        try (PreparedStatement ps = connection.prepareStatement("""
+            UPDATE player_merits SET
+                token_balance = 0,
+                tokens_earned_today = 0,
+                received_merits = 0,
+                received_today = 0,
+                merits_given_today = 0,
+                lifetime_tokens_earned = 0,
+                lifetime_merits_given = 0,
+                lifetime_merits_received = 0,
+                lifetime_kills = 0,
+                lifetime_captures = 0,
+                lifetime_road_blocks = 0,
+                rounds_completed = 0,
+                playtime_minutes = 0,
+                login_streak = 0
+            WHERE uuid = ?
+        """)) {
+            ps.setString(1, uuid.toString());
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            logger.warning("[MeritDb] Failed to reset player data: " + e.getMessage());
+        }
+
+        // Also clear achievements
+        try (PreparedStatement ps = connection.prepareStatement("""
+            DELETE FROM player_achievements WHERE uuid = ?
+        """)) {
+            ps.setString(1, uuid.toString());
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            logger.warning("[MeritDb] Failed to clear achievements: " + e.getMessage());
+        }
+
+        // Clear progress
+        try (PreparedStatement ps = connection.prepareStatement("""
+            DELETE FROM merit_progress WHERE uuid = ?
+        """)) {
+            ps.setString(1, uuid.toString());
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            logger.warning("[MeritDb] Failed to clear progress: " + e.getMessage());
+        }
+
+        // Log the reset
+        logTransaction(uuid, "ADMIN_RESET", 0, "admin", "Merit data reset", null, null);
     }
 
     // ==================== PROGRESS TRACKING (BATCHED) ====================
@@ -645,6 +738,84 @@ public class MeritDb {
             logger.warning("[MeritDb] Failed to check interaction: " + e.getMessage());
             return false;
         }
+    }
+
+    // ==================== ACHIEVEMENTS ====================
+
+    /**
+     * Gets all achievements unlocked by a player.
+     */
+    public Set<Achievement> getUnlockedAchievements(UUID uuid) {
+        Set<Achievement> achievements = new HashSet<>();
+
+        try (PreparedStatement ps = connection.prepareStatement("""
+            SELECT achievement FROM player_achievements WHERE uuid = ?
+        """)) {
+            ps.setString(1, uuid.toString());
+            ResultSet rs = ps.executeQuery();
+
+            while (rs.next()) {
+                try {
+                    achievements.add(Achievement.valueOf(rs.getString("achievement")));
+                } catch (IllegalArgumentException ignored) {
+                    // Achievement no longer exists
+                }
+            }
+        } catch (SQLException e) {
+            logger.warning("[MeritDb] Failed to get achievements: " + e.getMessage());
+        }
+
+        return achievements;
+    }
+
+    /**
+     * Checks if a player has a specific achievement.
+     */
+    public boolean hasAchievement(UUID uuid, Achievement achievement) {
+        try (PreparedStatement ps = connection.prepareStatement("""
+            SELECT 1 FROM player_achievements WHERE uuid = ? AND achievement = ?
+        """)) {
+            ps.setString(1, uuid.toString());
+            ps.setString(2, achievement.name());
+            return ps.executeQuery().next();
+        } catch (SQLException e) {
+            logger.warning("[MeritDb] Failed to check achievement: " + e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Unlocks an achievement for a player.
+     */
+    public void unlockAchievement(UUID uuid, Achievement achievement) {
+        try (PreparedStatement ps = connection.prepareStatement("""
+            INSERT OR IGNORE INTO player_achievements (uuid, achievement) VALUES (?, ?)
+        """)) {
+            ps.setString(1, uuid.toString());
+            ps.setString(2, achievement.name());
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            logger.warning("[MeritDb] Failed to unlock achievement: " + e.getMessage());
+        }
+    }
+
+
+    /**
+     * Gets the count of achievements unlocked by a player.
+     */
+    public int getAchievementCount(UUID uuid) {
+        try (PreparedStatement ps = connection.prepareStatement("""
+            SELECT COUNT(*) FROM player_achievements WHERE uuid = ?
+        """)) {
+            ps.setString(1, uuid.toString());
+            ResultSet rs = ps.executeQuery();
+            if (rs.next()) {
+                return rs.getInt(1);
+            }
+        } catch (SQLException e) {
+            logger.warning("[MeritDb] Failed to count achievements: " + e.getMessage());
+        }
+        return 0;
     }
 
     public void close() {

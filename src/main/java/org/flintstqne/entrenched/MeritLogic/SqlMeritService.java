@@ -150,6 +150,9 @@ public class SqlMeritService implements MeritService {
             logDebug("Awarded " + tokensEarned + " tokens to " + killer + " for kill");
         }
 
+        // Check kill achievements
+        checkKillAchievements(killer);
+
         return tokensEarned;
     }
 
@@ -186,6 +189,9 @@ public class SqlMeritService implements MeritService {
             notifyTokenEarned(uuid, totalTokens, "Region capture");
         }
 
+        // Check capture achievements
+        checkCaptureAchievements(uuid, isTopContributor);
+
         return totalTokens;
     }
 
@@ -195,6 +201,10 @@ public class SqlMeritService implements MeritService {
         db.addTokens(uuid, tokens, MeritTokenSource.DEFEND_REGION, "Region defended", roundId);
         invalidateCache(uuid);
         notifyTokenEarned(uuid, tokens, "Region defense");
+
+        // Check defense achievements
+        checkDefenseAchievements(uuid);
+
         return tokens;
     }
 
@@ -212,6 +222,9 @@ public class SqlMeritService implements MeritService {
             notifyTokenEarned(uuid, tokensEarned, "Road milestone");
         }
 
+        // Check road achievements
+        checkRoadAchievements(uuid);
+
         return tokensEarned;
     }
 
@@ -221,6 +234,10 @@ public class SqlMeritService implements MeritService {
         db.addTokens(uuid, tokens, MeritTokenSource.COMPLETE_SUPPLY_ROUTE, "Supply route completed", roundId);
         invalidateCache(uuid);
         notifyTokenEarned(uuid, tokens, "Supply route");
+
+        // Check supply achievements
+        checkSupplyAchievements(uuid, false, false);
+
         return tokens;
     }
 
@@ -230,6 +247,10 @@ public class SqlMeritService implements MeritService {
         db.addTokens(uuid, tokens, MeritTokenSource.ESTABLISH_SUPPLY, "Region supplied", roundId);
         invalidateCache(uuid);
         notifyTokenEarned(uuid, tokens, "Supply established");
+
+        // Check supply achievements
+        checkSupplyAchievements(uuid, true, false);
+
         return tokens;
     }
 
@@ -249,6 +270,9 @@ public class SqlMeritService implements MeritService {
         db.addTokens(uuid, tokens, source, "Supply disrupted (" + regionsAffected + " regions)", roundId);
         invalidateCache(uuid);
         notifyTokenEarned(uuid, tokens, "Supply disruption");
+
+        // Check sabotage achievements
+        checkSupplyAchievements(uuid, false, regionsAffected >= 3);
         return tokens;
     }
 
@@ -282,6 +306,9 @@ public class SqlMeritService implements MeritService {
             db.addTokens(uuid, tokens, source, streakCount + " kill streak", roundId);
             invalidateCache(uuid);
             notifyTokenEarned(uuid, tokens, streakCount + " kill streak");
+
+            // Check streak achievements
+            checkStreakAchievements(uuid, streakCount);
         }
 
         return tokens;
@@ -293,6 +320,10 @@ public class SqlMeritService implements MeritService {
         db.addTokens(uuid, tokens, MeritTokenSource.SHUTDOWN, "Shutdown enemy streak", roundId);
         invalidateCache(uuid);
         notifyTokenEarned(uuid, tokens, "Shutdown");
+
+        // Check shutdown achievement
+        checkShutdownAchievement(uuid);
+
         return tokens;
     }
 
@@ -339,6 +370,9 @@ public class SqlMeritService implements MeritService {
             notifyTokenEarned(uuid, tokens, "Daily login" + (streak > 1 ? " (" + streak + "-day streak)" : ""));
         }
 
+        // Check login streak achievements
+        checkLoginStreakAchievements(uuid);
+
         return tokens;
     }
 
@@ -369,6 +403,9 @@ public class SqlMeritService implements MeritService {
             invalidateCache(uuid);
             notifyTokenEarned(uuid, tokensEarned, "Playtime milestone");
         }
+
+        // Check playtime achievements
+        checkPlaytimeAchievements(uuid);
 
         return tokensEarned;
     }
@@ -464,6 +501,9 @@ public class SqlMeritService implements MeritService {
         // Check for rank up
         checkRankUp(receiver);
 
+        // Check merit giving/receiving achievements
+        checkMeritGivingAchievements(giver, receiver);
+
         return GiveResult.SUCCESS;
     }
 
@@ -490,6 +530,48 @@ public class SqlMeritService implements MeritService {
         return db.getTopByReceivedMerits(limit);
     }
 
+    // ==================== ACHIEVEMENTS ====================
+
+    @Override
+    public Set<Achievement> getUnlockedAchievements(UUID uuid) {
+        return db.getUnlockedAchievements(uuid);
+    }
+
+    @Override
+    public boolean hasAchievement(UUID uuid, Achievement achievement) {
+        return db.hasAchievement(uuid, achievement);
+    }
+
+    @Override
+    public int awardAchievement(UUID uuid, Achievement achievement) {
+        if (db.hasAchievement(uuid, achievement)) {
+            return 0; // Already unlocked
+        }
+
+        // Unlock the achievement
+        db.unlockAchievement(uuid, achievement);
+
+        // Award tokens
+        int tokens = achievement.getTokenReward();
+        db.addTokens(uuid, tokens, MeritTokenSource.ACHIEVEMENT, "Achievement: " + achievement.getDisplayName(), null);
+        invalidateCache(uuid);
+
+        // Notify player
+        Player player = Bukkit.getPlayer(uuid);
+        if (player != null && player.isOnline()) {
+            player.sendMessage("");
+            player.sendMessage(ChatColor.GOLD + "★ " + ChatColor.YELLOW + "Achievement Unlocked! " + ChatColor.GOLD + "★");
+            player.sendMessage(achievement.getColor() + achievement.getDisplayName() + ChatColor.GRAY + " - " + achievement.getDescription());
+            player.sendMessage(ChatColor.GOLD + "+" + tokens + " Merit Tokens");
+            player.sendMessage("");
+
+            // Play sound
+            player.playSound(player.getLocation(), org.bukkit.Sound.UI_TOAST_CHALLENGE_COMPLETE, 1.0f, 1.0f);
+        }
+
+        return tokens;
+    }
+
     // ==================== ADMIN ====================
 
     @Override
@@ -509,17 +591,33 @@ public class SqlMeritService implements MeritService {
 
     @Override
     public void adminSetMerits(UUID uuid, int amount) {
-        // This would need a specific DB method - for now, use the simple approach
         getOrCreatePlayerData(uuid);
-        // Would need to add a setReceivedMerits method to DB
-        logger.warning("[MeritService] adminSetMerits not fully implemented");
+        db.setReceivedMerits(uuid, amount);
+        invalidateCache(uuid);
+
+        // Notify player if online
+        Player player = Bukkit.getPlayer(uuid);
+        if (player != null && player.isOnline()) {
+            MeritRank newRank = MeritRank.getRankForMerits(amount);
+            player.sendMessage(ChatColor.GOLD + "Your merits have been set to " + amount +
+                    " by an admin. Rank: " + newRank.getFormattedTag());
+        }
     }
 
     @Override
     public void adminReset(UUID uuid) {
-        // Would need a reset method in DB
-        logger.warning("[MeritService] adminReset not fully implemented");
+        db.resetPlayerData(uuid);
+        invalidateCache(uuid);
+
+        // Notify player if online
+        Player player = Bukkit.getPlayer(uuid);
+        if (player != null && player.isOnline()) {
+            player.sendMessage(ChatColor.YELLOW + "Your merit data has been reset by an admin.");
+        }
+
+        logger.info("[MeritService] Reset merit data for " + uuid);
     }
+
 
     // ==================== NOTIFICATIONS ====================
 
@@ -573,9 +671,190 @@ public class SqlMeritService implements MeritService {
                 String name = player != null ? player.getName() : uuid.toString();
                 Bukkit.broadcastMessage(ChatColor.GOLD + "★ " + ChatColor.WHITE + name +
                         ChatColor.GOLD + " has been promoted to " + r.getFormattedTag() + " " + r.getDisplayName() + "!");
+
+                // Award rank achievement
+                checkRankAchievements(uuid, r);
                 break;
             }
         }
+    }
+
+    // ==================== ACHIEVEMENT CHECKING ====================
+
+    private void checkKillAchievements(UUID uuid) {
+        PlayerMeritData data = getOrCreatePlayerData(uuid);
+        int kills = data.lifetimeKills();
+
+        // First kill
+        if (kills >= 1) {
+            awardAchievement(uuid, Achievement.FIRST_KILL);
+        }
+        if (kills >= 10) {
+            awardAchievement(uuid, Achievement.KILL_10);
+        }
+        if (kills >= 50) {
+            awardAchievement(uuid, Achievement.KILL_50);
+        }
+        if (kills >= 100) {
+            awardAchievement(uuid, Achievement.KILL_100);
+        }
+        if (kills >= 500) {
+            awardAchievement(uuid, Achievement.KILL_500);
+        }
+    }
+
+    /**
+     * Called when a player gets a kill streak.
+     */
+    public void checkStreakAchievements(UUID uuid, int streak) {
+        if (streak >= 5) {
+            awardAchievement(uuid, Achievement.STREAK_5);
+        }
+        if (streak >= 10) {
+            awardAchievement(uuid, Achievement.STREAK_10);
+        }
+        if (streak >= 15) {
+            awardAchievement(uuid, Achievement.STREAK_15);
+        }
+    }
+
+    /**
+     * Called when a player shuts down an enemy streak.
+     */
+    public void checkShutdownAchievement(UUID uuid) {
+        awardAchievement(uuid, Achievement.SHUTDOWN_STREAK);
+    }
+
+    private void checkCaptureAchievements(UUID uuid, boolean wasTopContributor) {
+        PlayerMeritData data = getOrCreatePlayerData(uuid);
+        int captures = data.lifetimeCaptures();
+
+        if (captures >= 1) {
+            awardAchievement(uuid, Achievement.FIRST_CAPTURE);
+        }
+        if (captures >= 5) {
+            awardAchievement(uuid, Achievement.CAPTURE_5);
+        }
+        if (captures >= 10) {
+            awardAchievement(uuid, Achievement.CAPTURE_10);
+        }
+        if (captures >= 25) {
+            awardAchievement(uuid, Achievement.CAPTURE_25);
+        }
+        if (wasTopContributor) {
+            awardAchievement(uuid, Achievement.TOP_CONTRIBUTOR);
+        }
+    }
+
+    private void checkDefenseAchievements(UUID uuid) {
+        // For defense, we'd need to track defense count - for now just award first defense
+        awardAchievement(uuid, Achievement.DEFEND_REGION);
+    }
+
+    private void checkRoadAchievements(UUID uuid) {
+        PlayerMeritData data = getOrCreatePlayerData(uuid);
+        int roadBlocks = data.lifetimeRoadBlocks();
+
+        if (roadBlocks >= 1) {
+            awardAchievement(uuid, Achievement.FIRST_ROAD);
+        }
+        if (roadBlocks >= 100) {
+            awardAchievement(uuid, Achievement.ROAD_100);
+        }
+        if (roadBlocks >= 500) {
+            awardAchievement(uuid, Achievement.ROAD_500);
+        }
+        if (roadBlocks >= 1000) {
+            awardAchievement(uuid, Achievement.ROAD_1000);
+        }
+    }
+
+    private void checkSupplyAchievements(UUID uuid, boolean regionSupplied, boolean majorSabotage) {
+        if (regionSupplied) {
+            awardAchievement(uuid, Achievement.SUPPLY_REGION);
+        }
+        if (majorSabotage) {
+            awardAchievement(uuid, Achievement.MAJOR_SABOTAGE);
+        }
+        // DISRUPT_SUPPLY is awarded on any supply disruption
+        awardAchievement(uuid, Achievement.DISRUPT_SUPPLY);
+    }
+
+    private void checkPlaytimeAchievements(UUID uuid) {
+        PlayerMeritData data = getOrCreatePlayerData(uuid);
+        int minutes = data.playtimeMinutes();
+
+        if (minutes >= 60) {
+            awardAchievement(uuid, Achievement.PLAY_1_HOUR);
+        }
+        if (minutes >= 600) {
+            awardAchievement(uuid, Achievement.PLAY_10_HOURS);
+        }
+        if (minutes >= 3000) {
+            awardAchievement(uuid, Achievement.PLAY_50_HOURS);
+        }
+        if (minutes >= 6000) {
+            awardAchievement(uuid, Achievement.PLAY_100_HOURS);
+        }
+    }
+
+    private void checkLoginStreakAchievements(UUID uuid) {
+        PlayerMeritData data = getOrCreatePlayerData(uuid);
+        int streak = data.loginStreak();
+
+        if (streak >= 7) {
+            awardAchievement(uuid, Achievement.LOGIN_STREAK_7);
+        }
+        if (streak >= 30) {
+            awardAchievement(uuid, Achievement.LOGIN_STREAK_30);
+        }
+    }
+
+    private void checkRankAchievements(UUID uuid, MeritRank rank) {
+        switch (rank) {
+            case CORPORAL -> awardAchievement(uuid, Achievement.RANK_CORPORAL);
+            case SERGEANT -> awardAchievement(uuid, Achievement.RANK_SERGEANT);
+            case STAFF_SERGEANT -> awardAchievement(uuid, Achievement.RANK_STAFF_SERGEANT);
+            case SECOND_LIEUTENANT, FIRST_LIEUTENANT -> awardAchievement(uuid, Achievement.RANK_LIEUTENANT);
+            case CAPTAIN -> awardAchievement(uuid, Achievement.RANK_CAPTAIN);
+            case MAJOR -> awardAchievement(uuid, Achievement.RANK_MAJOR);
+            case LIEUTENANT_COLONEL, COLONEL -> awardAchievement(uuid, Achievement.RANK_COLONEL);
+            case BRIGADIER_GENERAL, MAJOR_GENERAL, LIEUTENANT_GENERAL, GENERAL, GENERAL_OF_THE_ARMY ->
+                    awardAchievement(uuid, Achievement.RANK_GENERAL);
+            default -> {} // No achievement for RECRUIT, PRIVATE, PFC, MASTER_SERGEANT
+        }
+    }
+
+    /**
+     * Called when a player gives merit to another player.
+     */
+    public void checkMeritGivingAchievements(UUID giver, UUID receiver) {
+        PlayerMeritData giverData = getOrCreatePlayerData(giver);
+
+        // First merit given
+        if (giverData.lifetimeMeritsGiven() >= 1) {
+            awardAchievement(giver, Achievement.GIVE_MERIT);
+        }
+        if (giverData.lifetimeMeritsGiven() >= 10) {
+            awardAchievement(giver, Achievement.GIVE_10_MERITS);
+        }
+
+        PlayerMeritData receiverData = getOrCreatePlayerData(receiver);
+
+        // First merit received
+        if (receiverData.lifetimeMeritsReceived() >= 1) {
+            awardAchievement(receiver, Achievement.RECEIVE_MERIT);
+        }
+        if (receiverData.lifetimeMeritsReceived() >= 10) {
+            awardAchievement(receiver, Achievement.RECEIVE_10_MERITS);
+        }
+    }
+
+    /**
+     * Called on first player login.
+     */
+    public void checkFirstLoginAchievement(UUID uuid) {
+        awardAchievement(uuid, Achievement.FIRST_LOGIN);
     }
 }
 

@@ -261,7 +261,7 @@ public final class Trenched extends JavaPlugin {
 
         // Admin commands
         org.flintstqne.entrenched.AdminLogic.AdminCommand adminCommand = new org.flintstqne.entrenched.AdminLogic.AdminCommand(
-                this, roundService, teamService, regionService, roadService, deathListener, phaseScheduler, configManager, regionRenderer
+                this, roundService, teamService, regionService, roadService, deathListener, phaseScheduler, configManager, regionRenderer, meritService
         );
         adminCommand.setNewRoundInitializer(newRoundInitializer);
         var adminCmd = Objects.requireNonNull(getCommand("admin"), "Command `admin` missing from plugin.yml");
@@ -281,6 +281,12 @@ public final class Trenched extends JavaPlugin {
         var ranksCmd = Objects.requireNonNull(getCommand("ranks"), "Command `ranks` missing from plugin.yml");
         ranksCmd.setExecutor(meritCommand);
 
+        // Achievement commands
+        org.flintstqne.entrenched.MeritLogic.AchievementCommand achievementCommand =
+                new org.flintstqne.entrenched.MeritLogic.AchievementCommand(meritService, configManager);
+        var achievementsCmd = Objects.requireNonNull(getCommand("achievements"), "Command `achievements` missing from plugin.yml");
+        achievementsCmd.setExecutor(achievementCommand);
+        achievementsCmd.setTabCompleter(achievementCommand);
 
         // Events registration
         getServer().getPluginManager().registerEvents(new TeamListener(teamService, scoreboardUtil, this), this);

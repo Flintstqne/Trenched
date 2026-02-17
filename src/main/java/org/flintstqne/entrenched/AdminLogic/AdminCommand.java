@@ -14,6 +14,9 @@ import org.bukkit.entity.Player;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.flintstqne.entrenched.ConfigManager;
 import org.flintstqne.entrenched.BlueMapHook.RegionRenderer;
+import org.flintstqne.entrenched.MeritLogic.MeritRank;
+import org.flintstqne.entrenched.MeritLogic.MeritService;
+import org.flintstqne.entrenched.MeritLogic.PlayerMeritData;
 import org.flintstqne.entrenched.RegionLogic.RegionService;
 import org.flintstqne.entrenched.RegionLogic.RegionState;
 import org.flintstqne.entrenched.RegionLogic.RegionStatus;
@@ -48,11 +51,12 @@ public final class AdminCommand implements CommandExecutor, TabCompleter {
     private final PhaseScheduler phaseScheduler;
     private final ConfigManager configManager;
     private final RegionRenderer regionRenderer;
+    private final MeritService meritService;
     private NewRoundInitializer newRoundInitializer;
 
     public AdminCommand(JavaPlugin plugin, RoundService roundService, TeamService teamService, RegionService regionService,
                         RoadService roadService, DeathListener deathListener, PhaseScheduler phaseScheduler,
-                        ConfigManager configManager, RegionRenderer regionRenderer) {
+                        ConfigManager configManager, RegionRenderer regionRenderer, MeritService meritService) {
         this.plugin = plugin;
         this.roundService = roundService;
         this.teamService = teamService;
@@ -62,6 +66,7 @@ public final class AdminCommand implements CommandExecutor, TabCompleter {
         this.phaseScheduler = phaseScheduler;
         this.configManager = configManager;
         this.regionRenderer = regionRenderer;
+        this.meritService = meritService;
     }
 
     public void setNewRoundInitializer(NewRoundInitializer initializer) {
@@ -98,6 +103,9 @@ public final class AdminCommand implements CommandExecutor, TabCompleter {
 
             // Supply commands
             case "supply" -> handleSupply(sender, args);
+
+            // Merit commands
+            case "merit" -> handleMerit(sender, args);
 
             // Server commands
             case "reload" -> handleReload(sender);
@@ -1361,6 +1369,183 @@ public final class AdminCommand implements CommandExecutor, TabCompleter {
         };
     }
 
+    // ==================== MERIT COMMANDS ====================
+
+    private boolean handleMerit(CommandSender sender, String[] args) {
+        if (meritService == null) {
+            sender.sendMessage(ChatColor.RED + "Merit service not available.");
+            return true;
+        }
+
+        if (args.length < 2) {
+            sender.sendMessage(ChatColor.YELLOW + "Usage: /admin merit <give|givetokens|set|reset|info|leaderboard>");
+            return true;
+        }
+
+        String action = args[1].toLowerCase();
+
+        return switch (action) {
+            case "give" -> {
+                // /admin merit give <player> <amount> [merits|tokens]
+                if (args.length < 4) {
+                    sender.sendMessage(ChatColor.RED + "Usage: /admin merit give <player> <amount> [merits|tokens]");
+                    yield true;
+                }
+                Player target = Bukkit.getPlayer(args[2]);
+                if (target == null) {
+                    sender.sendMessage(ChatColor.RED + "Player not found: " + args[2]);
+                    yield true;
+                }
+                try {
+                    int amount = Integer.parseInt(args[3]);
+                    if (amount <= 0) {
+                        sender.sendMessage(ChatColor.RED + "Amount must be positive.");
+                        yield true;
+                    }
+                    String type = args.length > 4 ? args[4].toLowerCase() : "merits";
+                    if (type.equals("tokens")) {
+                        meritService.adminGiveTokens(target.getUniqueId(), amount);
+                        sender.sendMessage(configManager.getPrefix() + ChatColor.GREEN + "Gave " + amount + " tokens to " + target.getName());
+                        target.sendMessage(ChatColor.GOLD + "You received " + amount + " merit tokens from an admin!");
+                    } else {
+                        meritService.adminGiveMerits(target.getUniqueId(), amount);
+                        sender.sendMessage(configManager.getPrefix() + ChatColor.GREEN + "Gave " + amount + " merits to " + target.getName());
+                        target.sendMessage(ChatColor.GOLD + "You received " + amount + " merits from an admin!");
+                    }
+                } catch (NumberFormatException e) {
+                    sender.sendMessage(ChatColor.RED + "Invalid amount: " + args[3]);
+                }
+                yield true;
+            }
+            case "givetokens" -> {
+                // Shortcut for give tokens
+                if (args.length < 4) {
+                    sender.sendMessage(ChatColor.RED + "Usage: /admin merit givetokens <player> <amount>");
+                    yield true;
+                }
+                Player target = Bukkit.getPlayer(args[2]);
+                if (target == null) {
+                    sender.sendMessage(ChatColor.RED + "Player not found: " + args[2]);
+                    yield true;
+                }
+                try {
+                    int amount = Integer.parseInt(args[3]);
+                    if (amount <= 0) {
+                        sender.sendMessage(ChatColor.RED + "Amount must be positive.");
+                        yield true;
+                    }
+                    meritService.adminGiveTokens(target.getUniqueId(), amount);
+                    sender.sendMessage(configManager.getPrefix() + ChatColor.GREEN + "Gave " + amount + " tokens to " + target.getName());
+                    target.sendMessage(ChatColor.GOLD + "You received " + amount + " merit tokens from an admin!");
+                } catch (NumberFormatException e) {
+                    sender.sendMessage(ChatColor.RED + "Invalid amount: " + args[3]);
+                }
+                yield true;
+            }
+            case "set" -> {
+                // /admin merit set <player> <amount>
+                if (args.length < 4) {
+                    sender.sendMessage(ChatColor.RED + "Usage: /admin merit set <player> <amount>");
+                    yield true;
+                }
+                Player target = Bukkit.getPlayer(args[2]);
+                if (target == null) {
+                    sender.sendMessage(ChatColor.RED + "Player not found: " + args[2]);
+                    yield true;
+                }
+                try {
+                    int amount = Integer.parseInt(args[3]);
+                    if (amount < 0) {
+                        sender.sendMessage(ChatColor.RED + "Amount cannot be negative.");
+                        yield true;
+                    }
+                    meritService.adminSetMerits(target.getUniqueId(), amount);
+                    sender.sendMessage(configManager.getPrefix() + ChatColor.GREEN + "Set " + target.getName() + "'s merits to " + amount);
+                } catch (NumberFormatException e) {
+                    sender.sendMessage(ChatColor.RED + "Invalid amount: " + args[3]);
+                }
+                yield true;
+            }
+            case "reset" -> {
+                // /admin merit reset <player>
+                if (args.length < 3) {
+                    sender.sendMessage(ChatColor.RED + "Usage: /admin merit reset <player>");
+                    yield true;
+                }
+                Player target = Bukkit.getPlayer(args[2]);
+                if (target == null) {
+                    sender.sendMessage(ChatColor.RED + "Player not found: " + args[2]);
+                    yield true;
+                }
+                meritService.adminReset(target.getUniqueId());
+                sender.sendMessage(configManager.getPrefix() + ChatColor.GREEN + "Reset merit data for " + target.getName());
+                yield true;
+            }
+            case "info" -> {
+                // /admin merit info <player>
+                if (args.length < 3) {
+                    sender.sendMessage(ChatColor.RED + "Usage: /admin merit info <player>");
+                    yield true;
+                }
+                Player target = Bukkit.getPlayer(args[2]);
+                if (target == null) {
+                    sender.sendMessage(ChatColor.RED + "Player not found: " + args[2]);
+                    yield true;
+                }
+                var dataOpt = meritService.getPlayerData(target.getUniqueId());
+                if (dataOpt.isEmpty()) {
+                    sender.sendMessage(ChatColor.YELLOW + "No merit data for " + target.getName());
+                    yield true;
+                }
+                PlayerMeritData data = dataOpt.get();
+                MeritRank rank = data.getRank();
+                sender.sendMessage(ChatColor.GOLD + "=== Merit Info: " + target.getName() + " ===");
+                sender.sendMessage(ChatColor.GRAY + "Rank: " + rank.getColor() + rank.getDisplayName() + " [" + rank.getTag() + "]");
+                sender.sendMessage(ChatColor.GRAY + "Tokens: " + ChatColor.WHITE + data.tokenBalance());
+                sender.sendMessage(ChatColor.GRAY + "Received Merits: " + ChatColor.WHITE + data.receivedMerits());
+                sender.sendMessage(ChatColor.GRAY + "Total Kills: " + ChatColor.WHITE + data.lifetimeKills());
+                sender.sendMessage(ChatColor.GRAY + "Region Captures: " + ChatColor.WHITE + data.lifetimeCaptures());
+                sender.sendMessage(ChatColor.GRAY + "Login Streak: " + ChatColor.WHITE + data.loginStreak() + " days");
+                MeritRank nextRank = rank.getNextRank();
+                if (nextRank != null) {
+                    int needed = nextRank.getMeritsRequired() - data.receivedMerits();
+                    sender.sendMessage(ChatColor.GRAY + "Next Rank: " + nextRank.getColor() + nextRank.getDisplayName() +
+                            ChatColor.GRAY + " (" + needed + " merits needed)");
+                }
+                yield true;
+            }
+            case "leaderboard" -> {
+                // /admin merit leaderboard [count]
+                int count = 10;
+                if (args.length > 2) {
+                    try {
+                        count = Integer.parseInt(args[2]);
+                        count = Math.min(count, 50); // Cap at 50
+                    } catch (NumberFormatException ignored) {}
+                }
+                List<PlayerMeritData> leaderboard = meritService.getLeaderboard(count);
+                sender.sendMessage(ChatColor.GOLD + "=== Merit Leaderboard (Top " + count + ") ===");
+                int position = 1;
+                for (PlayerMeritData data : leaderboard) {
+                    MeritRank rank = data.getRank();
+                    String playerName = Bukkit.getOfflinePlayer(data.uuid()).getName();
+                    if (playerName == null) playerName = data.uuid().toString().substring(0, 8);
+                    sender.sendMessage(ChatColor.YELLOW + "#" + position + " " +
+                            rank.getColor() + "[" + rank.getTag() + "] " +
+                            ChatColor.WHITE + playerName +
+                            ChatColor.GRAY + " - " + data.receivedMerits() + " merits");
+                    position++;
+                }
+                yield true;
+            }
+            default -> {
+                sender.sendMessage(ChatColor.RED + "Unknown merit action: " + action);
+                sender.sendMessage(ChatColor.YELLOW + "Usage: /admin merit <give|givetokens|set|reset|info|leaderboard>");
+                yield true;
+            }
+        };
+    }
+
     // ==================== SERVER COMMANDS ====================
 
     private boolean handleReload(CommandSender sender) {
@@ -1404,6 +1589,7 @@ public final class AdminCommand implements CommandExecutor, TabCompleter {
         sender.sendMessage(ChatColor.YELLOW + "/admin team <setspawn|wipe|info>" + ChatColor.GRAY + " - Team management");
         sender.sendMessage(ChatColor.YELLOW + "/admin player <setteam|respawn|tp>" + ChatColor.GRAY + " - Player control");
         sender.sendMessage(ChatColor.YELLOW + "/admin supply <recalculate|info|clear>" + ChatColor.GRAY + " - Supply lines");
+        sender.sendMessage(ChatColor.YELLOW + "/admin merit <give|givetokens|set|reset|info|leaderboard>" + ChatColor.GRAY + " - Merit system");
         sender.sendMessage(ChatColor.YELLOW + "/admin reload" + ChatColor.GRAY + " - Reload config");
         sender.sendMessage(ChatColor.YELLOW + "/admin status" + ChatColor.GRAY + " - Server status");
     }
@@ -1420,7 +1606,7 @@ public final class AdminCommand implements CommandExecutor, TabCompleter {
 
         if (args.length == 1) {
             // Main subcommands
-            completions.addAll(Arrays.asList("round", "phase", "region", "team", "player", "supply", "reload", "status"));
+            completions.addAll(Arrays.asList("round", "phase", "region", "team", "player", "supply", "merit", "reload", "status"));
         } else if (args.length == 2) {
             String sub = args[0].toLowerCase();
             switch (sub) {
@@ -1430,6 +1616,7 @@ public final class AdminCommand implements CommandExecutor, TabCompleter {
                 case "team" -> completions.addAll(Arrays.asList("setspawn", "wipe", "info"));
                 case "player" -> completions.addAll(Arrays.asList("setteam", "respawn", "tp"));
                 case "supply" -> completions.addAll(Arrays.asList("recalculate", "info", "debug", "gaptest", "borderinfo", "roadpath", "scan", "register", "clear"));
+                case "merit" -> completions.addAll(Arrays.asList("give", "givetokens", "set", "reset", "info", "leaderboard"));
             }
         } else if (args.length == 3) {
             String sub = args[0].toLowerCase();
@@ -1477,6 +1664,17 @@ public final class AdminCommand implements CommandExecutor, TabCompleter {
                         completions.addAll(getAllRegionNames());
                     }
                 }
+                case "merit" -> {
+                    if (action.equals("give") || action.equals("givetokens") || action.equals("set") ||
+                            action.equals("reset") || action.equals("info")) {
+                        // Player names
+                        for (Player p : Bukkit.getOnlinePlayers()) {
+                            completions.add(p.getName());
+                        }
+                    } else if (action.equals("leaderboard")) {
+                        completions.addAll(Arrays.asList("5", "10", "20", "50"));
+                    }
+                }
             }
         } else if (args.length == 4) {
             String sub = args[0].toLowerCase();
@@ -1504,6 +1702,19 @@ public final class AdminCommand implements CommandExecutor, TabCompleter {
                         completions.addAll(Arrays.asList("red", "blue"));
                     }
                 }
+                case "merit" -> {
+                    if (action.equals("give") || action.equals("givetokens") || action.equals("set")) {
+                        // Suggest common amounts
+                        completions.addAll(Arrays.asList("1", "5", "10", "25", "50", "100"));
+                    }
+                }
+            }
+        } else if (args.length == 5) {
+            String sub = args[0].toLowerCase();
+            String action = args[1].toLowerCase();
+
+            if (sub.equals("merit") && action.equals("give")) {
+                completions.addAll(Arrays.asList("merits", "tokens"));
             }
         }
 

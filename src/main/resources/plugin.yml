@@ -67,6 +67,10 @@ commands:
   ranks:
     description: View all military ranks and merit requirements
     usage: /ranks
+  achievements:
+    description: View your achievements and progress
+    usage: /achievements [category]
+    aliases: [ach, achieve]
 
 permissions:
   entrenched.admin:
