@@ -2,15 +2,18 @@ package org.flintstqne.entrenched.DivisionLogic;
 
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
+import org.bukkit.Material;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
 import org.bukkit.command.CommandSender;
 import org.bukkit.command.TabCompleter;
 import org.bukkit.entity.Player;
+import org.bukkit.inventory.ItemStack;
 import org.flintstqne.entrenched.ConfigManager;
 import org.flintstqne.entrenched.TeamLogic.TeamService;
 
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 public final class DivisionCommand implements CommandExecutor, TabCompleter {
@@ -19,10 +22,113 @@ public final class DivisionCommand implements CommandExecutor, TabCompleter {
     private final TeamService teamService;
     private final ConfigManager configManager;
 
+    // Track pending division creations awaiting /confirm
+    private final Map<UUID, PendingDivisionCreation> pendingCreations = new ConcurrentHashMap<>();
+
+    // How long a pending creation is valid (30 seconds)
+    private static final long PENDING_EXPIRY_MS = 30000;
+
     public DivisionCommand(DivisionService divisionService, TeamService teamService, ConfigManager configManager) {
         this.divisionService = divisionService;
         this.teamService = teamService;
         this.configManager = configManager;
+    }
+
+    /**
+     * Record to track pending division creation awaiting confirmation.
+     */
+    private record PendingDivisionCreation(String name, String tag, long timestamp) {
+        boolean isExpired() {
+            return System.currentTimeMillis() - timestamp > PENDING_EXPIRY_MS;
+        }
+    }
+
+    /**
+     * Check if a player has a pending division creation.
+     */
+    public boolean hasPendingCreation(UUID uuid) {
+        PendingDivisionCreation pending = pendingCreations.get(uuid);
+        if (pending == null) return false;
+        if (pending.isExpired()) {
+            pendingCreations.remove(uuid);
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * Process confirmation for pending division creation.
+     * Called by ConfirmCommand.
+     */
+    public boolean confirmCreation(Player player) {
+        UUID uuid = player.getUniqueId();
+        PendingDivisionCreation pending = pendingCreations.remove(uuid);
+
+        if (pending == null || pending.isExpired()) {
+            player.sendMessage(configManager.getPrefix() + ChatColor.RED + "No pending division creation to confirm.");
+            return false;
+        }
+
+        // Check if resource cost is enabled
+        if (configManager.isDivisionCreationCostEnabled() && !player.isOp()) {
+            String materialName = configManager.getDivisionCreationMaterial();
+            int amount = configManager.getDivisionCreationAmount();
+
+            Material material;
+            try {
+                material = Material.valueOf(materialName.toUpperCase());
+            } catch (IllegalArgumentException e) {
+                player.sendMessage(configManager.getPrefix() + ChatColor.RED + "Invalid material configured. Contact an admin.");
+                return false;
+            }
+
+            // Check if player is holding the required items
+            ItemStack heldItem = player.getInventory().getItemInMainHand();
+            if (heldItem.getType() != material || heldItem.getAmount() < amount) {
+                player.sendMessage(configManager.getPrefix() + ChatColor.RED + "You must be holding " + amount + "x " +
+                        formatMaterialName(material) + " to create a division.");
+                return false;
+            }
+
+            // Remove the items from the player's hand
+            if (heldItem.getAmount() == amount) {
+                player.getInventory().setItemInMainHand(new ItemStack(Material.AIR));
+            } else {
+                heldItem.setAmount(heldItem.getAmount() - amount);
+            }
+
+            player.sendMessage(configManager.getPrefix() + ChatColor.YELLOW + "Consumed " + amount + "x " +
+                    formatMaterialName(material) + ".");
+        }
+
+        // Now actually create the division
+        boolean bypassCooldown = player.isOp();
+        DivisionService.CreateResult result = divisionService.createDivision(uuid, pending.name(), pending.tag(), bypassCooldown);
+
+        String prefix = configManager.getPrefix();
+        switch (result) {
+            case SUCCESS -> {
+                player.sendMessage(prefix + ChatColor.GREEN + "Division '" + pending.name() + "' [" + pending.tag() + "] created!");
+                player.sendMessage(prefix + ChatColor.GRAY + "You are now the Division Commander.");
+                return true;
+            }
+            case NAME_TAKEN -> player.sendMessage(prefix + ChatColor.RED + "A division with that name already exists.");
+            case TAG_TAKEN -> player.sendMessage(prefix + ChatColor.RED + "A division with that tag already exists.");
+            case TEAM_LIMIT_REACHED -> player.sendMessage(prefix + ChatColor.RED + "Your team has reached the maximum number of divisions.");
+            case ON_COOLDOWN -> {
+                long remaining = divisionService.getCreationCooldownRemaining(uuid);
+                player.sendMessage(prefix + ChatColor.RED + "You must wait " + formatDuration(remaining) + " before creating another division.");
+            }
+            case NO_ACTIVE_ROUND -> player.sendMessage(prefix + ChatColor.RED + "No active round.");
+            case PLAYER_NOT_ON_TEAM -> player.sendMessage(prefix + ChatColor.RED + "You must be on a team first.");
+            case ALREADY_IN_DIVISION -> player.sendMessage(prefix + ChatColor.RED + "You are already in a division. Leave first with /division leave");
+        }
+
+        return false;
+    }
+
+    private String formatMaterialName(Material material) {
+        return material.name().toLowerCase().replace("_", " ");
     }
 
     @Override
@@ -123,9 +229,64 @@ public final class DivisionCommand implements CommandExecutor, TabCompleter {
             return true;
         }
 
-        // OPs bypass the founder cooldown
+        // Pre-validation checks (don't consume items until confirmed)
+        UUID uuid = player.getUniqueId();
+
+        // Check if already in a division
+        if (divisionService.getMembership(uuid).isPresent()) {
+            player.sendMessage(prefix + ChatColor.RED + "You are already in a division. Leave first with /division leave");
+            return true;
+        }
+
+        // Check if on a team
+        if (teamService.getPlayerTeam(uuid).isEmpty()) {
+            player.sendMessage(prefix + ChatColor.RED + "You must be on a team first.");
+            return true;
+        }
+
+        // Check cooldown (OPs bypass)
+        if (!player.isOp()) {
+            long remaining = divisionService.getCreationCooldownRemaining(uuid);
+            if (remaining > 0) {
+                player.sendMessage(prefix + ChatColor.RED + "You must wait " + formatDuration(remaining) + " before creating another division.");
+                return true;
+            }
+        }
+
+        // Check if resource cost is enabled and required
+        if (configManager.isDivisionCreationCostEnabled() && !player.isOp()) {
+            String materialName = configManager.getDivisionCreationMaterial();
+            int amount = configManager.getDivisionCreationAmount();
+
+            Material material;
+            try {
+                material = Material.valueOf(materialName.toUpperCase());
+            } catch (IllegalArgumentException e) {
+                player.sendMessage(prefix + ChatColor.RED + "Invalid material configured. Contact an admin.");
+                return true;
+            }
+
+            // Store pending creation
+            pendingCreations.put(uuid, new PendingDivisionCreation(name, tag, System.currentTimeMillis()));
+
+            // Warn player about the cost
+            player.sendMessage("");
+            player.sendMessage(prefix + ChatColor.YELLOW + "⚠ Division Creation Cost:");
+            player.sendMessage(ChatColor.GRAY + "Creating division '" + ChatColor.WHITE + name +
+                    ChatColor.GRAY + "' [" + ChatColor.WHITE + tag + ChatColor.GRAY + "] requires:");
+            player.sendMessage(ChatColor.RED + "  ➤ " + amount + "x " + formatMaterialName(material));
+            player.sendMessage("");
+            player.sendMessage(ChatColor.YELLOW + "Hold the required items and type " +
+                    ChatColor.GREEN + "/confirm " + ChatColor.YELLOW + "to proceed.");
+            player.sendMessage(ChatColor.GRAY + "(Expires in 30 seconds)");
+            player.sendMessage("");
+
+            return true;
+        }
+
+        // No cost required (OP or cost disabled) - create directly
         boolean bypassCooldown = player.isOp();
-        DivisionService.CreateResult result = divisionService.createDivision(player.getUniqueId(), name, tag, bypassCooldown);
+        DivisionService.CreateResult result = divisionService.createDivision(uuid, name, tag, bypassCooldown);
 
         switch (result) {
             case SUCCESS -> {
@@ -136,7 +297,7 @@ public final class DivisionCommand implements CommandExecutor, TabCompleter {
             case TAG_TAKEN -> player.sendMessage(prefix + ChatColor.RED + "A division with that tag already exists.");
             case TEAM_LIMIT_REACHED -> player.sendMessage(prefix + ChatColor.RED + "Your team has reached the maximum number of divisions.");
             case ON_COOLDOWN -> {
-                long remaining = divisionService.getCreationCooldownRemaining(player.getUniqueId());
+                long remaining = divisionService.getCreationCooldownRemaining(uuid);
                 player.sendMessage(prefix + ChatColor.RED + "You must wait " + formatDuration(remaining) + " before creating another division.");
             }
             case NO_ACTIVE_ROUND -> player.sendMessage(prefix + ChatColor.RED + "No active round.");

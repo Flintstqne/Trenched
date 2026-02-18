@@ -200,6 +200,18 @@ public final class ConfigManager {
         return config.getInt("divisions.founder-cooldown-hours", 48);
     }
 
+    public boolean isDivisionCreationCostEnabled() {
+        return config.getBoolean("divisions.creation-cost.enabled", true);
+    }
+
+    public String getDivisionCreationMaterial() {
+        return config.getString("divisions.creation-cost.material", "DIAMOND_BLOCK");
+    }
+
+    public int getDivisionCreationAmount() {
+        return config.getInt("divisions.creation-cost.amount", 3);
+    }
+
     // ==================== Party Settings ====================
 
     public boolean isPartiesEnabled() {

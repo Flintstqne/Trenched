@@ -59,17 +59,6 @@ Division
 #### 2. Division Roster
 - View all members and their current squads
 - See who's online/offline
-- View player locations on BlueMap (if enabled)
-
-#### 3. Division Waypoints
-- Officers can set shared waypoints visible to all division members
-- "Attack here", "Defend this", "Rally point"
-- Shows on compass and optionally on BlueMap
-
-#### 4. Division Assignments
-- Commander can assign the division to a region
-- "1st Division - Assigned to Region B2"
-- Helps coordinate which groups go where
 
 ### Division Creation & Management
 
@@ -442,19 +431,6 @@ CREATE TABLE division_requests (
   FOREIGN KEY(division_id) REFERENCES divisions(division_id)
 );
 
--- Division Waypoints
-CREATE TABLE division_waypoints (
-  waypoint_id INTEGER PRIMARY KEY AUTOINCREMENT,
-  division_id INTEGER NOT NULL,
-  name TEXT NOT NULL,
-  world TEXT NOT NULL,
-  x INTEGER NOT NULL,
-  y INTEGER NOT NULL,
-  z INTEGER NOT NULL,
-  created_by TEXT NOT NULL,        -- UUID of officer who created it
-  created_at INTEGER NOT NULL,
-  FOREIGN KEY(division_id) REFERENCES divisions(division_id)
-);
 
 -- Division Creation Cooldowns (tracks who created divisions recently)
 CREATE TABLE division_founder_cooldowns (

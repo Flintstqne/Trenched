@@ -71,6 +71,9 @@ commands:
     description: View your achievements and progress
     usage: /achievements [category]
     aliases: [ach, achieve]
+  confirm:
+    description: Confirm a pending action (e.g., division creation)
+    usage: /confirm
 
 permissions:
   entrenched.admin:

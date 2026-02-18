@@ -104,6 +104,15 @@ divisions:
   # Cooldown in hours before a player can create another division
   founder-cooldown-hours: 48
 
+  # Division creation cost
+  creation-cost:
+    # Enable resource cost for creating divisions
+    enabled: true
+    # Material required (Minecraft material name)
+    material: "DIAMOND_BLOCK"
+    # Amount of material required
+    amount: 3
+
 # Party Settings
 parties:
   # Enable party system

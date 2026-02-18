@@ -432,8 +432,12 @@ public class SqlMeritService implements MeritService {
         String pairKey = giver + ":" + receiver;
         int samePlayerCount = samePlayerMeritsToday.getOrDefault(pairKey, 0);
 
-        // Skip anti-farm checks if debug mode
-        if (!configManager.skipMeritAntiFarm()) {
+        // Check if giver is OP (bypasses all anti-farm checks)
+        Player giverPlayer = Bukkit.getPlayer(giver);
+        boolean isOp = giverPlayer != null && giverPlayer.isOp();
+
+        // Skip anti-farm checks if debug mode OR if player is OP
+        if (!configManager.skipMeritAntiFarm() && !isOp) {
             // Check new player lockout (giver playtime requirement)
             int giverPlaytimeRequired = configManager.skipMeritPlaytimeRequirements() ? 0 : configManager.getMeritGiverPlaytimeRequired();
             if (giverData.playtimeMinutes() < giverPlaytimeRequired) {

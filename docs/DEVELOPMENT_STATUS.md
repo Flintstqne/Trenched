@@ -1,6 +1,6 @@
 # Entrenched (BlockHole) Development Status
 
-**Last Updated:** February 15, 2026
+**Last Updated:** February 17, 2026
 
 ---
 
@@ -12,6 +12,7 @@ Entrenched is a Minecraft PvP plugin featuring team-based warfare with:
 - **Supply Line System**: Physical roads connect territories
 - **Influence Points (IP)**: Capture regions through actions
 - **Divisions & Parties**: Organizational units for coordination
+- **Merit System**: Player recognition and ranking
 
 ---
 
@@ -81,6 +82,8 @@ Entrenched is a Minecraft PvP plugin featuring team-based warfare with:
 | **Channel Switching** | ✅ Complete | Commands toggle default channel |
 | **Quick Messages** | ✅ Complete | `/dc <msg>` sends without switching |
 | **Division Tags** | ✅ Complete | `[TAG]` displayed in chat with team color |
+| **Configurable Format** | ✅ Complete | Chat format configurable via config.yml |
+| **PlaceholderAPI Support** | ✅ Complete | Custom placeholders for ranks, divisions, etc. |
 
 ### Division System
 
@@ -107,6 +110,36 @@ Entrenched is a Minecraft PvP plugin featuring team-based warfare with:
 | **Party Chat** | ✅ Complete | `/pc` integration |
 | **Max Size** | ✅ Complete | Configurable (default: 6) |
 
+### Merit System
+
+| Feature | Status | Description |
+|---------|--------|-------------|
+| **Merit Tokens** | ✅ Complete | Earned through gameplay actions |
+| **Token Earning** | ✅ Complete | Kills, captures, road building, supply, playtime, etc. |
+| **Merit Giving** | ✅ Complete | `/merit <player> [reason]` - Give tokens to recognize players |
+| **Received Merits** | ✅ Complete | Track merits received from other players |
+| **Military Ranks** | ✅ Complete | 18 ranks from Recruit to General of the Army |
+| **Rank Display** | ✅ Complete | Rank tags in chat and scoreboards |
+| **Anti-Farming** | ✅ Complete | Daily limits, cooldowns, interaction requirements |
+| **OP Bypass** | ✅ Complete | OPs skip anti-farm checks for testing |
+| **Leaderboards** | ✅ Complete | `/admin merit leaderboard [count]` |
+| **Debug Options** | ✅ Complete | Config options for testing (skip limits, self-merit) |
+
+### Achievement System
+
+| Feature | Status | Description |
+|---------|--------|-------------|
+| **Combat Achievements** | ✅ Complete | First Kill, Kill milestones (10/50/100/500), Kill streaks, Shutdown |
+| **Territory Achievements** | ✅ Complete | First Capture, Capture milestones, Defender, Top Contributor |
+| **Logistics Achievements** | ✅ Complete | Road building milestones, Supply region, Supply route, Sabotage |
+| **Social Achievements** | ✅ Complete | Join division, Create division, Merit giving/receiving |
+| **Progression Achievements** | ✅ Complete | Rank promotions (Corporal through General) |
+| **Time Achievements** | ✅ Complete | Playtime milestones (1h/10h/50h/100h), Login streaks (7/30 days) |
+| **Round Achievements** | ✅ Complete | Win round, Complete round, Round MVP |
+| **Achievement Viewer** | ✅ Complete | `/achievements [category]` - View progress |
+| **One-time Rewards** | ✅ Complete | Token rewards for each achievement |
+| **Achievement Notifications** | ✅ Complete | Sound + message when unlocked |
+
 ### Admin Commands
 
 | Feature | Status | Description |
@@ -116,6 +149,7 @@ Entrenched is a Minecraft PvP plugin featuring team-based warfare with:
 | **Player Teleport** | ✅ Complete | `/admin tp <player> <region_name>` |
 | **Supply Debug** | ✅ Complete | Full suite of debug commands |
 | **New Round** | ✅ Complete | `/round new` - Full world reset |
+| **Merit Admin** | ✅ Complete | `/admin merit <give\|givetokens\|set\|reset\|info\|leaderboard>` |
 
 ---
 
@@ -131,6 +165,8 @@ All features are configurable via `config.yml`:
 - **Supply System**: Path blocks, adjacency radius, respawn penalties
 - **Divisions/Parties**: Limits, cooldowns, features
 - **BlueMap**: Enable/disable, refresh interval
+- **Merit System**: Token multiplier, earning rates, anti-farm settings
+- **Chat Format**: Configurable chat format with placeholders
 
 ---
 
@@ -149,14 +185,6 @@ The design document (`REGION_CAPTURE_DESIGN.md`) outlines objectives, but they'r
 | **Capture Intel** | ❌ Not Started | Retrieve item, return to base |
 | **Hold Ground** | ❌ Not Started | Hold region center 60s |
 
-### Division Advanced Features (Planned)
-
-| Feature | Status | Description |
-|---------|--------|-------------|
-| **Division Waypoints** | ❌ Not Started | Shared map markers |
-| **Division Assignments** | ❌ Not Started | Assign divisions to regions |
-| **BlueMap Division Markers** | ❌ Not Started | Show division members on map |
-| **Resource Cost for Creation** | ❌ Not Started | Iron/diamond to create |
 
 ### Additional Features
 
@@ -165,7 +193,6 @@ The design document (`REGION_CAPTURE_DESIGN.md`) outlines objectives, but they'r
 | **Influence Decay** | ⚠️ Partial | Config exists, may not be active |
 | **Win Condition Detection** | ❌ Not Started | Auto-detect when team wins |
 | **Round Statistics** | ❌ Not Started | Post-round stats summary |
-| **Player Statistics** | ❌ Not Started | Kills, captures, IP earned |
 
 ---
 
@@ -256,7 +283,6 @@ src/main/java/org/flintstqne/entrenched/
 ### Priority 4: Quality of Life
 1. Player statistics tracking
 2. Post-round statistics display
-3. Division waypoints
 
 ---
 
@@ -278,6 +304,10 @@ src/main/java/org/flintstqne/entrenched/
 - `/region <status|map|info>` - Region information
 - `/supply status` - View supply levels
 - `/g`, `/tc`, `/dc`, `/pc`, `/rc` - Chat channels
+- `/merit <player> [reason]` - Give merit tokens to another player
+- `/merits [player]` - View merit stats
+- `/ranks` - View all military ranks and requirements
+- `/achievements [category]` - View your achievements
 
 ### Admin Commands
 - `/round new` - Start new round (world reset)
@@ -286,4 +316,30 @@ src/main/java/org/flintstqne/entrenched/
 - `/admin tp <player> <region>` - Teleport player
 - `/admin supply debug <region> <team>` - Debug supply
 - `/admin supply register <region> <team>` - Scan/register roads
+- `/admin merit give <player> <amount> [merits|tokens]` - Give merits or tokens
+- `/admin merit givetokens <player> <amount>` - Give tokens directly
+- `/admin merit set <player> <amount>` - Set player's merits
+- `/admin merit reset <player>` - Reset player's merit data
+- `/admin merit info <player>` - View player's merit info
+- `/admin merit leaderboard [count]` - View merit leaderboard
+
+---
+
+## 🔌 PlaceholderAPI Integration
+
+Custom placeholders available (requires PlaceholderAPI):
+
+| Placeholder | Description |
+|-------------|-------------|
+| `%entrenched_rank%` | Player's military rank name |
+| `%entrenched_rank_tag%` | Player's rank tag (e.g., SGT) |
+| `%entrenched_rank_formatted%` | Colored rank tag |
+| `%entrenched_merits%` | Received merits count |
+| `%entrenched_tokens%` | Token balance |
+| `%entrenched_division%` | Division name |
+| `%entrenched_division_tag%` | Division tag |
+| `%entrenched_team%` | Team name (red/blue) |
+| `%entrenched_kills%` | Lifetime kills |
+| `%entrenched_captures%` | Lifetime captures |
+| `%entrenched_chat_prefix%` | Full chat prefix (division + rank) |
 

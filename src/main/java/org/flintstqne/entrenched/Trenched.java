@@ -226,6 +226,12 @@ public final class Trenched extends JavaPlugin {
         divisionCmd.setExecutor(divisionCommand);
         divisionCmd.setTabCompleter(divisionCommand);
 
+        // Confirm command (for division creation, etc.)
+        org.flintstqne.entrenched.Utils.ConfirmCommand confirmCommand =
+                new org.flintstqne.entrenched.Utils.ConfirmCommand(divisionCommand, configManager);
+        Objects.requireNonNull(getCommand("confirm"), "Command `confirm` missing from plugin.yml")
+                .setExecutor(confirmCommand);
+
         // Party commands
         PartyCommand partyCommand = new PartyCommand(partyService, configManager);
         var partyCmd = Objects.requireNonNull(getCommand("party"), "Command `party` missing from plugin.yml");
