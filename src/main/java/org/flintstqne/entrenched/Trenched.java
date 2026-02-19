@@ -12,6 +12,7 @@ import org.flintstqne.entrenched.ChatLogic.ChatChannelManager;
 import org.flintstqne.entrenched.ChatLogic.ChatCommand;
 import org.flintstqne.entrenched.DivisionLogic.*;
 import org.flintstqne.entrenched.MeritLogic.*;
+import org.flintstqne.entrenched.ObjectiveLogic.*;
 import org.flintstqne.entrenched.PartyLogic.*;
 import org.flintstqne.entrenched.RegionLogic.*;
 import org.flintstqne.entrenched.RoadLogic.*;
@@ -60,6 +61,10 @@ public final class Trenched extends JavaPlugin {
     private MeritDb meritDb;
     private MeritService meritService;
     private MeritListener meritListener;
+    private ObjectiveDb objectiveDb;
+    private ObjectiveService objectiveService;
+    private ObjectiveUIManager objectiveUIManager;
+    private ObjectiveListener objectiveListener;
 
     @Override
     public void onEnable() {
@@ -125,11 +130,15 @@ public final class Trenched extends JavaPlugin {
         regionNotificationManager = new RegionNotificationManager(this, regionService, teamService, configManager, regionRenderer);
         regionCaptureListener = new RegionCaptureListener(regionService, teamService, configManager, regionRenderer);
 
-        // Connect capture callback to notification manager
-        sqlRegionService.setCaptureCallback((regionId, newOwner, previousOwner) -> {
-            regionNotificationManager.broadcastCapture(regionId, newOwner, previousOwner);
-        });
+        // NOTE: Capture callback is set later, after roadService is initialized
         getLogger().info("[TerrainGen] Region capture system initialized");
+
+        // Initialize Objective System (before road service so we can use it in capture callback)
+        objectiveDb = new ObjectiveDb(this);
+        objectiveService = new SqlObjectiveService(this, objectiveDb, roundService, regionService, configManager);
+        objectiveUIManager = new ObjectiveUIManager(this, objectiveService, regionService, roundService, teamService, configManager);
+        objectiveListener = new ObjectiveListener(this, objectiveService, objectiveUIManager, regionService, teamService, configManager);
+        getLogger().info("[TerrainGen] Objective system initialized");
 
         // Check if a round is already active, if not start a new one (if enabled in config)
         // This must be done AFTER regionService and regionNotificationManager are initialized
@@ -168,6 +177,30 @@ public final class Trenched extends JavaPlugin {
             String sourceRegion = destroyedBlock != null ? destroyedBlock.regionId() : null;
             regionNotificationManager.broadcastSupplyDisrupted(team, affectedRegions, sourceRegion);
         });
+
+        // Connect capture callback to notification manager AND auto-scan for roads
+        final World captureWorld = gameWorld;
+        sqlRegionService.setCaptureCallback((regionId, newOwner, previousOwner) -> {
+            // Broadcast capture notification
+            regionNotificationManager.broadcastCapture(regionId, newOwner, previousOwner);
+
+            // Expire any active objectives in the captured region
+            objectiveService.expireObjectivesInRegion(regionId);
+
+            // Auto-scan for existing road blocks in the captured region
+            // This allows pre-existing roads to be automatically recognized
+            // NOTE: Must run on main thread since we access world blocks
+            if (captureWorld != null && newOwner != null) {
+                // Delay slightly to ensure capture is fully processed
+                Bukkit.getScheduler().runTaskLater(this, () -> {
+                    int found = roadService.scanRegionForRoads(regionId, newOwner, captureWorld);
+                    if (found > 0) {
+                        getLogger().info("[TerrainGen] Auto-scanned " + regionId + " on capture: " + found + " road blocks found for " + newOwner);
+                    }
+                }, 20L); // 1 second delay
+            }
+        });
+
         getLogger().info("[TerrainGen] Road/supply line system initialized");
 
         // Initialize Merit System
@@ -183,6 +216,12 @@ public final class Trenched extends JavaPlugin {
         // Connect scoreboard to merit service for rank/token display
         scoreboardUtil.setMeritService(meritService);
         getLogger().info("[TerrainGen] Merit system initialized");
+
+        // Start objective UI and listeners (initialized earlier in startup)
+        objectiveUIManager.start();
+        objectiveListener.setRoundService(roundService);
+        objectiveListener.start();
+        getServer().getPluginManager().registerEvents(objectiveListener, this);
 
         // Register PlaceholderAPI expansion if available
         if (Bukkit.getPluginManager().getPlugin("PlaceholderAPI") != null) {
@@ -200,6 +239,10 @@ public final class Trenched extends JavaPlugin {
             roadService.recalculateSupply("blue");
             getLogger().info("[TerrainGen] Supply recalculation complete");
         }, 40L); // 2 second delay to ensure everything is loaded
+
+        // Start influence decay scheduler (runs every minute)
+        // Decays IP in contested regions where no activity is happening
+        startInfluenceDecayScheduler();
 
         // Initialize Chat Channel Manager
         chatChannelManager = new ChatChannelManager();
@@ -293,6 +336,12 @@ public final class Trenched extends JavaPlugin {
         var achievementsCmd = Objects.requireNonNull(getCommand("achievements"), "Command `achievements` missing from plugin.yml");
         achievementsCmd.setExecutor(achievementCommand);
         achievementsCmd.setTabCompleter(achievementCommand);
+
+        // Objective commands
+        ObjectiveCommand objectiveCommand = new ObjectiveCommand(objectiveService, regionService, teamService, configManager);
+        var objectiveCmd = Objects.requireNonNull(getCommand("objective"), "Command `objective` missing from plugin.yml");
+        objectiveCmd.setExecutor(objectiveCommand);
+        objectiveCmd.setTabCompleter(objectiveCommand);
 
         // Events registration
         getServer().getPluginManager().registerEvents(new TeamListener(teamService, scoreboardUtil, this), this);
@@ -499,8 +548,11 @@ public final class Trenched extends JavaPlugin {
     @Override
     public void onDisable() {
         if (scoreboardUtil != null) scoreboardUtil.stopUpdateTask();
+        if (objectiveUIManager != null) objectiveUIManager.stop();
+        if (objectiveListener != null) objectiveListener.stop();
         if (regionNotificationManager != null) regionNotificationManager.stop();
         if (phaseScheduler != null) phaseScheduler.stop();
+        if (objectiveDb != null) objectiveDb.close();
         if (roadDb != null) roadDb.close();
         if (regionDb != null) regionDb.close();
         if (partyDb != null) partyDb.close();
@@ -522,5 +574,35 @@ public final class Trenched extends JavaPlugin {
      */
     public PhaseScheduler getPhaseScheduler() {
         return phaseScheduler;
+    }
+
+    /**
+     * Starts the influence decay scheduler.
+     * Runs every minute to:
+     * - Decay IP in contested regions with no activity
+     * - Check and remove expired fortifications
+     */
+    private void startInfluenceDecayScheduler() {
+        double decayRate = configManager.getRegionInfluenceDecayPerMinute();
+
+        if (decayRate <= 0) {
+            getLogger().info("[TerrainGen] Influence decay disabled (rate = 0)");
+            return;
+        }
+
+        // Run every minute (1200 ticks = 60 seconds)
+        Bukkit.getScheduler().runTaskTimer(this, () -> {
+            // Only run if there's an active round
+            if (roundService.getCurrentRound().isEmpty()) return;
+
+            // Apply influence decay to contested regions
+            regionService.applyInfluenceDecay();
+
+            // Update fortification status (remove expired)
+            regionService.updateFortificationStatus();
+
+        }, 1200L, 1200L); // Initial delay: 1 minute, repeat every 1 minute
+
+        getLogger().info("[TerrainGen] Influence decay scheduler started (rate: " + decayRate + " IP/minute)");
     }
 }

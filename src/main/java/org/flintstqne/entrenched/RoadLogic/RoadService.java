@@ -154,6 +154,31 @@ public interface RoadService {
      */
     double getHealthRegenMultiplier(UUID playerUuid, String team);
 
+    // ==================== AUTO-SCANNING ====================
+
+    /**
+     * Scans a region for existing path blocks and registers them for the given team.
+     * Used when a region is captured to automatically detect existing roads.
+     *
+     * @param regionId The region ID to scan
+     * @param team The team that now owns the region
+     * @param world The world to scan in
+     * @return Number of road blocks found and registered
+     */
+    int scanRegionForRoads(String regionId, String team, org.bukkit.World world);
+
+    /**
+     * Gets the border area between two adjacent regions.
+     * @return [minX, maxX, minZ, maxZ] or null if not adjacent
+     */
+    int[] getBorderAreaPublic(String region1, String region2);
+
+    /**
+     * Scans the border area between two regions for path blocks.
+     * @return Number of road blocks found and registered
+     */
+    int scanBorderArea(String region1, String region2, String team, org.bukkit.World world);
+
     // ==================== CLEANUP ====================
 
     /**

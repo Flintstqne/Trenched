@@ -190,7 +190,7 @@ The design document (`REGION_CAPTURE_DESIGN.md`) outlines objectives, but they'r
 
 | Feature | Status | Description |
 |---------|--------|-------------|
-| **Influence Decay** | ⚠️ Partial | Config exists, may not be active |
+| **Influence Decay** | ✅ Complete | IP decays in contested regions with no activity (configurable rate) |
 | **Win Condition Detection** | ❌ Not Started | Auto-detect when team wins |
 | **Round Statistics** | ❌ Not Started | Post-round stats summary |
 

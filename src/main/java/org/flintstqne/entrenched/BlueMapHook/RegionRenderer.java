@@ -48,6 +48,7 @@ public class RegionRenderer {
     private static final Color BLUE_LINE = new Color("#0000FF66");
     private static final Color BLUE_FILL = new Color("#0000FF33");
 
+
     private final JavaPlugin plugin;
     private final Map<String, String> regionNames = new HashMap<>();
     private final RoundService roundService;
@@ -56,6 +57,7 @@ public class RegionRenderer {
 
     // Track which round's names are currently loaded into memory
     private Integer loadedRoundId = null;
+
 
     public RegionRenderer(JavaPlugin plugin, RoundService roundService, RegionService regionService) {
         this.plugin = plugin;
@@ -498,6 +500,7 @@ public class RegionRenderer {
 
             rowLabel++;
         }
+
 
         //plugin.getLogger().info("[RegionRenderer] Markers refreshed for map " + map.getId());
     }

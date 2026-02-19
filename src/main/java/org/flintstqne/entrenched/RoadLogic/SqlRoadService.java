@@ -86,10 +86,16 @@ public final class SqlRoadService implements RoadService {
     @Override
     public void insertRoadBlockWithoutRecalculation(int x, int y, int z, UUID playerUuid, String team) {
         int roundId = getCurrentRoundId();
-        if (roundId < 0) return;
+        if (roundId < 0) {
+            logger.warning("[RoadService] Cannot register road block - no active round!");
+            return;
+        }
 
         String regionId = getRegionIdForLocation(x, z);
-        if (regionId == null) return;
+        if (regionId == null) {
+            logger.warning("[RoadService] Cannot register road block - invalid region for coords " + x + "," + z);
+            return;
+        }
 
         long now = System.currentTimeMillis();
 
@@ -350,16 +356,21 @@ public final class SqlRoadService implements RoadService {
      * Checks if there are gaps/disconnections in the road within a single region.
      *
      * This detects when a road has been damaged (hole blown in it) by checking if the
-     * road blocks entering from the home direction form a single continuous segment.
+     * road blocks entering from the home direction can reach blocks deeper in the region.
      *
-     * We DON'T require roads to span the entire region or connect to all borders -
-     * just that the road entering from home isn't broken into multiple pieces.
+     * IMPORTANT: We are very lenient here to avoid false positives from scattered terrain blocks.
+     * We only return true (gap detected) if the road clearly can't continue forward.
      *
      * @param regionId The region to check
      * @param team The team owning the roads
      * @return true if the road has critical gaps (broken/blown up), false otherwise
      */
     private boolean hasRoadGapsInRegion(String regionId, String team) {
+        // Check if gap detection is enabled in config
+        if (!configManager.isSupplyGapDetectionEnabled()) {
+            return false; // Gap detection disabled - assume no gaps
+        }
+
         int roundId = getCurrentRoundId();
         if (roundId < 0) return false;
 
@@ -370,12 +381,15 @@ public final class SqlRoadService implements RoadService {
         // Get all road blocks in this region
         List<RoadBlock> blocks = db.getRoadBlocksInRegion(roundId, regionId, team);
 
-        // If very few blocks, can't meaningfully have a "gap"
-        if (blocks.size() < 5) return false;
+        // If few blocks, assume no meaningful gap
+        if (blocks.size() < 20) return false;
 
         // Find the entry region (the adjacent supplied region toward home)
         String entryRegion = findEntryRegion(regionId, team);
-        if (entryRegion == null) return false;
+        if (entryRegion == null) {
+            // Can't find entry - don't flag as gap, let other checks handle it
+            return false;
+        }
 
         // Get border area with entry region
         int[] entryBorder = getBorderArea(regionId, entryRegion);
@@ -389,26 +403,27 @@ public final class SqlRoadService implements RoadService {
         // If no blocks at entry, that's handled by checkBorderRoadConnection
         if (entryBlocks.isEmpty()) return false;
 
-        // Build chunk-based spatial index for efficient neighbor lookup
+        // Use A* flood-fill to count reachable blocks from entry
         int xzRadius = configManager.getSupplyAdjacencyRadius();
         int yTolerance = configManager.getSupplyYTolerance();
-        int chunkSize = Math.max(xzRadius * 2, 16);
 
         Map<String, RoadBlock> spatialIndex = buildSpatialIndex(blocks);
-        Map<String, List<RoadBlock>> chunkIndex = buildChunkIndex(blocks, chunkSize);
 
-        // BFS from entry blocks to find all connected blocks
-        // Use chunk-based neighbor lookup which is much faster
-        Set<String> connectedToEntry = new HashSet<>();
+        Set<String> reachable = new HashSet<>();
         Queue<String> queue = new LinkedList<>();
-        int maxIterations = Math.min(blocks.size() * 2, 5000); // Scale with block count but cap at 5000
-        int iterations = 0;
 
+        // Start from entry blocks
         for (RoadBlock entry : entryBlocks) {
             String key = entry.toKey();
             queue.add(key);
-            connectedToEntry.add(key);
+            reachable.add(key);
         }
+
+        // Flood fill with sufficient iterations
+        // Each iteration processes one block, so we need at least blocks.size() iterations
+        // to potentially reach all blocks. Add extra headroom for complex paths.
+        int maxIterations = Math.max(blocks.size() * 3, 5000);
+        int iterations = 0;
 
         while (!queue.isEmpty() && iterations < maxIterations) {
             iterations++;
@@ -416,27 +431,45 @@ public final class SqlRoadService implements RoadService {
             RoadBlock current = spatialIndex.get(currentKey);
             if (current == null) continue;
 
-            // Use chunk-based neighbor lookup (much faster than coordinate iteration)
-            Set<String> neighbors = getNeighbors(current, spatialIndex, chunkIndex, xzRadius, yTolerance);
-            for (String neighborKey : neighbors) {
-                if (!connectedToEntry.contains(neighborKey)) {
-                    connectedToEntry.add(neighborKey);
-                    queue.add(neighborKey);
+            // Check neighbors efficiently
+            for (int dx = -xzRadius; dx <= xzRadius; dx++) {
+                for (int dz = -xzRadius; dz <= xzRadius; dz++) {
+                    for (int dy = -yTolerance; dy <= yTolerance; dy++) {
+                        if (dx == 0 && dy == 0 && dz == 0) continue;
+                        String neighborKey = RoadBlock.toKey(current.x() + dx, current.y() + dy, current.z() + dz);
+                        if (spatialIndex.containsKey(neighborKey) && !reachable.contains(neighborKey)) {
+                            reachable.add(neighborKey);
+                            queue.add(neighborKey);
+                        }
+                    }
                 }
             }
         }
 
-        // Check if we explored most of the blocks
-        // If we hit the iteration limit but connected less than 80% of blocks, there's likely a gap
-        int disconnectedCount = blocks.size() - connectedToEntry.size();
+        // VERY lenient gap detection:
+        // Only flag a gap if LESS THAN 15% of blocks are reachable from entry
+        // AND there are at least 100 blocks total
+        // This threshold is intentionally very low because auto-scanning picks up
+        // many scattered terrain blocks that aren't part of the actual road
+        double reachablePercent = (double) reachable.size() / blocks.size();
 
-        // Gap detection: if significant blocks are disconnected, there's a gap
-        // - At least 3 disconnected blocks (avoid false positives from tiny isolated paths)
-        // - AND more than 10% of blocks are disconnected
-        if (disconnectedCount >= 3 && disconnectedCount > blocks.size() * 0.1) {
-            return true; // Gap detected
+        logger.info("[RoadService] hasRoadGapsInRegion " + regionId + ": " +
+                reachable.size() + "/" + blocks.size() + " reachable (" +
+                String.format("%.1f%%", reachablePercent * 100) + "), entryBlocks=" + entryBlocks.size() +
+                ", entryRegion=" + entryRegion);
+
+        // Only detect gaps if:
+        // 1. Less than 15% reachable (very severe disconnection)
+        // 2. At least 100 blocks total (significant road network)
+        // 3. At least 10 entry blocks (road actually reaches the border)
+        if (reachablePercent < 0.15 && blocks.size() >= 100 && entryBlocks.size() >= 10) {
+            logger.info("[RoadService] Gap detected in " + regionId + ": only " +
+                    String.format("%.1f%%", reachablePercent * 100) + " reachable (" +
+                    reachable.size() + "/" + blocks.size() + ")");
+            return true;
         }
 
+        logger.info("[RoadService] hasRoadGapsInRegion " + regionId + ": NO GAP");
         return false;
     }
 
@@ -564,12 +597,12 @@ public final class SqlRoadService implements RoadService {
                 if (adjacent.equals(regionId)) {
                     // Check if the road in the target region is continuous from the entry point
                     // If the region has internal gaps (multiple disconnected components), it's only partial
-                    if (hasRoadGapsInRegion(adjacent, team)) {
-                        // Return -1 to indicate no valid continuous path
-                        // This will cause calculateSupplyLevel to check hasRegionPathToHome next
-                        // which will return PARTIAL
+                    boolean hasGaps = hasRoadGapsInRegion(adjacent, team);
+                    if (hasGaps) {
+                        logger.info("[RoadService] findRoadPathToHome: " + adjacent + " has gaps, trying other paths");
                         continue; // Try other paths
                     }
+                    logger.info("[RoadService] findRoadPathToHome: SUCCESS - path to " + regionId + " found via " + current.regionId);
                     return current.distance + 1;
                 }
 
@@ -578,6 +611,7 @@ public final class SqlRoadService implements RoadService {
             }
         }
 
+        logger.info("[RoadService] findRoadPathToHome: FAILED - no path found to " + regionId);
         return -1; // Not connected via roads
     }
 
@@ -597,6 +631,12 @@ public final class SqlRoadService implements RoadService {
      * @return true if a continuous road path exists through the region
      */
     private boolean verifyContinuousRoadThroughRegion(String regionId, String entryRegion, String exitRegion, String team) {
+        // If gap detection is disabled, assume roads are continuous
+        // This avoids false negatives from scattered terrain blocks
+        if (!configManager.isSupplyGapDetectionEnabled()) {
+            return true;
+        }
+
         int roundId = getCurrentRoundId();
         if (roundId < 0) return false;
 
@@ -990,6 +1030,46 @@ public final class SqlRoadService implements RoadService {
     private boolean isBlockInRegion(RoadBlock block, String regionId) {
         String blockRegion = getRegionIdForLocation(block.x(), block.z());
         return regionId.equals(blockRegion);
+    }
+
+    @Override
+    public int[] getBorderAreaPublic(String region1, String region2) {
+        return getBorderArea(region1, region2);
+    }
+
+    @Override
+    public int scanBorderArea(String region1, String region2, String team, org.bukkit.World world) {
+        int[] border = getBorderArea(region1, region2);
+        if (border == null) return 0;
+
+        // Get valid path block types from config
+        List<String> pathBlockNames = configManager.getSupplyPathBlocks();
+        Set<org.bukkit.Material> pathBlocks = new java.util.HashSet<>();
+        if (pathBlockNames == null || pathBlockNames.isEmpty()) {
+            pathBlocks.add(org.bukkit.Material.DIRT_PATH);
+            pathBlocks.add(org.bukkit.Material.GRAVEL);
+            pathBlocks.add(org.bukkit.Material.COBBLESTONE);
+            pathBlocks.add(org.bukkit.Material.STONE_BRICKS);
+            pathBlocks.add(org.bukkit.Material.POLISHED_ANDESITE);
+        } else {
+            for (String name : pathBlockNames) {
+                try {
+                    pathBlocks.add(org.bukkit.Material.valueOf(name.toUpperCase()));
+                } catch (IllegalArgumentException ignored) {}
+            }
+        }
+
+        UUID systemUuid = UUID.fromString("00000000-0000-0000-0000-000000000000");
+
+        logger.info("[RoadService] Scanning border " + region1 + "<->" + region2 +
+                ": X[" + border[0] + " to " + border[1] + "] Z[" + border[2] + " to " + border[3] + "]");
+
+        int found = scanAreaForRoads(border[0], border[1], border[2], border[3],
+                world, pathBlocks, systemUuid, team);
+
+        logger.info("[RoadService] Found " + found + " road blocks at border " + region1 + "<->" + region2);
+
+        return found;
     }
 
 
@@ -1441,6 +1521,304 @@ public final class SqlRoadService implements RoadService {
             case UNSUPPLIED -> configManager.getSupplyUnsuppliedHealthRegen();
             case ISOLATED -> configManager.getSupplyIsolatedHealthRegen();
         };
+    }
+
+    // ==================== AUTO-SCANNING ====================
+
+    @Override
+    public int scanRegionForRoads(String regionId, String team, org.bukkit.World world) {
+        int roundId = getCurrentRoundId();
+        if (roundId < 0) {
+            logger.warning("[RoadService] Cannot scan region - no active round!");
+            return 0;
+        }
+
+        if (world == null) {
+            logger.warning("[RoadService] Cannot scan region - world is null!");
+            return 0;
+        }
+
+        // Get region bounds
+        int[] bounds = getRegionBounds(regionId);
+        if (bounds == null) {
+            logger.warning("[RoadService] Cannot scan region - invalid region ID: " + regionId);
+            return 0;
+        }
+
+        int minX = bounds[0], maxX = bounds[1], minZ = bounds[2], maxZ = bounds[3];
+
+        // Get valid path block types from config
+        List<String> pathBlockNames = configManager.getSupplyPathBlocks();
+        Set<org.bukkit.Material> pathBlocks = new java.util.HashSet<>();
+        if (pathBlockNames == null || pathBlockNames.isEmpty()) {
+            pathBlocks.add(org.bukkit.Material.DIRT_PATH);
+            pathBlocks.add(org.bukkit.Material.GRAVEL);
+            pathBlocks.add(org.bukkit.Material.COBBLESTONE);
+            pathBlocks.add(org.bukkit.Material.STONE_BRICKS);
+            pathBlocks.add(org.bukkit.Material.POLISHED_ANDESITE);
+        } else {
+            for (String name : pathBlockNames) {
+                try {
+                    pathBlocks.add(org.bukkit.Material.valueOf(name.toUpperCase()));
+                } catch (IllegalArgumentException ignored) {}
+            }
+        }
+
+        // Scan parameters
+        final int START_Y = 52;
+        final int AIR_THRESHOLD = 10;
+        final int SOLID_THRESHOLD = 10;
+
+        int foundCount = 0;
+        UUID systemUuid = UUID.fromString("00000000-0000-0000-0000-000000000000"); // System-placed
+
+        // Scan the region for path blocks
+        for (int x = minX; x <= maxX; x++) {
+            for (int z = minZ; z <= maxZ; z++) {
+                // Scan up from START_Y
+                int consecutiveAir = 0;
+                for (int y = START_Y; y < world.getMaxHeight() && consecutiveAir < AIR_THRESHOLD; y++) {
+                    org.bukkit.block.Block block = world.getBlockAt(x, y, z);
+                    org.bukkit.Material type = block.getType();
+
+                    if (type.isAir()) {
+                        consecutiveAir++;
+                    } else {
+                        consecutiveAir = 0;
+                        if (pathBlocks.contains(type)) {
+                            // Check if already registered
+                            if (!isRoadBlock(x, y, z)) {
+                                insertRoadBlockWithoutRecalculation(x, y, z, systemUuid, team);
+                                foundCount++;
+                            }
+                        }
+                    }
+                }
+
+                // Scan down from START_Y
+                int consecutiveSolid = 0;
+                for (int y = START_Y - 1; y >= world.getMinHeight() && consecutiveSolid < SOLID_THRESHOLD; y--) {
+                    org.bukkit.block.Block block = world.getBlockAt(x, y, z);
+                    org.bukkit.Material type = block.getType();
+
+                    if (pathBlocks.contains(type)) {
+                        // Check if already registered
+                        if (!isRoadBlock(x, y, z)) {
+                            insertRoadBlockWithoutRecalculation(x, y, z, systemUuid, team);
+                            foundCount++;
+                        }
+                        consecutiveSolid = 0;
+                    } else if (type.isAir()) {
+                        consecutiveSolid = 0;
+                    } else {
+                        consecutiveSolid++;
+                    }
+                }
+            }
+        }
+
+        // Recalculate supply once at the end
+        if (foundCount > 0) {
+            recalculateSupply(team);
+            logger.info("[RoadService] Auto-scanned " + regionId + " for " + team + ": found " + foundCount + " road blocks");
+        }
+
+        // Also scan the border areas of adjacent owned regions to ensure connections work
+        // This fixes the case where home region has roads but they weren't registered
+        int borderBlocksFound = scanAdjacentBordersForRoads(regionId, team, world, pathBlocks);
+        if (borderBlocksFound > 0) {
+            recalculateSupply(team);
+            logger.info("[RoadService] Auto-scanned adjacent borders for " + regionId + ": found " + borderBlocksFound + " additional road blocks");
+        }
+
+        return foundCount + borderBlocksFound;
+    }
+
+    /**
+     * Scans the border areas of adjacent owned regions for path blocks.
+     * If an adjacent region has NO road blocks, does a full scan of that region too.
+     */
+    private int scanAdjacentBordersForRoads(String regionId, String team, org.bukkit.World world,
+                                             Set<org.bukkit.Material> pathBlocks) {
+        int roundId = getCurrentRoundId();
+        if (roundId < 0) return 0;
+
+        UUID systemUuid = UUID.fromString("00000000-0000-0000-0000-000000000000");
+        int totalFound = 0;
+
+        logger.info("[RoadService] Scanning adjacent borders for " + regionId + " (team: " + team + ")");
+
+        // Get adjacent regions that are owned by the same team
+        List<String> adjacentRegions = regionService.getAdjacentRegions(regionId);
+        logger.info("[RoadService] Adjacent regions: " + adjacentRegions);
+
+        for (String adjRegion : adjacentRegions) {
+            Optional<RegionStatus> adjStatus = regionService.getRegionStatus(adjRegion);
+
+            if (adjStatus.isEmpty()) {
+                logger.info("[RoadService] " + adjRegion + " has no status");
+                continue;
+            }
+
+            if (!adjStatus.get().isOwnedBy(team)) {
+                logger.info("[RoadService] " + adjRegion + " not owned by " + team + " (owner: " + adjStatus.get().ownerTeam() + ")");
+                continue;
+            }
+
+            // Check if adjacent region has ANY road blocks
+            int existingBlocks = getRoadBlockCount(adjRegion, team);
+            logger.info("[RoadService] " + adjRegion + " has " + existingBlocks + " existing road blocks");
+
+            if (existingBlocks == 0) {
+                // Adjacent region has NO road blocks - do a full scan of that region
+                // This handles the case where home region was never scanned
+                logger.info("[RoadService] Adjacent region " + adjRegion + " has no road blocks - scanning entire region");
+
+                int[] adjBounds = getRegionBounds(adjRegion);
+                if (adjBounds != null) {
+                    logger.info("[RoadService] Scanning " + adjRegion + " bounds: X[" + adjBounds[0] + " to " + adjBounds[1] + "] Z[" + adjBounds[2] + " to " + adjBounds[3] + "]");
+                    int adjFound = scanAreaForRoads(adjBounds[0], adjBounds[1], adjBounds[2], adjBounds[3],
+                            world, pathBlocks, systemUuid, team);
+                    totalFound += adjFound;
+                    logger.info("[RoadService] Found " + adjFound + " road blocks in " + adjRegion);
+                }
+            } else {
+                // Adjacent region has blocks - scan the border area
+                int[] border = getBorderArea(regionId, adjRegion);
+                if (border != null) {
+                    logger.info("[RoadService] Scanning border " + regionId + "<->" + adjRegion +
+                            ": X[" + border[0] + " to " + border[1] + "] Z[" + border[2] + " to " + border[3] + "]");
+
+                    // Check how many existing blocks are at the border ON BOTH SIDES
+                    List<RoadBlock> blocksInAdj = getRoadBlocksInRegion(adjRegion, team).stream()
+                            .filter(b -> b.x() >= border[0] && b.x() <= border[1] &&
+                                        b.z() >= border[2] && b.z() <= border[3])
+                            .toList();
+                    List<RoadBlock> blocksInThis = getRoadBlocksInRegion(regionId, team).stream()
+                            .filter(b -> b.x() >= border[0] && b.x() <= border[1] &&
+                                        b.z() >= border[2] && b.z() <= border[3])
+                            .toList();
+                    logger.info("[RoadService] Existing blocks at border - " + adjRegion + ": " + blocksInAdj.size() +
+                            ", " + regionId + ": " + blocksInThis.size());
+
+                    // Show sample coordinates
+                    if (!blocksInAdj.isEmpty()) {
+                        RoadBlock sample = blocksInAdj.get(0);
+                        logger.info("[RoadService] Sample block in " + adjRegion + ": " + sample.x() + "," + sample.y() + "," + sample.z());
+                    }
+                    if (!blocksInThis.isEmpty()) {
+                        RoadBlock sample = blocksInThis.get(0);
+                        logger.info("[RoadService] Sample block in " + regionId + ": " + sample.x() + "," + sample.y() + "," + sample.z());
+                    }
+
+                    int borderFound = scanAreaForRoads(border[0], border[1], border[2], border[3],
+                            world, pathBlocks, systemUuid, team);
+                    totalFound += borderFound;
+                    if (borderFound > 0) {
+                        logger.info("[RoadService] Found " + borderFound + " NEW road blocks at border " + regionId + "<->" + adjRegion);
+                    } else {
+                        logger.info("[RoadService] No new path blocks found at border");
+
+                        // If both sides have blocks but connection fails, explain why
+                        if (!blocksInAdj.isEmpty() && !blocksInThis.isEmpty()) {
+                            boolean connected = checkBorderRoadConnection(regionId, adjRegion, team);
+                            logger.info("[RoadService] Border connection check: " + (connected ? "CONNECTED" : "FAILED"));
+                        } else if (blocksInAdj.isEmpty()) {
+                            logger.info("[RoadService] " + adjRegion + " has no blocks at border!");
+                        } else if (blocksInThis.isEmpty()) {
+                            logger.info("[RoadService] " + regionId + " has no blocks at border!");
+                        }
+                    }
+                }
+            }
+        }
+
+        logger.info("[RoadService] Total found in adjacent scans: " + totalFound);
+        return totalFound;
+    }
+
+    /**
+     * Scans a rectangular area for path blocks and registers them.
+     */
+    private int scanAreaForRoads(int minX, int maxX, int minZ, int maxZ,
+                                  org.bukkit.World world, Set<org.bukkit.Material> pathBlocks,
+                                  UUID systemUuid, String team) {
+        final int START_Y = 52;
+        final int AIR_THRESHOLD = 100; // High threshold to catch elevated roads/bridges
+        final int SOLID_THRESHOLD = 10;
+        int foundCount = 0;
+
+        for (int x = minX; x <= maxX; x++) {
+            for (int z = minZ; z <= maxZ; z++) {
+                // Scan up from START_Y
+                int consecutiveAir = 0;
+                for (int y = START_Y; y < world.getMaxHeight() && consecutiveAir < AIR_THRESHOLD; y++) {
+                    org.bukkit.block.Block block = world.getBlockAt(x, y, z);
+                    org.bukkit.Material type = block.getType();
+
+                    if (type.isAir()) {
+                        consecutiveAir++;
+                    } else {
+                        consecutiveAir = 0;
+                        if (pathBlocks.contains(type)) {
+                            if (!isRoadBlock(x, y, z)) {
+                                insertRoadBlockWithoutRecalculation(x, y, z, systemUuid, team);
+                                foundCount++;
+                            }
+                        }
+                    }
+                }
+
+                // Scan down from START_Y
+                int consecutiveSolid = 0;
+                for (int y = START_Y - 1; y >= world.getMinHeight() && consecutiveSolid < SOLID_THRESHOLD; y--) {
+                    org.bukkit.block.Block block = world.getBlockAt(x, y, z);
+                    org.bukkit.Material type = block.getType();
+
+                    if (pathBlocks.contains(type)) {
+                        if (!isRoadBlock(x, y, z)) {
+                            insertRoadBlockWithoutRecalculation(x, y, z, systemUuid, team);
+                            foundCount++;
+                        }
+                        consecutiveSolid = 0;
+                    } else if (type.isAir()) {
+                        consecutiveSolid = 0;
+                    } else {
+                        consecutiveSolid++;
+                    }
+                }
+            }
+        }
+
+        return foundCount;
+    }
+
+    /**
+     * Gets the bounds for a region.
+     * @return [minX, maxX, minZ, maxZ] or null if invalid
+     */
+    private int[] getRegionBounds(String regionId) {
+        if (regionId == null || regionId.length() < 2) return null;
+
+        char row = regionId.toUpperCase().charAt(0);
+        int col;
+        try {
+            col = Integer.parseInt(regionId.substring(1));
+        } catch (NumberFormatException e) {
+            return null;
+        }
+
+        if (row < 'A' || row > 'D' || col < 1 || col > 4) return null;
+
+        int gridX = col - 1;
+        int gridZ = row - 'A';
+
+        int minX = gridX * REGION_BLOCKS - HALF_SIZE;
+        int maxX = minX + REGION_BLOCKS - 1;
+        int minZ = gridZ * REGION_BLOCKS - HALF_SIZE;
+        int maxZ = minZ + REGION_BLOCKS - 1;
+
+        return new int[]{minX, maxX, minZ, maxZ};
     }
 
     // ==================== CLEANUP ====================

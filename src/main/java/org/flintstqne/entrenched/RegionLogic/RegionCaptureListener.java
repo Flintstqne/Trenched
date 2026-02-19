@@ -37,6 +37,11 @@ public final class RegionCaptureListener implements Listener {
     // Banner tracking: "x,z" -> team color
     private final Map<String, String> placedBanners = new ConcurrentHashMap<>();
 
+    // Banner placement cooldown: "x,z" -> timestamp when IP was last awarded
+    // Prevents place/break/place IP farming at the same location
+    private final Map<String, Long> bannerPlacementCooldowns = new ConcurrentHashMap<>();
+    private static final long BANNER_COOLDOWN_MS = 300000; // 5 minutes
+
     public RegionCaptureListener(RegionService regionService, TeamService teamService,
                                   ConfigManager configManager, RegionRenderer regionRenderer) {
         this.regionService = regionService;
@@ -222,13 +227,28 @@ public final class RegionCaptureListener implements Listener {
 
             if (bannerTeam != null && bannerTeam.equalsIgnoreCase(team) && canEarnInfluence) {
                 placedBanners.put(bannerKey, team);
-                regionService.onBannerPlace(player.getUniqueId(), team, block.getX(), block.getZ());
 
-                if (regionId != null) {
-                    String regionName = getRegionDisplayName(regionId);
-                    player.sendMessage(configManager.getPrefix() + ChatColor.GREEN + "+" +
-                            configManager.getRegionBannerPlacePoints() + " IP " +
-                            ChatColor.GRAY + "- Banner placed in " + regionName);
+                // Check cooldown to prevent place/break/place IP farming
+                long now = System.currentTimeMillis();
+                Long lastPlacement = bannerPlacementCooldowns.get(bannerKey);
+                boolean onCooldown = lastPlacement != null && (now - lastPlacement) < BANNER_COOLDOWN_MS;
+
+                if (!onCooldown) {
+                    // Award IP and set cooldown
+                    bannerPlacementCooldowns.put(bannerKey, now);
+                    regionService.onBannerPlace(player.getUniqueId(), team, block.getX(), block.getZ());
+
+                    if (regionId != null) {
+                        String regionName = getRegionDisplayName(regionId);
+                        player.sendMessage(configManager.getPrefix() + ChatColor.GREEN + "+" +
+                                configManager.getRegionBannerPlacePoints() + " IP " +
+                                ChatColor.GRAY + "- Banner placed in " + regionName);
+                    }
+                } else {
+                    // On cooldown - no IP awarded
+                    long remainingSeconds = (BANNER_COOLDOWN_MS - (now - lastPlacement)) / 1000;
+                    player.sendMessage(configManager.getPrefix() + ChatColor.YELLOW +
+                            "Banner placed, but this location is on cooldown (" + remainingSeconds + "s remaining).");
                 }
             }
         } else if (canEarnInfluence) {

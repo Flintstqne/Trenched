@@ -326,6 +326,10 @@ public final class ConfigManager {
         return config.getInt("regions.supply.border-width", 32);
     }
 
+    public boolean isSupplyGapDetectionEnabled() {
+        return config.getBoolean("regions.supply.gap-detection-enabled", false);
+    }
+
     public int getSupplyPartialRespawnDelay() {
         return config.getInt("regions.supply.partial-supply-respawn-delay", 5);
     }
@@ -366,6 +370,64 @@ public final class ConfigManager {
 
     public int getRegionMinRegionsToAttackHome() {
         return config.getInt("regions.home.min-regions-to-attack", 2);
+    }
+
+    // ==================== Objective Settings ====================
+
+    /**
+     * Gets the maximum number of active objectives per region.
+     */
+    public int getObjectivesPerRegion() {
+        return config.getInt("regions.objectives.objectives-per-region", 2);
+    }
+
+    /**
+     * Gets the cooldown in minutes before a player can complete the same objective type again.
+     */
+    public int getObjectiveCooldownMinutes() {
+        return config.getInt("regions.objectives.cooldown-minutes", 5);
+    }
+
+    /**
+     * Gets the interval in minutes for refreshing/spawning new objectives.
+     */
+    public int getObjectiveRefreshMinutes() {
+        return config.getInt("regions.objectives.refresh-minutes", 10);
+    }
+
+    /**
+     * Gets whether objective hints should be shown in action bar.
+     */
+    public boolean isObjectiveHintsEnabled() {
+        return config.getBoolean("regions.objectives.show-hints", true);
+    }
+
+    /**
+     * Gets whether objective beacons/particles should be shown.
+     */
+    public boolean isObjectiveMarkersEnabled() {
+        return config.getBoolean("regions.objectives.show-markers", true);
+    }
+
+    /**
+     * Gets whether objective boss bars should be shown when near an objective.
+     */
+    public boolean isObjectiveBossBarsEnabled() {
+        return config.getBoolean("regions.objectives.show-boss-bars", true);
+    }
+
+    /**
+     * Gets the distance from an objective to show the boss bar.
+     */
+    public int getObjectiveBossBarDistance() {
+        return config.getInt("regions.objectives.boss-bar-distance", 50);
+    }
+
+    /**
+     * Gets the distance from an objective to show action bar hints.
+     */
+    public int getObjectiveHintDistance() {
+        return config.getInt("regions.objectives.hint-distance", 100);
     }
 
     // ==================== Debug Settings ====================

@@ -506,13 +506,142 @@ public final class AdminCommand implements CommandExecutor, TabCompleter {
 
     private boolean handleSupply(CommandSender sender, String[] args) {
         if (args.length < 2) {
-            sender.sendMessage(ChatColor.YELLOW + "Usage: /admin supply <recalculate|info|debug|clear>");
+            sender.sendMessage(ChatColor.YELLOW + "Usage: /admin supply <recalculate|info|debug|diagnose|clear>");
             return true;
         }
 
         String action = args[1].toLowerCase();
 
         return switch (action) {
+            case "diagnose" -> {
+                // Comprehensive diagnostic check for supply system
+                sender.sendMessage(ChatColor.GOLD + "=== Supply System Diagnostics ===");
+
+                // 1. Check for active round
+                var currentRound = roundService.getCurrentRound();
+                if (currentRound.isEmpty()) {
+                    sender.sendMessage(ChatColor.RED + "✗ NO ACTIVE ROUND!");
+                    sender.sendMessage(ChatColor.GRAY + "  Supply system cannot function without a round.");
+                    sender.sendMessage(ChatColor.YELLOW + "  Fix: Run /round new or restart server.");
+                    yield true;
+                }
+                sender.sendMessage(ChatColor.GREEN + "✓ Active Round: " + currentRound.get().roundId());
+
+                // 2. Check region initialization
+                int redRegions = 0, blueRegions = 0, neutralRegions = 0;
+                for (char row = 'A'; row <= 'D'; row++) {
+                    for (int col = 1; col <= 4; col++) {
+                        String regId = row + String.valueOf(col);
+                        Optional<RegionStatus> status = regionService.getRegionStatus(regId);
+                        if (status.isEmpty()) {
+                            sender.sendMessage(ChatColor.RED + "✗ Region " + regId + " not initialized!");
+                        } else {
+                            String owner = status.get().ownerTeam();
+                            if ("red".equalsIgnoreCase(owner)) redRegions++;
+                            else if ("blue".equalsIgnoreCase(owner)) blueRegions++;
+                            else neutralRegions++;
+                        }
+                    }
+                }
+                sender.sendMessage(ChatColor.GREEN + "✓ Regions: " +
+                        ChatColor.RED + redRegions + " red" + ChatColor.WHITE + ", " +
+                        ChatColor.BLUE + blueRegions + " blue" + ChatColor.WHITE + ", " +
+                        ChatColor.GRAY + neutralRegions + " neutral");
+
+                // 3. Check road blocks in database
+                int redRoads = 0, blueRoads = 0;
+                for (char row = 'A'; row <= 'D'; row++) {
+                    for (int col = 1; col <= 4; col++) {
+                        String regId = row + String.valueOf(col);
+                        redRoads += roadService.getRoadBlockCount(regId, "red");
+                        blueRoads += roadService.getRoadBlockCount(regId, "blue");
+                    }
+                }
+                if (redRoads == 0 && blueRoads == 0) {
+                    sender.sendMessage(ChatColor.YELLOW + "⚠ No road blocks registered!");
+                    sender.sendMessage(ChatColor.GRAY + "  Players need to place path blocks, OR run:");
+                    sender.sendMessage(ChatColor.GRAY + "  /admin supply register <region> <team>");
+                } else {
+                    sender.sendMessage(ChatColor.GREEN + "✓ Road Blocks: " +
+                            ChatColor.RED + redRoads + " red" + ChatColor.WHITE + ", " +
+                            ChatColor.BLUE + blueRoads + " blue");
+                }
+
+                // 4. Check path block configuration
+                List<String> pathBlocks = configManager.getSupplyPathBlocks();
+                if (pathBlocks == null || pathBlocks.isEmpty()) {
+                    sender.sendMessage(ChatColor.YELLOW + "⚠ Using default path blocks (DIRT_PATH, GRAVEL, etc.)");
+                } else {
+                    sender.sendMessage(ChatColor.GREEN + "✓ Path Blocks: " + String.join(", ", pathBlocks));
+                }
+
+                // 5. Check supply status for owned regions
+                sender.sendMessage(ChatColor.GOLD + "=== Supply Status by Region ===");
+                for (String teamCheck : new String[]{"red", "blue"}) {
+                    String homeRegion = teamCheck.equals("red") ?
+                            configManager.getRegionRedHome() : configManager.getRegionBlueHome();
+                    Set<String> connectedRegions = roadService.getConnectedRegions(teamCheck);
+
+                    StringBuilder teamStatus = new StringBuilder();
+                    int ownedCount = 0;
+                    int suppliedCount = 0;
+                    int partialCount = 0;
+                    int unsuppliedCount = 0;
+
+                    for (char row = 'A'; row <= 'D'; row++) {
+                        for (int col = 1; col <= 4; col++) {
+                            String regId = row + String.valueOf(col);
+                            Optional<RegionStatus> status = regionService.getRegionStatus(regId);
+                            if (status.isPresent() && teamCheck.equalsIgnoreCase(status.get().ownerTeam())) {
+                                ownedCount++;
+                                SupplyLevel level = roadService.getSupplyLevel(regId, teamCheck);
+                                switch (level) {
+                                    case SUPPLIED -> suppliedCount++;
+                                    case PARTIAL -> partialCount++;
+                                    default -> unsuppliedCount++;
+                                }
+                            }
+                        }
+                    }
+
+                    ChatColor teamColor = teamCheck.equals("red") ? ChatColor.RED : ChatColor.BLUE;
+                    if (ownedCount > 0) {
+                        sender.sendMessage(teamColor + teamCheck.toUpperCase() + ChatColor.WHITE +
+                                ": " + ownedCount + " regions owned - " +
+                                ChatColor.GREEN + suppliedCount + " supplied" + ChatColor.WHITE + ", " +
+                                ChatColor.YELLOW + partialCount + " partial" + ChatColor.WHITE + ", " +
+                                ChatColor.RED + unsuppliedCount + " unsupplied");
+
+                        // Show problem regions
+                        if (partialCount > 0 || unsuppliedCount > 0) {
+                            for (char row = 'A'; row <= 'D'; row++) {
+                                for (int col = 1; col <= 4; col++) {
+                                    String regId = row + String.valueOf(col);
+                                    Optional<RegionStatus> status = regionService.getRegionStatus(regId);
+                                    if (status.isPresent() && teamCheck.equalsIgnoreCase(status.get().ownerTeam())) {
+                                        SupplyLevel level = roadService.getSupplyLevel(regId, teamCheck);
+                                        if (level != SupplyLevel.SUPPLIED) {
+                                            String regName = getRegionDisplayName(regId);
+                                            int blocks = roadService.getRoadBlockCount(regId, teamCheck);
+                                            boolean connected = connectedRegions.contains(regId);
+                                            sender.sendMessage(ChatColor.GRAY + "  " + regName + " [" + regId + "]: " +
+                                                    (level == SupplyLevel.PARTIAL ? ChatColor.YELLOW : ChatColor.RED) + level +
+                                                    ChatColor.GRAY + " (" + blocks + " blocks, " +
+                                                    (connected ? "connected" : "disconnected") + ")");
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 6. Summary
+                sender.sendMessage(ChatColor.GOLD + "=== Diagnostics Complete ===");
+                sender.sendMessage(ChatColor.GRAY + "For detailed debug: /admin supply debug <region> <team>");
+                sender.sendMessage(ChatColor.GRAY + "To force recalculate: /admin supply recalculate");
+                yield true;
+            }
             case "recalculate" -> {
                 if (args.length < 3) {
                     roadService.recalculateSupply("red");
@@ -602,6 +731,7 @@ public final class AdminCommand implements CommandExecutor, TabCompleter {
 
                 // Check each border connection in detail
                 sender.sendMessage(ChatColor.YELLOW + "--- Border Connection Details ---");
+                boolean anyDisconnected = false;
                 for (String adj : adjacent) {
                     Optional<RegionStatus> adjStatus = regionService.getRegionStatus(adj);
                     if (adjStatus.isEmpty() || !adjStatus.get().isOwnedBy(team)) continue;
@@ -610,6 +740,13 @@ public final class AdminCommand implements CommandExecutor, TabCompleter {
                     boolean borderConn = roadService.checkBorderRoadConnection(regionId, adj, team);
                     sender.sendMessage(ChatColor.GRAY + "Border " + regionId + " <-> " + adj + " (" + adjName + "): " +
                             (borderConn ? ChatColor.GREEN + "Connected" : ChatColor.RED + "Not Connected"));
+                    if (!borderConn) anyDisconnected = true;
+                }
+
+                // Show tip if any borders are disconnected
+                if (anyDisconnected && pathLength < 0) {
+                    sender.sendMessage(ChatColor.YELLOW + "TIP: " + ChatColor.GRAY +
+                            "Build a road (path blocks) connecting this region to an adjacent supplied region.");
                 }
 
                 // Show connected regions via roads
@@ -1041,6 +1178,210 @@ public final class AdminCommand implements CommandExecutor, TabCompleter {
                 yield true;
             }
 
+            case "scantest" -> {
+                // Test the auto-scan functionality for a region
+                if (!(sender instanceof Player player)) {
+                    sender.sendMessage(ChatColor.RED + "This command must be run by a player.");
+                    yield true;
+                }
+                if (args.length < 4) {
+                    sender.sendMessage(ChatColor.RED + "Usage: /admin supply scantest <region> <red|blue>");
+                    sender.sendMessage(ChatColor.GRAY + "Tests the auto-scan that runs when a region is captured.");
+                    sender.sendMessage(ChatColor.GRAY + "Check server console for detailed debug output.");
+                    yield true;
+                }
+
+                String regionId = resolveRegionId(args[2]);
+                String team = args[3].toLowerCase();
+                String regionName = getRegionDisplayName(regionId);
+                World world = player.getWorld();
+
+                sender.sendMessage(ChatColor.YELLOW + "Running auto-scan test for " + regionName + " [" + regionId + "]...");
+                sender.sendMessage(ChatColor.GRAY + "Check server console for detailed debug logs.");
+
+                // Show current state before scan
+                int beforeBlocks = roadService.getRoadBlockCount(regionId, team);
+                sender.sendMessage(ChatColor.GRAY + "Road blocks BEFORE scan: " + beforeBlocks);
+
+                // Run the scan (this will log to console)
+                int found = roadService.scanRegionForRoads(regionId, team, world);
+
+                // Show state after scan
+                int afterBlocks = roadService.getRoadBlockCount(regionId, team);
+                sender.sendMessage(ChatColor.GREEN + "Scan complete!");
+                sender.sendMessage(ChatColor.GRAY + "New blocks found: " + ChatColor.WHITE + found);
+                sender.sendMessage(ChatColor.GRAY + "Road blocks AFTER scan: " + ChatColor.WHITE + afterBlocks);
+
+                // Check adjacent regions too
+                sender.sendMessage(ChatColor.YELLOW + "Adjacent region status:");
+                for (String adj : regionService.getAdjacentRegions(regionId)) {
+                    Optional<RegionStatus> adjStatus = regionService.getRegionStatus(adj);
+                    String adjName = getRegionDisplayName(adj);
+                    String owner = adjStatus.map(s -> s.ownerTeam() != null ? s.ownerTeam() : "neutral").orElse("unknown");
+                    int adjBlocks = roadService.getRoadBlockCount(adj, team);
+                    boolean connected = roadService.checkBorderRoadConnection(regionId, adj, team);
+
+                    ChatColor color = owner.equalsIgnoreCase(team) ? ChatColor.GREEN : ChatColor.GRAY;
+                    sender.sendMessage(color + "  " + adjName + " [" + adj + "]: owner=" + owner +
+                            ", blocks=" + adjBlocks + ", border=" + (connected ? "CONNECTED" : "disconnected"));
+                }
+
+                yield true;
+            }
+
+            case "scanborder" -> {
+                // Scan the border area between two regions for path blocks
+                if (!(sender instanceof Player player)) {
+                    sender.sendMessage(ChatColor.RED + "This command must be run by a player.");
+                    yield true;
+                }
+                if (args.length < 5) {
+                    sender.sendMessage(ChatColor.RED + "Usage: /admin supply scanborder <region1> <region2> <red|blue>");
+                    sender.sendMessage(ChatColor.GRAY + "Scans the border area between two regions for path blocks.");
+                    yield true;
+                }
+
+                String region1 = resolveRegionId(args[2]);
+                String region2 = resolveRegionId(args[3]);
+                String team = args[4].toLowerCase();
+                World world = player.getWorld();
+
+                sender.sendMessage(ChatColor.YELLOW + "Scanning border between " + region1 + " and " + region2 + "...");
+
+                // Get border area
+                int[] border = roadService.getBorderAreaPublic(region1, region2);
+                if (border == null) {
+                    sender.sendMessage(ChatColor.RED + "These regions are not adjacent!");
+                    yield true;
+                }
+
+                sender.sendMessage(ChatColor.GRAY + "Border area: X[" + border[0] + " to " + border[1] +
+                        "] Z[" + border[2] + " to " + border[3] + "]");
+
+                // Count blocks before
+                int beforeR1 = roadService.getRoadBlockCount(region1, team);
+                int beforeR2 = roadService.getRoadBlockCount(region2, team);
+
+                // Scan the border area
+                int found = roadService.scanBorderArea(region1, region2, team, world);
+
+                // Count blocks after
+                int afterR1 = roadService.getRoadBlockCount(region1, team);
+                int afterR2 = roadService.getRoadBlockCount(region2, team);
+
+                sender.sendMessage(ChatColor.GREEN + "Border scan complete!");
+                sender.sendMessage(ChatColor.GRAY + "New blocks found: " + ChatColor.WHITE + found);
+                sender.sendMessage(ChatColor.GRAY + region1 + " blocks: " + beforeR1 + " → " + afterR1);
+                sender.sendMessage(ChatColor.GRAY + region2 + " blocks: " + beforeR2 + " → " + afterR2);
+
+                // Check connection after scan
+                boolean connected = roadService.checkBorderRoadConnection(region1, region2, team);
+                sender.sendMessage(ChatColor.GRAY + "Border connection: " +
+                        (connected ? ChatColor.GREEN + "CONNECTED" : ChatColor.RED + "NOT CONNECTED"));
+
+                // Trigger recalculation
+                if (found > 0) {
+                    roadService.recalculateSupply(team);
+                    sender.sendMessage(ChatColor.YELLOW + "Supply recalculated for " + team);
+                }
+
+                yield true;
+            }
+
+            case "worldscan" -> {
+                // Inspect what blocks are actually in a border area in the world
+                if (!(sender instanceof Player player)) {
+                    sender.sendMessage(ChatColor.RED + "This command must be run by a player.");
+                    yield true;
+                }
+                if (args.length < 4) {
+                    sender.sendMessage(ChatColor.RED + "Usage: /admin supply worldscan <region1> <region2>");
+                    sender.sendMessage(ChatColor.GRAY + "Shows what path blocks exist at the border in the world.");
+                    yield true;
+                }
+
+                String region1 = resolveRegionId(args[2]);
+                String region2 = resolveRegionId(args[3]);
+                World world = player.getWorld();
+
+                int[] border = roadService.getBorderAreaPublic(region1, region2);
+                if (border == null) {
+                    sender.sendMessage(ChatColor.RED + "These regions are not adjacent!");
+                    yield true;
+                }
+
+                sender.sendMessage(ChatColor.YELLOW + "Scanning world blocks at border " + region1 + "<->" + region2 + "...");
+                sender.sendMessage(ChatColor.GRAY + "Border area: X[" + border[0] + " to " + border[1] +
+                        "] Z[" + border[2] + " to " + border[3] + "]");
+
+                // Get configured path blocks
+                List<String> pathBlockNames = configManager.getSupplyPathBlocks();
+                Set<Material> pathBlocks = new java.util.HashSet<>();
+                if (pathBlockNames == null || pathBlockNames.isEmpty()) {
+                    pathBlocks.add(Material.DIRT_PATH);
+                    pathBlocks.add(Material.GRAVEL);
+                    pathBlocks.add(Material.COBBLESTONE);
+                    pathBlocks.add(Material.STONE_BRICKS);
+                    pathBlocks.add(Material.POLISHED_ANDESITE);
+                } else {
+                    for (String name : pathBlockNames) {
+                        try {
+                            pathBlocks.add(Material.valueOf(name.toUpperCase()));
+                        } catch (IllegalArgumentException ignored) {}
+                    }
+                }
+
+                sender.sendMessage(ChatColor.GRAY + "Looking for: " + pathBlocks.stream()
+                        .map(Material::name).collect(java.util.stream.Collectors.joining(", ")));
+
+                // Scan the border area and count path blocks
+                Map<Material, Integer> blockCounts = new java.util.HashMap<>();
+                int totalPathBlocks = 0;
+                int sampleX = 0, sampleY = 0, sampleZ = 0;
+                Material sampleMat = null;
+
+                final int START_Y = 52;
+                final int AIR_THRESHOLD = 100; // High threshold for elevated roads/bridges
+
+                for (int x = border[0]; x <= border[1]; x++) {
+                    for (int z = border[2]; z <= border[3]; z++) {
+                        int consecutiveAir = 0;
+                        for (int y = START_Y; y < world.getMaxHeight() && consecutiveAir < AIR_THRESHOLD; y++) {
+                            Material type = world.getBlockAt(x, y, z).getType();
+                            if (type.isAir()) {
+                                consecutiveAir++;
+                            } else {
+                                consecutiveAir = 0;
+                                if (pathBlocks.contains(type)) {
+                                    totalPathBlocks++;
+                                    blockCounts.merge(type, 1, Integer::sum);
+                                    if (sampleMat == null) {
+                                        sampleX = x; sampleY = y; sampleZ = z; sampleMat = type;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                sender.sendMessage(ChatColor.GREEN + "World scan complete!");
+                sender.sendMessage(ChatColor.GRAY + "Total path blocks in border area: " + ChatColor.WHITE + totalPathBlocks);
+
+                if (totalPathBlocks > 0) {
+                    sender.sendMessage(ChatColor.GRAY + "Block types found:");
+                    for (Map.Entry<Material, Integer> entry : blockCounts.entrySet()) {
+                        sender.sendMessage(ChatColor.GRAY + "  " + entry.getKey().name() + ": " + entry.getValue());
+                    }
+                    sender.sendMessage(ChatColor.GRAY + "Sample location: " + sampleX + "," + sampleY + "," + sampleZ + " (" + sampleMat + ")");
+                } else {
+                    sender.sendMessage(ChatColor.RED + "No path blocks found in border area!");
+                    sender.sendMessage(ChatColor.YELLOW + "TIP: Build a road using path blocks to connect these regions.");
+                    sender.sendMessage(ChatColor.GRAY + "Valid blocks: DIRT_PATH, STONE_BRICKS, POLISHED_ANDESITE, etc.");
+                }
+
+                yield true;
+            }
+
             case "register" -> {
                 // Register existing road blocks in the world for a team
                 if (!(sender instanceof Player player)) {
@@ -1057,6 +1398,13 @@ public final class AdminCommand implements CommandExecutor, TabCompleter {
                 String team = args[3].toLowerCase();
                 String regionName = getRegionDisplayName(regionId);
 
+                // Check for active round FIRST
+                if (roundService.getCurrentRound().isEmpty()) {
+                    sender.sendMessage(ChatColor.RED + "No active round! Road blocks cannot be registered without an active round.");
+                    sender.sendMessage(ChatColor.GRAY + "Start a new round with /round new or restart the server.");
+                    yield true;
+                }
+
                 // Get region bounds
                 int[] bounds = getRegionBounds(regionId);
                 if (bounds == null) {
@@ -1065,6 +1413,7 @@ public final class AdminCommand implements CommandExecutor, TabCompleter {
                 }
 
                 sender.sendMessage(ChatColor.YELLOW + "Scanning " + regionName + " [" + regionId + "] for path blocks...");
+                sender.sendMessage(ChatColor.GRAY + "Round ID: " + roundService.getCurrentRound().get().roundId());
                 sender.sendMessage(ChatColor.GRAY + "Using adaptive terrain scanning (async)...");
 
                 World world = player.getWorld();
@@ -1089,7 +1438,7 @@ public final class AdminCommand implements CommandExecutor, TabCompleter {
 
                 UUID playerUuid = player.getUniqueId();
                 final int START_Y = 52;
-                final int AIR_THRESHOLD = 10;
+                final int AIR_THRESHOLD = 100; // High threshold for elevated roads/bridges
                 final int SOLID_THRESHOLD = 10;
 
                 // Collect block positions in chunks on main thread, then batch insert async
@@ -1615,7 +1964,7 @@ public final class AdminCommand implements CommandExecutor, TabCompleter {
                 case "region" -> completions.addAll(Arrays.asList("capture", "reset", "setstate", "addip", "info"));
                 case "team" -> completions.addAll(Arrays.asList("setspawn", "wipe", "info"));
                 case "player" -> completions.addAll(Arrays.asList("setteam", "respawn", "tp"));
-                case "supply" -> completions.addAll(Arrays.asList("recalculate", "info", "debug", "gaptest", "borderinfo", "roadpath", "scan", "register", "clear"));
+                case "supply" -> completions.addAll(Arrays.asList("recalculate", "info", "debug", "diagnose", "gaptest", "borderinfo", "roadpath", "scan", "scantest", "scanborder", "worldscan", "register", "clear"));
                 case "merit" -> completions.addAll(Arrays.asList("give", "givetokens", "set", "reset", "info", "leaderboard"));
             }
         } else if (args.length == 3) {

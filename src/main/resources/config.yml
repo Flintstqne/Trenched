@@ -200,6 +200,9 @@ regions:
     # How far from the border line to search for road blocks (in blocks)
     # Higher = more forgiving for roads that don't go right up to the border
     border-width: 32
+    # Enable gap detection (detect blown-up roads)
+    # Disable this if you're having false positives from terrain blocks
+    gap-detection-enabled: false
     # Respawn delay penalties (in seconds)
     partial-supply-respawn-delay: 5     # Connected via regions but no road
     unsupplied-respawn-delay: 15        # No road connection to home
@@ -223,6 +226,25 @@ regions:
     blue: "D4"
     # Enemy must have this many or fewer regions to attack home
     min-regions-to-attack: 2
+
+  # Objective settings
+  objectives:
+    # Maximum active objectives per region
+    objectives-per-region: 2
+    # Cooldown in minutes before a player can complete the same objective type again
+    cooldown-minutes: 5
+    # How often to refresh/spawn new objectives (in minutes)
+    refresh-minutes: 10
+    # Show action bar hints pointing to objectives
+    show-hints: true
+    # Show particle markers at objective locations
+    show-markers: true
+    # Show boss bars when near objectives
+    show-boss-bars: true
+    # Distance to show boss bar (in blocks)
+    boss-bar-distance: 50
+    # Distance to show action bar hints (in blocks)
+    hint-distance: 100
 
 # Debug Settings
 debug:

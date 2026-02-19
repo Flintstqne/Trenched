@@ -74,6 +74,10 @@ commands:
   confirm:
     description: Confirm a pending action (e.g., division creation)
     usage: /confirm
+  objective:
+    description: View and track objectives in your region
+    usage: /objective [list|stats|track <id>]
+    aliases: [obj, objectives]
 
 permissions:
   entrenched.admin:
