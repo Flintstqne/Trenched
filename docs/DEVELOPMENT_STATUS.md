@@ -172,18 +172,24 @@ All features are configurable via `config.yml`:
 
 ## 🚧 NOT YET IMPLEMENTED
 
-### Region Objectives System (Planned)
+### Region Objectives System (Partially Implemented)
 
-The design document (`REGION_CAPTURE_DESIGN.md`) outlines objectives, but they're not coded yet:
+The design document (`REGION_CAPTURE_DESIGN.md`) outlines objectives. Current status:
 
 | Objective | Status | Description |
 |-----------|--------|-------------|
-| **Destroy Supply Cache** | ❌ Not Started | Find/destroy hidden chest |
-| **Assassinate Commander** | ❌ Not Started | Kill highest-kill player |
-| **Sabotage Defenses** | ❌ Not Started | Destroy 50+ wall blocks |
-| **Plant Explosive** | ❌ Not Started | Place TNT, defend 30s |
+| **Destroy Supply Cache** | ✅ Complete | Find/destroy enemy-placed chests |
+| **Assassinate Commander** | ✅ Complete | Kill enemy division commanders/officers (glowing targets) |
+| **Sabotage Defenses** | ✅ Complete | Destroy 50+ wall blocks |
+| **Plant Explosive** | ✅ Complete | Place TNT at target, defend 30s |
 | **Capture Intel** | ❌ Not Started | Retrieve item, return to base |
-| **Hold Ground** | ❌ Not Started | Hold region center 60s |
+| **Hold Ground** | ✅ Complete | Hold region center 60s |
+| **Establish Outpost** | ❌ Not Started | Build structure with bed/chest/crafting table |
+| **Secure Perimeter** | ✅ Complete | Build 100 defensive wall blocks |
+| **Build Supply Route** | ✅ Complete | Build 64 road blocks |
+| **Build Watchtower** | ❌ Not Started | Build 15+ block tall structure |
+| **Establish Resource Depot** | ✅ Complete | 4+ containers with 100+ items |
+| **Build Garrison Quarters** | ❌ Not Started | Build barracks with 3+ beds |
 
 
 ### Additional Features

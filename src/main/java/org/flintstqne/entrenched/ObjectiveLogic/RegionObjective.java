@@ -84,6 +84,14 @@ public record RegionObjective(
                 "Build a road connecting to friendly territory (" + (int)(progress * 64) + "/64 blocks)";
             case RAID_HOLD_GROUND ->
                 "Hold the region center (" + (int)(progress * 60) + "/60 seconds)";
+            case RAID_PLANT_EXPLOSIVE -> {
+                if (progress == 0) {
+                    yield "Plant TNT at the target location";
+                } else {
+                    int seconds = (int)(progress * 30);
+                    yield "Defend the explosive (" + seconds + "/30 seconds)";
+                }
+            }
             case SETTLEMENT_RESOURCE_DEPOT -> {
                 // Progress is (containers/4 + items/100) / 2
                 // Estimate containers and items from progress

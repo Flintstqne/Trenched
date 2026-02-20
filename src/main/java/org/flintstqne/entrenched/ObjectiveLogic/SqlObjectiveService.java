@@ -4,11 +4,16 @@ import org.bukkit.Location;
 import org.bukkit.World;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.flintstqne.entrenched.ConfigManager;
+import org.flintstqne.entrenched.DivisionLogic.DivisionMember;
+import org.flintstqne.entrenched.DivisionLogic.DivisionRole;
+import org.flintstqne.entrenched.DivisionLogic.DivisionService;
+import org.flintstqne.entrenched.DivisionLogic.Division;
 import org.flintstqne.entrenched.RegionLogic.RegionService;
 import org.flintstqne.entrenched.RegionLogic.RegionState;
 import org.flintstqne.entrenched.RegionLogic.RegionStatus;
 import org.flintstqne.entrenched.RoundLogic.Round;
 import org.flintstqne.entrenched.RoundLogic.RoundService;
+import org.flintstqne.entrenched.TeamLogic.TeamService;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -24,6 +29,8 @@ public class SqlObjectiveService implements ObjectiveService {
     private final RoundService roundService;
     private final RegionService regionService;
     private final ConfigManager config;
+    private DivisionService divisionService;
+    private TeamService teamService;
 
     private ObjectiveCompletionCallback completionCallback;
     private ObjectiveSpawnCallback spawnCallback;
@@ -39,6 +46,34 @@ public class SqlObjectiveService implements ObjectiveService {
     // Prevents place/break/place cheese for wall and road objectives
     private final Map<String, Set<String>> objectiveBlocksTracking = new ConcurrentHashMap<>();
 
+    // Track enemy chests by region and team - "regionId:team" -> Set of "x,y,z"
+    // Used for Destroy Supply Cache objective to target enemy-placed chests
+    private final Map<String, Set<String>> enemyChestTracking = new ConcurrentHashMap<>();
+
+    // Track planted explosives - regionId -> PlantedExplosiveData
+    // Used for Plant Explosive objective defend timer
+    private final Map<String, PlantedExplosiveData> plantedExplosives = new ConcurrentHashMap<>();
+
+    // Internal data class for tracking planted explosives
+    private record PlantedExplosiveData(
+            int objectiveId,
+            UUID planterUuid,
+            String planterTeam,
+            int x, int y, int z,
+            long plantedAtMillis,
+            int defendSeconds
+    ) {
+        int getSecondsRemaining() {
+            long elapsed = (System.currentTimeMillis() - plantedAtMillis) / 1000;
+            return Math.max(0, defendSeconds - (int) elapsed);
+        }
+
+        double getProgress() {
+            long elapsed = (System.currentTimeMillis() - plantedAtMillis) / 1000;
+            return Math.min(1.0, (double) elapsed / defendSeconds);
+        }
+    }
+
     public SqlObjectiveService(JavaPlugin plugin, ObjectiveDb db, RoundService roundService,
                                 RegionService regionService, ConfigManager config) {
         this.plugin = plugin;
@@ -49,6 +84,20 @@ public class SqlObjectiveService implements ObjectiveService {
 
         // Pre-calculate region centers
         calculateRegionCenters();
+    }
+
+    /**
+     * Sets the DivisionService (called after construction to avoid circular dependency).
+     */
+    public void setDivisionService(DivisionService divisionService) {
+        this.divisionService = divisionService;
+    }
+
+    /**
+     * Sets the TeamService (called after construction to avoid circular dependency).
+     */
+    public void setTeamService(TeamService teamService) {
+        this.teamService = teamService;
     }
 
     private void calculateRegionCenters() {
@@ -172,6 +221,18 @@ public class SqlObjectiveService implements ObjectiveService {
         List<ObjectiveType> candidates = new ArrayList<>();
         for (ObjectiveType type : availableTypes) {
             if (!activeTypes.contains(type)) {
+                // Special check for assassinate commander - only spawn if valid targets exist
+                if (type == ObjectiveType.RAID_ASSASSINATE_COMMANDER) {
+                    if (!canSpawnAssassinateObjective(regionId)) {
+                        continue; // Skip - no valid targets online
+                    }
+                }
+                // Special check for destroy supply cache - only spawn if enemy chests exist
+                if (type == ObjectiveType.RAID_DESTROY_CACHE) {
+                    if (!canSpawnDestroyCacheObjective(regionId)) {
+                        continue; // Skip - no enemy chests in region
+                    }
+                }
                 candidates.add(type);
             }
         }
@@ -439,13 +500,27 @@ public class SqlObjectiveService implements ObjectiveService {
                 break;
             }
 
-            // Check for destroy cache - if block is a chest at objective location
-            if (obj.type() == ObjectiveType.RAID_DESTROY_CACHE && obj.hasLocation()) {
-                if (blockType.contains("CHEST") &&
-                        Math.abs(obj.locationX() - x) <= 2 &&
-                        Math.abs(obj.locationZ() - z) <= 2) {
-                    completeObjective(obj.id(), playerUuid, team);
-                    break;
+            // Check for destroy cache - if block is an enemy-placed chest
+            if (obj.type() == ObjectiveType.RAID_DESTROY_CACHE) {
+                if (blockType.contains("CHEST")) {
+                    // Get the defending team for this region
+                    Optional<RegionStatus> statusOpt = regionService.getRegionStatus(regionId);
+                    if (statusOpt.isEmpty()) continue;
+
+                    String defenderTeam = statusOpt.get().ownerTeam();
+                    if (defenderTeam == null) continue;
+
+                    // Check if this was an enemy (defender) chest
+                    String trackingKey = regionId + ":" + defenderTeam;
+                    Set<String> enemyChests = enemyChestTracking.get(trackingKey);
+
+                    if (enemyChests != null && enemyChests.remove(blockKey)) {
+                        // This was an enemy chest - complete the objective
+                        completeObjective(obj.id(), playerUuid, team);
+                        plugin.getLogger().info("[Objectives] Supply Cache destroyed by " + playerUuid +
+                                " at " + x + "," + y + "," + z + " in " + regionId);
+                        break;
+                    }
                 }
             }
         }
@@ -553,27 +628,180 @@ public class SqlObjectiveService implements ObjectiveService {
     @Override
     public void onPlayerKill(UUID killerUuid, UUID victimUuid, String regionId) {
         // Check for assassination objective
-        // For now, any kill counts - could add logic to check if victim is "commander"
         for (RegionObjective obj : getActiveObjectives(regionId, ObjectiveCategory.RAID)) {
             if (obj.type() == ObjectiveType.RAID_ASSASSINATE_COMMANDER) {
-                // In a full implementation, we'd check if victimUuid is the commander
-                // For now, complete on any kill within the objective
                 Optional<RegionStatus> statusOpt = regionService.getRegionStatus(regionId);
                 if (statusOpt.isEmpty()) continue;
 
-                // Killer must be attacking team
                 String defenderTeam = statusOpt.get().ownerTeam();
-                // This would need killer's team from context - simplified for now
+                if (defenderTeam == null) continue;
+
+                // Check if the victim is a valid assassination target (commander or officer)
+                if (isAssassinationTarget(victimUuid, defenderTeam)) {
+                    // Get killer's team to verify they're an attacker
+                    if (teamService != null) {
+                        Optional<String> killerTeamOpt = teamService.getPlayerTeam(killerUuid);
+                        if (killerTeamOpt.isPresent() && !killerTeamOpt.get().equalsIgnoreCase(defenderTeam)) {
+                            // Valid assassination - complete objective
+                            completeObjective(obj.id(), killerUuid, killerTeamOpt.get());
+                            plugin.getLogger().info("[Objectives] Assassination completed! " + killerUuid +
+                                    " killed commander/officer " + victimUuid + " in " + regionId);
+                        }
+                    }
+                }
                 break;
             }
         }
     }
 
+    /**
+     * Checks if a player is a valid assassination target (commander or officer of the defending team).
+     */
+    private boolean isAssassinationTarget(UUID playerUuid, String team) {
+        if (divisionService == null) return false;
+
+        Optional<DivisionMember> memberOpt = divisionService.getMembership(playerUuid);
+        if (memberOpt.isEmpty()) return false;
+
+        DivisionMember member = memberOpt.get();
+
+        // Check if they're a commander or officer
+        if (member.role() != DivisionRole.COMMANDER && member.role() != DivisionRole.OFFICER) {
+            return false;
+        }
+
+        // Get their division to verify team
+        Optional<Division> divisionOpt = divisionService.getDivision(member.divisionId());
+        if (divisionOpt.isEmpty()) return false;
+
+        return divisionOpt.get().team().equalsIgnoreCase(team);
+    }
+
+    @Override
+    public List<UUID> getAssassinationTargets(String regionId) {
+        List<UUID> targets = new ArrayList<>();
+
+        if (divisionService == null || teamService == null) return targets;
+
+        Optional<RegionStatus> statusOpt = regionService.getRegionStatus(regionId);
+        if (statusOpt.isEmpty()) return targets;
+
+        String defenderTeam = statusOpt.get().ownerTeam();
+        if (defenderTeam == null) return targets;
+
+        // Get all divisions for the defending team
+        List<Division> divisions = divisionService.getDivisionsForTeam(defenderTeam);
+
+        for (Division division : divisions) {
+            List<DivisionMember> members = divisionService.getMembers(division.divisionId());
+            for (DivisionMember member : members) {
+                // Only commanders and officers are targets
+                if (member.role() == DivisionRole.COMMANDER || member.role() == DivisionRole.OFFICER) {
+                    UUID playerUuid = UUID.fromString(member.playerUuid());
+
+                    // Check if player is online and in the region
+                    org.bukkit.entity.Player player = org.bukkit.Bukkit.getPlayer(playerUuid);
+                    if (player != null && player.isOnline()) {
+                        String playerRegion = regionService.getRegionIdForLocation(
+                                player.getLocation().getBlockX(),
+                                player.getLocation().getBlockZ()
+                        );
+                        if (regionId.equals(playerRegion)) {
+                            targets.add(playerUuid);
+                        }
+                    }
+                }
+            }
+        }
+
+        return targets;
+    }
+
+    @Override
+    public boolean canSpawnAssassinateObjective(String regionId) {
+        if (divisionService == null) return false;
+
+        Optional<RegionStatus> statusOpt = regionService.getRegionStatus(regionId);
+        if (statusOpt.isEmpty()) return false;
+
+        String defenderTeam = statusOpt.get().ownerTeam();
+        if (defenderTeam == null) return false;
+
+        // Check if there are any divisions for the defending team
+        List<Division> divisions = divisionService.getDivisionsForTeam(defenderTeam);
+        if (divisions.isEmpty()) return false;
+
+        // Check if any commanders or officers from the defending team are online
+        for (Division division : divisions) {
+            List<DivisionMember> members = divisionService.getMembers(division.divisionId());
+            for (DivisionMember member : members) {
+                if (member.role() == DivisionRole.COMMANDER || member.role() == DivisionRole.OFFICER) {
+                    UUID playerUuid = UUID.fromString(member.playerUuid());
+                    org.bukkit.entity.Player player = org.bukkit.Bukkit.getPlayer(playerUuid);
+                    if (player != null && player.isOnline()) {
+                        return true; // At least one target is online
+                    }
+                }
+            }
+        }
+
+        return false;
+    }
+
+    @Override
+    public List<int[]> getEnemyChestLocations(String regionId, String attackerTeam) {
+        List<int[]> locations = new ArrayList<>();
+
+        Optional<RegionStatus> statusOpt = regionService.getRegionStatus(regionId);
+        if (statusOpt.isEmpty()) return locations;
+
+        String defenderTeam = statusOpt.get().ownerTeam();
+        if (defenderTeam == null || defenderTeam.equalsIgnoreCase(attackerTeam)) return locations;
+
+        String trackingKey = regionId + ":" + defenderTeam;
+        Set<String> enemyChests = enemyChestTracking.get(trackingKey);
+
+        if (enemyChests != null) {
+            for (String blockKey : enemyChests) {
+                String[] parts = blockKey.split(",");
+                if (parts.length == 3) {
+                    try {
+                        int x = Integer.parseInt(parts[0]);
+                        int y = Integer.parseInt(parts[1]);
+                        int z = Integer.parseInt(parts[2]);
+                        locations.add(new int[]{x, y, z});
+                    } catch (NumberFormatException ignored) {}
+                }
+            }
+        }
+
+        return locations;
+    }
+
+    @Override
+    public boolean canSpawnDestroyCacheObjective(String regionId) {
+        Optional<RegionStatus> statusOpt = regionService.getRegionStatus(regionId);
+        if (statusOpt.isEmpty()) return false;
+
+        String defenderTeam = statusOpt.get().ownerTeam();
+        if (defenderTeam == null) return false;
+
+        String trackingKey = regionId + ":" + defenderTeam;
+        Set<String> enemyChests = enemyChestTracking.get(trackingKey);
+
+        return enemyChests != null && !enemyChests.isEmpty();
+    }
+
     @Override
     public void onContainerPlaced(UUID playerUuid, String team, String regionId, int x, int y, int z, String blockType) {
-        // Container placement is tracked but completion is checked when inventory is interacted with
-        // This is just for logging/future use if needed
-        plugin.getLogger().fine("[Objectives] Container placed by " + playerUuid + " at " + x + "," + y + "," + z);
+        // Track chests for Destroy Supply Cache objective
+        if (blockType.contains("CHEST")) {
+            String trackingKey = regionId + ":" + team;
+            Set<String> teamChests = enemyChestTracking.computeIfAbsent(trackingKey, k -> ConcurrentHashMap.newKeySet());
+            String blockKey = x + "," + y + "," + z;
+            teamChests.add(blockKey);
+            plugin.getLogger().fine("[Objectives] Chest placed by " + team + " at " + x + "," + y + "," + z + " in " + regionId);
+        }
     }
 
     @Override
@@ -711,8 +939,125 @@ public class SqlObjectiveService implements ObjectiveService {
     @Override
     public void clearTrackedData() {
         objectiveBlocksTracking.clear();
+        enemyChestTracking.clear();
+        plantedExplosives.clear();
         lastRegionOwnedWarning.clear();
         plugin.getLogger().info("[Objectives] Cleared all tracked data for new round");
+    }
+
+    // ==================== PLANT EXPLOSIVE OBJECTIVE ====================
+
+    @Override
+    public boolean onTntPlaced(UUID playerUuid, String team, String regionId, int x, int y, int z) {
+        // Check for active plant explosive objective in this region
+        for (RegionObjective obj : getActiveObjectives(regionId, ObjectiveCategory.RAID)) {
+            if (obj.type() == ObjectiveType.RAID_PLANT_EXPLOSIVE) {
+                // Verify player is attacking team
+                Optional<RegionStatus> statusOpt = regionService.getRegionStatus(regionId);
+                if (statusOpt.isEmpty()) return false;
+
+                String defenderTeam = statusOpt.get().ownerTeam();
+                if (defenderTeam != null && defenderTeam.equalsIgnoreCase(team)) {
+                    return false; // Defender can't complete attacker objective
+                }
+
+                // Check if TNT is placed near the objective location
+                if (obj.hasLocation()) {
+                    int dist = Math.abs(obj.locationX() - x) + Math.abs(obj.locationZ() - z);
+                    if (dist > 5) {
+                        // Not close enough to objective marker
+                        return false;
+                    }
+                }
+
+                // Check if there's already a planted explosive in this region
+                if (plantedExplosives.containsKey(regionId)) {
+                    return false; // Only one at a time
+                }
+
+                // Start the defend timer (30 seconds)
+                PlantedExplosiveData data = new PlantedExplosiveData(
+                        obj.id(), playerUuid, team, x, y, z,
+                        System.currentTimeMillis(), 30
+                );
+                plantedExplosives.put(regionId, data);
+
+                plugin.getLogger().info("[Objectives] TNT planted for objective by " + playerUuid +
+                        " at " + x + "," + y + "," + z + " in " + regionId + " - 30s defend timer started");
+
+                return true;
+            }
+        }
+        return false;
+    }
+
+    @Override
+    public void onTntBroken(UUID playerUuid, String team, String regionId, int x, int y, int z) {
+        PlantedExplosiveData data = plantedExplosives.get(regionId);
+        if (data == null) return;
+
+        // Check if this is the planted TNT location
+        if (data.x() == x && data.y() == y && data.z() == z) {
+            // TNT defused!
+            plantedExplosives.remove(regionId);
+
+            // Reset objective progress
+            updateProgress(data.objectiveId(), 0.0);
+
+            plugin.getLogger().info("[Objectives] TNT defused by " + playerUuid +
+                    " at " + x + "," + y + "," + z + " in " + regionId);
+        }
+    }
+
+    @Override
+    public void tickPlantedExplosives() {
+        Iterator<Map.Entry<String, PlantedExplosiveData>> iterator = plantedExplosives.entrySet().iterator();
+
+        while (iterator.hasNext()) {
+            Map.Entry<String, PlantedExplosiveData> entry = iterator.next();
+            String regionId = entry.getKey();
+            PlantedExplosiveData data = entry.getValue();
+
+            int remaining = data.getSecondsRemaining();
+
+            if (remaining <= 0) {
+                // Timer complete - explosive detonates, objective complete!
+                completeObjective(data.objectiveId(), data.planterUuid(), data.planterTeam());
+                iterator.remove();
+
+                plugin.getLogger().info("[Objectives] Plant Explosive completed by " + data.planterUuid() +
+                        " in " + regionId + " - explosive detonated!");
+
+                // Optionally create explosion effect at location
+                World world = roundService.getGameWorld().orElse(null);
+                if (world != null) {
+                    Location loc = new Location(world, data.x() + 0.5, data.y(), data.z() + 0.5);
+                    // Visual explosion only, no block damage
+                    world.createExplosion(loc, 0, false, false);
+                    world.playSound(loc, org.bukkit.Sound.ENTITY_GENERIC_EXPLODE, 2.0f, 1.0f);
+                }
+            } else {
+                // Update objective progress for UI
+                double progress = data.getProgress();
+                updateProgress(data.objectiveId(), progress);
+            }
+        }
+    }
+
+    @Override
+    public Optional<PlantedExplosiveInfo> getPlantedExplosiveInfo(String regionId) {
+        PlantedExplosiveData data = plantedExplosives.get(regionId);
+        if (data == null) return Optional.empty();
+
+        return Optional.of(new PlantedExplosiveInfo(
+                regionId,
+                data.objectiveId(),
+                data.planterUuid(),
+                data.planterTeam(),
+                data.x(), data.y(), data.z(),
+                data.getSecondsRemaining(),
+                data.defendSeconds()
+        ));
     }
 
     // ==================== CALLBACKS ====================

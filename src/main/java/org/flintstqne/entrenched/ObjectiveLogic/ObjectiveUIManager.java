@@ -7,6 +7,8 @@ import net.kyori.adventure.text.format.TextDecoration;
 import org.bukkit.*;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.java.JavaPlugin;
+import org.bukkit.potion.PotionEffect;
+import org.bukkit.potion.PotionEffectType;
 import org.bukkit.scheduler.BukkitTask;
 import org.flintstqne.entrenched.ConfigManager;
 import org.flintstqne.entrenched.RegionLogic.RegionService;
@@ -39,9 +41,13 @@ public class ObjectiveUIManager {
     // Currently shown action bar objective per player
     private final Map<UUID, Integer> playerActionBarObjective = new ConcurrentHashMap<>();
 
+    // Track players who currently have glowing effect for assassination objective
+    private final Set<UUID> glowingTargets = ConcurrentHashMap.newKeySet();
+
     // Scheduled tasks
     private BukkitTask uiUpdateTask;
     private BukkitTask particleTask;
+    private BukkitTask assassinationUpdateTask;
 
     public ObjectiveUIManager(JavaPlugin plugin, ObjectiveService objectiveService,
                                RegionService regionService, RoundService roundService,
@@ -66,6 +72,9 @@ public class ObjectiveUIManager {
             particleTask = Bukkit.getScheduler().runTaskTimer(plugin, this::spawnObjectiveParticles, 10L, 10L);
         }
 
+        // Update assassination targets every second (glowing effect)
+        assassinationUpdateTask = Bukkit.getScheduler().runTaskTimer(plugin, this::updateAssassinationTargets, 20L, 20L);
+
         plugin.getLogger().info("[Objectives] UI Manager started");
     }
 
@@ -79,6 +88,18 @@ public class ObjectiveUIManager {
         if (particleTask != null) {
             particleTask.cancel();
         }
+        if (assassinationUpdateTask != null) {
+            assassinationUpdateTask.cancel();
+        }
+
+        // Remove glowing effect from all targets
+        for (UUID targetId : glowingTargets) {
+            Player target = Bukkit.getPlayer(targetId);
+            if (target != null) {
+                target.removePotionEffect(PotionEffectType.GLOWING);
+            }
+        }
+        glowingTargets.clear();
 
         // Clear all boss bars
         for (UUID playerId : playerBossBars.keySet()) {
@@ -232,7 +253,7 @@ public class ObjectiveUIManager {
             }
         }
 
-        // Show action bar warning if Hold Ground is in progress
+        // Show action bar warning if Hold Ground or Plant Explosive is in progress
         for (RegionObjective objective : raidObjectives) {
             if (objective.type() == ObjectiveType.RAID_HOLD_GROUND && objective.progress() > 0) {
                 int seconds = (int) (objective.progress() * 60);
@@ -244,6 +265,33 @@ public class ObjectiveUIManager {
                                 .decoration(TextDecoration.BOLD, false))
                         .append(Component.text("(" + seconds + "/60s)")
                                 .color(NamedTextColor.WHITE));
+                player.sendActionBar(warning);
+                break;
+            }
+            if (objective.type() == ObjectiveType.RAID_PLANT_EXPLOSIVE && objective.progress() > 0) {
+                int seconds = (int) (objective.progress() * 30);
+                int remaining = 30 - seconds;
+
+                // Get explosive location for direction
+                Optional<ObjectiveService.PlantedExplosiveInfo> explosiveInfo =
+                        objectiveService.getPlantedExplosiveInfo(objective.regionId());
+
+                String directionText = "";
+                if (explosiveInfo.isPresent()) {
+                    ObjectiveService.PlantedExplosiveInfo info = explosiveInfo.get();
+                    Location tntLoc = new Location(player.getWorld(), info.x() + 0.5, info.y(), info.z() + 0.5);
+                    directionText = " " + getDirectionIndicator(player, tntLoc) + " " +
+                            (int) player.getLocation().distance(tntLoc) + "m";
+                }
+
+                Component warning = Component.text("💣 EXPLOSIVE PLANTED! ")
+                        .color(NamedTextColor.RED)
+                        .decorate(TextDecoration.BOLD)
+                        .append(Component.text("Defuse in " + remaining + "s!")
+                                .color(NamedTextColor.YELLOW)
+                                .decoration(TextDecoration.BOLD, false))
+                        .append(Component.text(directionText)
+                                .color(NamedTextColor.GRAY));
                 player.sendActionBar(warning);
                 break;
             }
@@ -274,11 +322,19 @@ public class ObjectiveUIManager {
                 int blocks = (int) (objective.progress() * 50);
                 yield "⚠ Defenses Being Sabotaged (" + blocks + "/50)";
             }
-            case RAID_PLANT_EXPLOSIVE -> "⚠ Explosive Being Planted!";
+            case RAID_PLANT_EXPLOSIVE -> {
+                if (objective.progress() > 0) {
+                    int seconds = (int) (objective.progress() * 30);
+                    yield "💣 EXPLOSIVE PLANTED! (" + seconds + "/30s) - DEFUSE IT!";
+                } else {
+                    yield "⚠ Explosive Being Planted!";
+                }
+            }
             case RAID_ASSASSINATE_COMMANDER -> "⚠ Commander Targeted!";
             case RAID_CAPTURE_INTEL -> "⚠ Intel Being Stolen!";
             default -> "⚠ Region Under Attack!";
         };
+
 
         return Component.text(warningText)
                 .color(NamedTextColor.RED)
@@ -328,6 +384,26 @@ public class ObjectiveUIManager {
                     int[] holdZone = holdZoneOpt.get();
                     int y = player.getWorld().getHighestBlockYAt(holdZone[0], holdZone[1]) + 1;
                     objLoc = new Location(player.getWorld(), holdZone[0] + 0.5, y, holdZone[1] + 0.5);
+                }
+            } else if (objective.type() == ObjectiveType.RAID_DESTROY_CACHE) {
+                // Special handling for destroy cache - find nearest enemy chest
+                String playerTeam = teamService.getPlayerTeam(player.getUniqueId()).orElse(null);
+                if (playerTeam != null) {
+                    List<int[]> enemyChests = objectiveService.getEnemyChestLocations(objective.regionId(), playerTeam);
+                    if (!enemyChests.isEmpty()) {
+                        // Find nearest enemy chest
+                        double nearestChestDist = Double.MAX_VALUE;
+                        for (int[] chestPos : enemyChests) {
+                            double dist = Math.sqrt(
+                                    Math.pow(player.getLocation().getX() - chestPos[0], 2) +
+                                    Math.pow(player.getLocation().getZ() - chestPos[2], 2)
+                            );
+                            if (dist < nearestChestDist) {
+                                nearestChestDist = dist;
+                                objLoc = new Location(player.getWorld(), chestPos[0] + 0.5, chestPos[1], chestPos[2] + 0.5);
+                            }
+                        }
+                    }
                 }
             } else if (isRegionWideObjective(objective.type())) {
                 // Region-wide objectives (like Resource Depot) show for all players in the region
@@ -462,6 +538,26 @@ public class ObjectiveUIManager {
                     int[] holdZone = holdZoneOpt.get();
                     int y = player.getWorld().getHighestBlockYAt(holdZone[0], holdZone[1]) + 1;
                     objLoc = new Location(player.getWorld(), holdZone[0] + 0.5, y, holdZone[1] + 0.5);
+                }
+            } else if (obj.type() == ObjectiveType.RAID_DESTROY_CACHE) {
+                // Special handling for destroy cache - find nearest enemy chest
+                String playerTeam = teamService.getPlayerTeam(player.getUniqueId()).orElse(null);
+                if (playerTeam != null && obj.regionId().equals(playerRegion)) {
+                    List<int[]> enemyChests = objectiveService.getEnemyChestLocations(obj.regionId(), playerTeam);
+                    if (!enemyChests.isEmpty()) {
+                        // Find nearest enemy chest
+                        double nearestChestDist = Double.MAX_VALUE;
+                        for (int[] chestPos : enemyChests) {
+                            double dist = Math.sqrt(
+                                    Math.pow(player.getLocation().getX() - chestPos[0], 2) +
+                                    Math.pow(player.getLocation().getZ() - chestPos[2], 2)
+                            );
+                            if (dist < nearestChestDist) {
+                                nearestChestDist = dist;
+                                objLoc = new Location(player.getWorld(), chestPos[0] + 0.5, chestPos[1], chestPos[2] + 0.5);
+                            }
+                        }
+                    }
                 }
             } else if (isRegionWideObjective(obj.type())) {
                 // Region-wide objectives - show if player is in the region
@@ -775,6 +871,135 @@ public class ObjectiveUIManager {
     public void onPlayerQuit(Player player) {
         clearBossBars(player.getUniqueId());
         playerActionBarObjective.remove(player.getUniqueId());
+
+        // Remove glowing if they were a target
+        if (glowingTargets.remove(player.getUniqueId())) {
+            player.removePotionEffect(PotionEffectType.GLOWING);
+        }
+    }
+
+    // ==================== ASSASSINATION TARGET TRACKING ====================
+
+    /**
+     * Updates assassination target glowing and action bar for attackers.
+     */
+    private void updateAssassinationTargets() {
+        World gameWorld = roundService.getGameWorld().orElse(null);
+        if (gameWorld == null) return;
+
+        // Collect all current targets across all regions with assassination objectives
+        Set<UUID> currentTargets = new HashSet<>();
+        Map<String, List<UUID>> targetsByRegion = new HashMap<>();
+
+        for (RegionStatus status : regionService.getAllRegionStatuses()) {
+            if (status.state() != RegionState.OWNED && status.state() != RegionState.CONTESTED) {
+                continue;
+            }
+
+            String regionId = status.regionId();
+
+            // Check for active assassination objective
+            boolean hasAssassinateObj = objectiveService.getActiveObjectives(regionId, ObjectiveCategory.RAID)
+                    .stream()
+                    .anyMatch(obj -> obj.type() == ObjectiveType.RAID_ASSASSINATE_COMMANDER);
+
+            if (hasAssassinateObj) {
+                List<UUID> targets = objectiveService.getAssassinationTargets(regionId);
+                if (!targets.isEmpty()) {
+                    currentTargets.addAll(targets);
+                    targetsByRegion.put(regionId, targets);
+                }
+            }
+        }
+
+        // Update glowing effects
+        // Remove glowing from players who are no longer targets
+        Iterator<UUID> iterator = glowingTargets.iterator();
+        while (iterator.hasNext()) {
+            UUID targetId = iterator.next();
+            if (!currentTargets.contains(targetId)) {
+                Player target = Bukkit.getPlayer(targetId);
+                if (target != null) {
+                    target.removePotionEffect(PotionEffectType.GLOWING);
+                }
+                iterator.remove();
+            }
+        }
+
+        // Add glowing to new targets
+        for (UUID targetId : currentTargets) {
+            if (!glowingTargets.contains(targetId)) {
+                Player target = Bukkit.getPlayer(targetId);
+                if (target != null && target.isOnline()) {
+                    // Apply glowing effect (30 seconds, will be refreshed)
+                    target.addPotionEffect(new PotionEffect(PotionEffectType.GLOWING, 40, 0, false, false, false));
+                    glowingTargets.add(targetId);
+                }
+            } else {
+                // Refresh glowing for existing targets
+                Player target = Bukkit.getPlayer(targetId);
+                if (target != null && target.isOnline()) {
+                    target.addPotionEffect(new PotionEffect(PotionEffectType.GLOWING, 40, 0, false, false, false));
+                }
+            }
+        }
+
+        // Update action bar for attackers showing direction to nearest target
+        for (Player player : gameWorld.getPlayers()) {
+            String playerTeam = teamService.getPlayerTeam(player.getUniqueId()).orElse(null);
+            if (playerTeam == null) continue;
+
+            String playerRegion = regionService.getRegionIdForLocation(
+                    player.getLocation().getBlockX(),
+                    player.getLocation().getBlockZ()
+            );
+            if (playerRegion == null) continue;
+
+            // Check if there are targets in this region and player is attacker
+            List<UUID> regionTargets = targetsByRegion.get(playerRegion);
+            if (regionTargets == null || regionTargets.isEmpty()) continue;
+
+            Optional<RegionStatus> statusOpt = regionService.getRegionStatus(playerRegion);
+            if (statusOpt.isEmpty()) continue;
+
+            String ownerTeam = statusOpt.get().ownerTeam();
+            if (ownerTeam == null || ownerTeam.equalsIgnoreCase(playerTeam)) continue;
+
+            // Player is an attacker - find nearest target
+            Player nearestTarget = null;
+            double nearestDist = Double.MAX_VALUE;
+
+            for (UUID targetId : regionTargets) {
+                Player target = Bukkit.getPlayer(targetId);
+                if (target == null || !target.isOnline()) continue;
+
+                double dist = player.getLocation().distance(target.getLocation());
+                if (dist < nearestDist) {
+                    nearestDist = dist;
+                    nearestTarget = target;
+                }
+            }
+
+            if (nearestTarget != null) {
+                // Show action bar with direction to target
+                String direction = getDirectionIndicator(player, nearestTarget.getLocation());
+                String targetName = nearestTarget.getName();
+                int dist = (int) nearestDist;
+
+                Component message = Component.text("⚔ ")
+                        .color(NamedTextColor.RED)
+                        .decorate(TextDecoration.BOLD)
+                        .append(Component.text("TARGET: ")
+                                .color(NamedTextColor.GOLD)
+                                .decoration(TextDecoration.BOLD, false))
+                        .append(Component.text(targetName)
+                                .color(NamedTextColor.YELLOW))
+                        .append(Component.text(" [" + dist + "m " + direction + "]")
+                                .color(NamedTextColor.GRAY));
+
+                player.sendActionBar(message);
+            }
+        }
     }
 }
 

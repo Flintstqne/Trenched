@@ -143,6 +143,35 @@ public interface ObjectiveService {
     void onPlayerKill(UUID killerUuid, UUID victimUuid, String regionId);
 
     /**
+     * Gets online assassination targets (commanders/officers) for a region.
+     * @param regionId The region to check
+     * @return List of player UUIDs who are valid assassination targets
+     */
+    List<UUID> getAssassinationTargets(String regionId);
+
+    /**
+     * Checks if assassinate commander objective can spawn in a region.
+     * @param regionId The region to check
+     * @return true if there are valid targets (online enemy commanders/officers)
+     */
+    boolean canSpawnAssassinateObjective(String regionId);
+
+    /**
+     * Gets enemy chest locations in a region for the Destroy Supply Cache objective.
+     * @param regionId The region to check
+     * @param attackerTeam The attacking team (will return chests placed by the opposing team)
+     * @return List of [x, y, z] arrays for enemy chest locations
+     */
+    List<int[]> getEnemyChestLocations(String regionId, String attackerTeam);
+
+    /**
+     * Checks if destroy supply cache objective can spawn in a region.
+     * @param regionId The region to check
+     * @return true if there are enemy chests in the region
+     */
+    boolean canSpawnDestroyCacheObjective(String regionId);
+
+    /**
      * Called when a player places a container (chest, barrel, etc.) - tracks for resource depot.
      */
     void onContainerPlaced(UUID playerUuid, String team, String regionId, int x, int y, int z, String blockType);
@@ -168,6 +197,46 @@ public interface ObjectiveService {
      * @param playerTeams Map of player UUID to their team
      */
     void tickHoldGroundObjectives(Map<UUID, HoldGroundPlayerData> playerData);
+
+    /**
+     * Called when a player places TNT - checks for Plant Explosive objective.
+     * @return true if TNT was placed for an objective (starts defend timer)
+     */
+    boolean onTntPlaced(UUID playerUuid, String team, String regionId, int x, int y, int z);
+
+    /**
+     * Called when TNT is broken/defused - cancels Plant Explosive if active.
+     */
+    void onTntBroken(UUID playerUuid, String team, String regionId, int x, int y, int z);
+
+    /**
+     * Called every second to update planted explosive defend timers.
+     * Also checks for nearby defenders who might defuse.
+     */
+    void tickPlantedExplosives();
+
+    /**
+     * Gets info about an active planted explosive in a region.
+     * @return Optional containing [x, y, z, secondsRemaining] or empty if none active
+     */
+    Optional<PlantedExplosiveInfo> getPlantedExplosiveInfo(String regionId);
+
+    /**
+     * Data class for planted explosive tracking.
+     */
+    record PlantedExplosiveInfo(
+            String regionId,
+            int objectiveId,
+            UUID planterUuid,
+            String planterTeam,
+            int x, int y, int z,
+            int secondsRemaining,
+            int totalSeconds
+    ) {
+        public double getProgress() {
+            return 1.0 - ((double) secondsRemaining / totalSeconds);
+        }
+    }
 
     /**
      * Gets the hold zone center and radius for a region's hold ground objective.

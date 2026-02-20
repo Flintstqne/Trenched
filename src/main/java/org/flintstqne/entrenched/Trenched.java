@@ -136,6 +136,11 @@ public final class Trenched extends JavaPlugin {
         // Initialize Objective System (before road service so we can use it in capture callback)
         objectiveDb = new ObjectiveDb(this);
         objectiveService = new SqlObjectiveService(this, objectiveDb, roundService, regionService, configManager);
+
+        // Wire up division and team services for assassination objective (avoids circular dependency)
+        ((SqlObjectiveService) objectiveService).setDivisionService(divisionService);
+        ((SqlObjectiveService) objectiveService).setTeamService(teamService);
+
         objectiveUIManager = new ObjectiveUIManager(this, objectiveService, regionService, roundService, teamService, configManager);
         objectiveListener = new ObjectiveListener(this, objectiveService, objectiveUIManager, regionService, teamService, configManager);
         getLogger().info("[TerrainGen] Objective system initialized");

@@ -47,6 +47,7 @@ public class ObjectiveListener implements Listener {
 
     private BukkitTask refreshTask;
     private BukkitTask holdGroundTask;
+    private BukkitTask plantedExplosivesTask;
     private RoundService roundService;
 
     public ObjectiveListener(JavaPlugin plugin, ObjectiveService objectiveService,
@@ -99,6 +100,11 @@ public class ObjectiveListener implements Listener {
                 this::tickHoldGround,
                 20L, 20L);
 
+        // Start planted explosives tick task (every second = 20 ticks)
+        plantedExplosivesTask = Bukkit.getScheduler().runTaskTimer(plugin,
+                objectiveService::tickPlantedExplosives,
+                20L, 20L);
+
         plugin.getLogger().info("[Objectives] Listener started, refresh every " + refreshMinutes + " minutes");
     }
 
@@ -111,6 +117,9 @@ public class ObjectiveListener implements Listener {
         }
         if (holdGroundTask != null) {
             holdGroundTask.cancel();
+        }
+        if (plantedExplosivesTask != null) {
+            plantedExplosivesTask.cancel();
         }
     }
 
@@ -170,6 +179,30 @@ public class ObjectiveListener implements Listener {
 
         // Notify objective service
         objectiveService.onBlockDestroyed(player.getUniqueId(), team, regionId, x, y, z, blockType);
+
+        // Check for TNT being defused (Plant Explosive objective)
+        if (event.getBlock().getType() == Material.TNT) {
+            Optional<ObjectiveService.PlantedExplosiveInfo> explosiveInfo =
+                    objectiveService.getPlantedExplosiveInfo(regionId);
+            if (explosiveInfo.isPresent()) {
+                ObjectiveService.PlantedExplosiveInfo info = explosiveInfo.get();
+                if (info.x() == x && info.y() == y && info.z() == z) {
+                    // This is the planted TNT - check if defuser is defender
+                    if (!info.planterTeam().equalsIgnoreCase(team)) {
+                        // Defender defused the explosive!
+                        objectiveService.onTntBroken(player.getUniqueId(), team, regionId, x, y, z);
+                        player.sendMessage(config.getPrefix() + org.bukkit.ChatColor.GREEN +
+                                "💣 Explosive defused! Attack thwarted!");
+                        player.playSound(player.getLocation(), org.bukkit.Sound.ENTITY_ITEM_BREAK, 1.0f, 1.0f);
+                    } else {
+                        // Attacker broke their own TNT
+                        objectiveService.onTntBroken(player.getUniqueId(), team, regionId, x, y, z);
+                        player.sendMessage(config.getPrefix() + org.bukkit.ChatColor.YELLOW +
+                                "💣 You removed your planted explosive.");
+                    }
+                }
+            }
+        }
 
         // Check if a container was broken - recalculate resource depot progress
         if (isStorageContainer(event.getBlock().getType())) {
@@ -246,6 +279,16 @@ public class ObjectiveListener implements Listener {
 
         // Notify objective service
         objectiveService.onBlockPlaced(player.getUniqueId(), team, regionId, x, y, z, blockType);
+
+        // Check for TNT placement (Plant Explosive objective)
+        if (event.getBlock().getType() == Material.TNT) {
+            boolean startedObjective = objectiveService.onTntPlaced(player.getUniqueId(), team, regionId, x, y, z);
+            if (startedObjective) {
+                player.sendMessage(config.getPrefix() + org.bukkit.ChatColor.GREEN +
+                        "💣 Explosive planted! Defend for 30 seconds!");
+                player.playSound(player.getLocation(), org.bukkit.Sound.BLOCK_NOTE_BLOCK_BASS, 1.0f, 0.5f);
+            }
+        }
 
         // Also notify if it's a storage container for resource depot objective
         if (isStorageContainer(event.getBlock().getType())) {
