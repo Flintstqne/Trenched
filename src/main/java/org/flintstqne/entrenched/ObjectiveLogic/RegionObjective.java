@@ -84,6 +84,13 @@ public record RegionObjective(
                 "Build a road connecting to friendly territory (" + (int)(progress * 64) + "/64 blocks)";
             case RAID_HOLD_GROUND ->
                 "Hold the region center (" + (int)(progress * 60) + "/60 seconds)";
+            case SETTLEMENT_RESOURCE_DEPOT -> {
+                // Progress is (containers/4 + items/100) / 2
+                // Estimate containers and items from progress
+                int estimatedContainers = Math.min(4, (int)(progress * 4));
+                int estimatedItems = Math.min(100, (int)(progress * 100));
+                yield "Create storage depot (" + estimatedContainers + "/4 containers, ~" + estimatedItems + "/100 items)";
+            }
             default -> base;
         };
     }

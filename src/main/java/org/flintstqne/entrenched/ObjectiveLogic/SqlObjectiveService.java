@@ -11,6 +11,7 @@ import org.flintstqne.entrenched.RoundLogic.Round;
 import org.flintstqne.entrenched.RoundLogic.RoundService;
 
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 
 /**
@@ -29,6 +30,14 @@ public class SqlObjectiveService implements ObjectiveService {
 
     // Cache for region centers (calculated once)
     private final Map<String, int[]> regionCenters = new HashMap<>();
+
+    // Debounce for "region owned" message to prevent spam
+    private final Map<UUID, Long> lastRegionOwnedWarning = new ConcurrentHashMap<>();
+    private static final long REGION_OWNED_WARNING_COOLDOWN_MS = 10000; // 10 seconds
+
+    // Track blocks that have earned objective progress - "regionId:objectiveType" -> Set of "x,y,z"
+    // Prevents place/break/place cheese for wall and road objectives
+    private final Map<String, Set<String>> objectiveBlocksTracking = new ConcurrentHashMap<>();
 
     public SqlObjectiveService(JavaPlugin plugin, ObjectiveDb db, RoundService roundService,
                                 RegionService regionService, ConfigManager config) {
@@ -274,6 +283,12 @@ public class SqlObjectiveService implements ObjectiveService {
     public void expireObjectivesInRegion(String regionId) {
         getCurrentRoundId().ifPresent(roundId -> {
             db.expireAllInRegion(regionId, roundId);
+
+            // Clear block tracking for this region's objectives
+            objectiveBlocksTracking.remove(regionId + ":SECURE_PERIMETER");
+            objectiveBlocksTracking.remove(regionId + ":SUPPLY_ROUTE");
+            objectiveBlocksTracking.remove(regionId + ":SABOTAGE_DEFENSES");
+
             plugin.getLogger().info("[Objectives] Expired all objectives in " + regionId);
         });
     }
@@ -315,6 +330,30 @@ public class SqlObjectiveService implements ObjectiveService {
 
         if (objective.status() == ObjectiveStatus.EXPIRED) {
             return CompleteResult.OBJECTIVE_EXPIRED;
+        }
+
+        // Check if the region is already owned (not contested) - can't complete objectives in owned regions
+        Optional<RegionStatus> regionStatusOpt = regionService.getRegionStatus(objective.regionId());
+        if (regionStatusOpt.isPresent()) {
+            RegionStatus regionStatus = regionStatusOpt.get();
+            // If the region is OWNED (not NEUTRAL, not CONTESTED), block objective completion
+            if (regionStatus.state() == RegionState.OWNED ||
+                regionStatus.state() == RegionState.FORTIFIED ||
+                regionStatus.state() == RegionState.PROTECTED) {
+                // Notify the player that objective completion is blocked (with debounce)
+                long now = System.currentTimeMillis();
+                Long lastWarning = lastRegionOwnedWarning.get(playerUuid);
+                if (lastWarning == null || (now - lastWarning) > REGION_OWNED_WARNING_COOLDOWN_MS) {
+                    lastRegionOwnedWarning.put(playerUuid, now);
+                    org.bukkit.entity.Player player = org.bukkit.Bukkit.getPlayer(playerUuid);
+                    if (player != null) {
+                        player.sendMessage(config.getPrefix() + org.bukkit.ChatColor.RED +
+                                "Action blocked! " + org.bukkit.ChatColor.GRAY +
+                                "Objectives cannot be completed in this region - it is already captured and owned.");
+                    }
+                }
+                return CompleteResult.REGION_ALREADY_OWNED;
+            }
         }
 
         // Check cooldown
@@ -375,10 +414,22 @@ public class SqlObjectiveService implements ObjectiveService {
     @Override
     public void onBlockDestroyed(UUID playerUuid, String team, String regionId,
                                   int x, int y, int z, String blockType) {
-        // Check for sabotage defenses objective
+        String blockKey = x + "," + y + "," + z;
+
+        // Check for raid objectives (sabotage)
         for (RegionObjective obj : getActiveObjectives(regionId, ObjectiveCategory.RAID)) {
             if (obj.type() == ObjectiveType.RAID_SABOTAGE_DEFENSES) {
-                // Add progress (1/50 blocks = 0.02 progress)
+                // Check if this block position already earned progress (anti-cheese)
+                String trackingKey = regionId + ":SABOTAGE_DEFENSES";
+                Set<String> trackedBlocks = objectiveBlocksTracking.computeIfAbsent(trackingKey, k -> ConcurrentHashMap.newKeySet());
+
+                if (trackedBlocks.contains(blockKey)) {
+                    // Already earned progress at this location - skip
+                    continue;
+                }
+
+                // Track this block and add progress (1/50 blocks = 0.02 progress)
+                trackedBlocks.add(blockKey);
                 double newProgress = obj.progress() + 0.02;
                 updateProgress(obj.id(), newProgress);
 
@@ -398,17 +449,61 @@ public class SqlObjectiveService implements ObjectiveService {
                 }
             }
         }
+
+        // Check for settlement objectives - deduct progress if wall/road blocks broken
+        for (RegionObjective obj : getActiveObjectives(regionId, ObjectiveCategory.SETTLEMENT)) {
+            switch (obj.type()) {
+                case SETTLEMENT_SECURE_PERIMETER -> {
+                    if (isWallBlock(blockType)) {
+                        String trackingKey = regionId + ":SECURE_PERIMETER";
+                        Set<String> trackedBlocks = objectiveBlocksTracking.get(trackingKey);
+
+                        if (trackedBlocks != null && trackedBlocks.remove(blockKey)) {
+                            // This block was tracked - deduct progress
+                            double newProgress = Math.max(0, obj.progress() - 0.01);
+                            updateProgress(obj.id(), newProgress);
+                        }
+                    }
+                }
+                case SETTLEMENT_SUPPLY_ROUTE -> {
+                    if (isRoadBlock(blockType)) {
+                        String trackingKey = regionId + ":SUPPLY_ROUTE";
+                        Set<String> trackedBlocks = objectiveBlocksTracking.get(trackingKey);
+
+                        if (trackedBlocks != null && trackedBlocks.remove(blockKey)) {
+                            // This block was tracked - deduct progress
+                            double newProgress = Math.max(0, obj.progress() - (1.0 / 64.0));
+                            updateProgress(obj.id(), newProgress);
+                        }
+                    }
+                }
+                default -> {}
+            }
+        }
     }
 
     @Override
     public void onBlockPlaced(UUID playerUuid, String team, String regionId,
                                int x, int y, int z, String blockType) {
+        String blockKey = x + "," + y + "," + z;
+
         // Check for settlement objectives
         for (RegionObjective obj : getActiveObjectives(regionId, ObjectiveCategory.SETTLEMENT)) {
             switch (obj.type()) {
                 case SETTLEMENT_SECURE_PERIMETER -> {
                     // Check if it's a wall-like block
                     if (isWallBlock(blockType)) {
+                        // Check if this block position already earned progress
+                        String trackingKey = regionId + ":SECURE_PERIMETER";
+                        Set<String> trackedBlocks = objectiveBlocksTracking.computeIfAbsent(trackingKey, k -> ConcurrentHashMap.newKeySet());
+
+                        if (trackedBlocks.contains(blockKey)) {
+                            // Already earned progress at this location - skip
+                            continue;
+                        }
+
+                        // Track this block and add progress
+                        trackedBlocks.add(blockKey);
                         double newProgress = obj.progress() + 0.01; // 1/100 blocks
                         updateProgress(obj.id(), newProgress);
 
@@ -420,6 +515,17 @@ public class SqlObjectiveService implements ObjectiveService {
                 case SETTLEMENT_SUPPLY_ROUTE -> {
                     // Check if it's a road block
                     if (isRoadBlock(blockType)) {
+                        // Check if this block position already earned progress
+                        String trackingKey = regionId + ":SUPPLY_ROUTE";
+                        Set<String> trackedBlocks = objectiveBlocksTracking.computeIfAbsent(trackingKey, k -> ConcurrentHashMap.newKeySet());
+
+                        if (trackedBlocks.contains(blockKey)) {
+                            // Already earned progress at this location - skip
+                            continue;
+                        }
+
+                        // Track this block and add progress
+                        trackedBlocks.add(blockKey);
                         double newProgress = obj.progress() + (1.0 / 64.0); // 1/64 blocks
                         updateProgress(obj.id(), newProgress);
 
@@ -458,6 +564,58 @@ public class SqlObjectiveService implements ObjectiveService {
                 // Killer must be attacking team
                 String defenderTeam = statusOpt.get().ownerTeam();
                 // This would need killer's team from context - simplified for now
+                break;
+            }
+        }
+    }
+
+    @Override
+    public void onContainerPlaced(UUID playerUuid, String team, String regionId, int x, int y, int z, String blockType) {
+        // Container placement is tracked but completion is checked when inventory is interacted with
+        // This is just for logging/future use if needed
+        plugin.getLogger().fine("[Objectives] Container placed by " + playerUuid + " at " + x + "," + y + "," + z);
+    }
+
+    @Override
+    public void onContainerBroken(UUID playerUuid, String team, String regionId, int containerCount, int totalItems) {
+        // Recalculate resource depot progress when a container is broken
+        for (RegionObjective obj : getActiveObjectives(regionId, ObjectiveCategory.SETTLEMENT)) {
+            if (obj.type() == ObjectiveType.SETTLEMENT_RESOURCE_DEPOT) {
+                // Recalculate progress based on remaining containers and items
+                double containerProgress = Math.min(1.0, containerCount / 4.0);
+                double itemProgress = Math.min(1.0, totalItems / 100.0);
+                double newProgress = (containerProgress + itemProgress) / 2.0;
+
+                // Only update if progress decreased (container was contributing)
+                if (newProgress < obj.progress()) {
+                    updateProgress(obj.id(), newProgress);
+                    plugin.getLogger().fine("[Objectives] Resource Depot progress decreased in " + regionId +
+                            " (" + containerCount + " containers, " + totalItems + " items, " +
+                            String.format("%.1f%%", newProgress * 100) + " progress)");
+                }
+                break;
+            }
+        }
+    }
+
+    @Override
+    public void onContainerInteract(UUID playerUuid, String team, String regionId, int containerCount, int totalItems) {
+        // Check for resource depot objective
+        for (RegionObjective obj : getActiveObjectives(regionId, ObjectiveCategory.SETTLEMENT)) {
+            if (obj.type() == ObjectiveType.SETTLEMENT_RESOURCE_DEPOT) {
+                // Requirements: 4+ containers with 100+ total items
+                if (containerCount >= 4 && totalItems >= 100) {
+                    completeObjective(obj.id(), playerUuid, team);
+                    plugin.getLogger().info("[Objectives] Resource Depot completed by " + playerUuid +
+                            " in " + regionId + " (" + containerCount + " containers, " + totalItems + " items)");
+                } else {
+                    // Update progress based on how close they are to completion
+                    // Progress = (container contribution + item contribution) / 2
+                    double containerProgress = Math.min(1.0, containerCount / 4.0);
+                    double itemProgress = Math.min(1.0, totalItems / 100.0);
+                    double newProgress = (containerProgress + itemProgress) / 2.0;
+                    updateProgress(obj.id(), newProgress);
+                }
                 break;
             }
         }
@@ -548,6 +706,13 @@ public class SqlObjectiveService implements ObjectiveService {
 
         int holdRadius = config.getRegionSize() / 8;
         return Optional.of(new int[]{center[0], center[1], holdRadius});
+    }
+
+    @Override
+    public void clearTrackedData() {
+        objectiveBlocksTracking.clear();
+        lastRegionOwnedWarning.clear();
+        plugin.getLogger().info("[Objectives] Cleared all tracked data for new round");
     }
 
     // ==================== CALLBACKS ====================

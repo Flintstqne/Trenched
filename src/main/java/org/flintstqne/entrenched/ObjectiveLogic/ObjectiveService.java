@@ -19,7 +19,8 @@ public interface ObjectiveService {
         OBJECTIVE_EXPIRED,
         WRONG_REGION,
         ON_COOLDOWN,
-        INSUFFICIENT_PROGRESS
+        INSUFFICIENT_PROGRESS,
+        REGION_ALREADY_OWNED
     }
 
     enum SpawnResult {
@@ -142,6 +143,25 @@ public interface ObjectiveService {
     void onPlayerKill(UUID killerUuid, UUID victimUuid, String regionId);
 
     /**
+     * Called when a player places a container (chest, barrel, etc.) - tracks for resource depot.
+     */
+    void onContainerPlaced(UUID playerUuid, String team, String regionId, int x, int y, int z, String blockType);
+
+    /**
+     * Called when a player breaks a container - recalculates resource depot progress.
+     * @param containerCount Current container count after breaking
+     * @param totalItems Total items remaining after breaking
+     */
+    void onContainerBroken(UUID playerUuid, String team, String regionId, int containerCount, int totalItems);
+
+    /**
+     * Called when a player closes a container inventory - checks for resource depot completion.
+     * @param containerLocations List of [x, y, z] arrays for all nearby containers
+     * @param totalItems Total items across all containers
+     */
+    void onContainerInteract(UUID playerUuid, String team, String regionId, int containerCount, int totalItems);
+
+    /**
      * Called every second to update hold-ground objective progress for players in hold zones.
      * Tracks players who are in the center of regions with active hold ground objectives.
      * @param playerLocations Map of player UUID to their current regionId and coordinates [x, z]
@@ -154,6 +174,11 @@ public interface ObjectiveService {
      * @return Optional containing [centerX, centerZ, radius] or empty if no hold ground objective
      */
     Optional<int[]> getHoldZoneInfo(String regionId);
+
+    /**
+     * Clears all tracked data (block tracking, etc.). Called on new round.
+     */
+    void clearTrackedData();
 
     /**
      * Data class for hold ground tracking.

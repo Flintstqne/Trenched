@@ -225,6 +225,12 @@ public interface RegionService {
     void onBannerRemove(UUID playerUuid, String team, int blockX, int blockZ, String bannerTeam);
 
     /**
+     * Called when a player removes their own team's banner that earned IP.
+     * Deducts IP as anti-cheese protection.
+     */
+    void onOwnBannerRemove(UUID playerUuid, String team, int blockX, int blockZ);
+
+    /**
      * Called when a player kills a mob.
      */
     void onMobKill(UUID playerUuid, String team, int blockX, int blockZ);

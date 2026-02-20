@@ -833,6 +833,19 @@ public final class SqlRegionService implements RegionService {
     }
 
     @Override
+    public void onOwnBannerRemove(UUID playerUuid, String team, int blockX, int blockZ) {
+        String regionId = getRegionIdForLocation(blockX, blockZ);
+        if (regionId == null) return;
+
+        // Deduct the banner placement IP as anti-cheese protection
+        int bannerPoints = configManager.getRegionBannerPlacePoints();
+        addInfluence(regionId, team, -bannerPoints, playerUuid);
+
+        logger.info("[Regions] " + playerUuid + " broke own banner in " + regionId +
+                ", deducted " + bannerPoints + " IP");
+    }
+
+    @Override
     public void onMobKill(UUID playerUuid, String team, int blockX, int blockZ) {
         String regionId = getRegionIdForLocation(blockX, blockZ);
         if (regionId == null) return;

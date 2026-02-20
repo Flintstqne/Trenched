@@ -1,7 +1,12 @@
 package org.flintstqne.entrenched.ObjectiveLogic;
 
 import org.bukkit.Bukkit;
+import org.bukkit.Location;
+import org.bukkit.Material;
 import org.bukkit.World;
+import org.bukkit.block.Block;
+import org.bukkit.block.BlockState;
+import org.bukkit.block.Container;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
@@ -9,8 +14,12 @@ import org.bukkit.event.Listener;
 import org.bukkit.event.block.BlockBreakEvent;
 import org.bukkit.event.block.BlockPlaceEvent;
 import org.bukkit.event.entity.PlayerDeathEvent;
+import org.bukkit.event.inventory.InventoryCloseEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.inventory.Inventory;
+import org.bukkit.inventory.InventoryHolder;
+import org.bukkit.inventory.ItemStack;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitTask;
 import org.flintstqne.entrenched.ConfigManager;
@@ -161,6 +170,62 @@ public class ObjectiveListener implements Listener {
 
         // Notify objective service
         objectiveService.onBlockDestroyed(player.getUniqueId(), team, regionId, x, y, z, blockType);
+
+        // Check if a container was broken - recalculate resource depot progress
+        if (isStorageContainer(event.getBlock().getType())) {
+            // Check if there's an active resource depot objective in this region
+            boolean hasResourceDepotObjective = objectiveService.getActiveObjectives(regionId, ObjectiveCategory.SETTLEMENT)
+                    .stream()
+                    .anyMatch(obj -> obj.type() == ObjectiveType.SETTLEMENT_RESOURCE_DEPOT);
+
+            if (hasResourceDepotObjective) {
+                // Schedule a delayed task to count remaining containers (after this block is removed)
+                Location loc = event.getBlock().getLocation();
+                Bukkit.getScheduler().runTaskLater(plugin, () -> {
+                    int[] counts = countContainersAndItems(loc, regionId);
+                    objectiveService.onContainerBroken(player.getUniqueId(), team, regionId, counts[0], counts[1]);
+                }, 1L); // 1 tick delay to ensure block is removed
+            }
+        }
+    }
+
+    /**
+     * Counts containers and items in a 64-block horizontal, 16-block vertical area around a location.
+     * @return int array [containerCount, totalItems]
+     */
+    private int[] countContainersAndItems(Location loc, String regionId) {
+        if (loc == null || loc.getWorld() == null) return new int[]{0, 0};
+
+        int searchRadiusHorizontal = 64;
+        int searchRadiusVertical = 16;
+        int containerCount = 0;
+        int totalItems = 0;
+
+        for (int dx = -searchRadiusHorizontal; dx <= searchRadiusHorizontal; dx++) {
+            for (int dy = -searchRadiusVertical; dy <= searchRadiusVertical; dy++) {
+                for (int dz = -searchRadiusHorizontal; dz <= searchRadiusHorizontal; dz++) {
+                    Block block = loc.getWorld().getBlockAt(
+                            loc.getBlockX() + dx,
+                            loc.getBlockY() + dy,
+                            loc.getBlockZ() + dz
+                    );
+
+                    if (isStorageContainer(block.getType())) {
+                        BlockState state = block.getState();
+                        if (state instanceof Container nearbyContainer) {
+                            containerCount++;
+                            for (ItemStack item : nearbyContainer.getInventory().getContents()) {
+                                if (item != null && item.getType() != Material.AIR) {
+                                    totalItems += item.getAmount();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        return new int[]{containerCount, totalItems};
     }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
@@ -181,6 +246,11 @@ public class ObjectiveListener implements Listener {
 
         // Notify objective service
         objectiveService.onBlockPlaced(player.getUniqueId(), team, regionId, x, y, z, blockType);
+
+        // Also notify if it's a storage container for resource depot objective
+        if (isStorageContainer(event.getBlock().getType())) {
+            objectiveService.onContainerPlaced(player.getUniqueId(), team, regionId, x, y, z, blockType);
+        }
     }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
@@ -207,6 +277,58 @@ public class ObjectiveListener implements Listener {
     @EventHandler
     public void onPlayerQuit(PlayerQuitEvent event) {
         uiManager.onPlayerQuit(event.getPlayer());
+    }
+
+    // ==================== INVENTORY EVENTS ====================
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onInventoryClose(InventoryCloseEvent event) {
+        if (!(event.getPlayer() instanceof Player player)) return;
+
+        Optional<String> teamOpt = teamService.getPlayerTeam(player.getUniqueId());
+        if (teamOpt.isEmpty()) return;
+
+        String team = teamOpt.get();
+        Inventory inventory = event.getInventory();
+        InventoryHolder holder = inventory.getHolder();
+
+        // Check if it's a container block
+        if (!(holder instanceof Container container)) return;
+
+        Location loc = container.getLocation();
+        if (loc == null || loc.getWorld() == null) return;
+
+        String regionId = regionService.getRegionIdForLocation(loc.getBlockX(), loc.getBlockZ());
+        if (regionId == null) return;
+
+        // Check if there's an active resource depot objective in this region
+        boolean hasResourceDepotObjective = objectiveService.getActiveObjectives(regionId, ObjectiveCategory.SETTLEMENT)
+                .stream()
+                .anyMatch(obj -> obj.type() == ObjectiveType.SETTLEMENT_RESOURCE_DEPOT);
+
+        if (!hasResourceDepotObjective) return;
+
+        // Count containers and items using shared helper
+        int[] counts = countContainersAndItems(loc, regionId);
+
+        // Notify objective service
+        objectiveService.onContainerInteract(player.getUniqueId(), team, regionId, counts[0], counts[1]);
+    }
+
+    /**
+     * Checks if a material is a storage container.
+     */
+    private boolean isStorageContainer(Material material) {
+        return switch (material) {
+            case CHEST, TRAPPED_CHEST, BARREL, SHULKER_BOX,
+                 WHITE_SHULKER_BOX, ORANGE_SHULKER_BOX, MAGENTA_SHULKER_BOX,
+                 LIGHT_BLUE_SHULKER_BOX, YELLOW_SHULKER_BOX, LIME_SHULKER_BOX,
+                 PINK_SHULKER_BOX, GRAY_SHULKER_BOX, LIGHT_GRAY_SHULKER_BOX,
+                 CYAN_SHULKER_BOX, PURPLE_SHULKER_BOX, BLUE_SHULKER_BOX,
+                 BROWN_SHULKER_BOX, GREEN_SHULKER_BOX, RED_SHULKER_BOX,
+                 BLACK_SHULKER_BOX -> true;
+            default -> false;
+        };
     }
 }
 

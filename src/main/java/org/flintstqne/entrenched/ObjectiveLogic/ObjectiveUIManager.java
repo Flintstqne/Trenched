@@ -319,6 +319,7 @@ public class ObjectiveUIManager {
 
         for (RegionObjective objective : objectives) {
             Location objLoc = null;
+            boolean isRegionWideObjective = false;
 
             // Special handling for hold ground - use region center from hold zone info
             if (objective.type() == ObjectiveType.RAID_HOLD_GROUND) {
@@ -328,14 +329,24 @@ public class ObjectiveUIManager {
                     int y = player.getWorld().getHighestBlockYAt(holdZone[0], holdZone[1]) + 1;
                     objLoc = new Location(player.getWorld(), holdZone[0] + 0.5, y, holdZone[1] + 0.5);
                 }
+            } else if (isRegionWideObjective(objective.type())) {
+                // Region-wide objectives (like Resource Depot) show for all players in the region
+                isRegionWideObjective = true;
             } else if (objective.hasLocation()) {
                 objLoc = objective.getLocation(player.getWorld());
             }
 
-            if (objLoc == null) continue;
+            // Skip if no location and not a region-wide objective
+            if (objLoc == null && !isRegionWideObjective) continue;
 
-            double distance = player.getLocation().distance(objLoc);
-            if (distance > bossBarDistance) continue;
+            // For region-wide objectives, check if player is in the same region
+            if (isRegionWideObjective) {
+                if (!objective.regionId().equals(playerRegion)) continue;
+            } else {
+                // For location-based objectives, check distance
+                double distance = player.getLocation().distance(objLoc);
+                if (distance > bossBarDistance) continue;
+            }
 
             activeObjectiveIds.add(objective.id());
 
@@ -365,6 +376,20 @@ public class ObjectiveUIManager {
                 iterator.remove();
             }
         }
+    }
+
+    /**
+     * Checks if an objective type is region-wide (no specific location).
+     */
+    private boolean isRegionWideObjective(ObjectiveType type) {
+        return switch (type) {
+            case SETTLEMENT_RESOURCE_DEPOT,
+                 SETTLEMENT_SECURE_PERIMETER,
+                 SETTLEMENT_SUPPLY_ROUTE,
+                 SETTLEMENT_WATCHTOWER,
+                 SETTLEMENT_GARRISON_QUARTERS -> true;
+            default -> false;
+        };
     }
 
     /**
@@ -416,11 +441,16 @@ public class ObjectiveUIManager {
         }
 
         int hintDistance = config.getObjectiveHintDistance();
+        String playerRegion = regionService.getRegionIdForLocation(
+                player.getLocation().getBlockX(),
+                player.getLocation().getBlockZ()
+        );
 
-        // Find nearest objective with a location
+        // Find nearest objective with a location OR a region-wide objective
         RegionObjective nearest = null;
         double nearestDist = Double.MAX_VALUE;
         Location nearestLoc = null;
+        boolean isRegionWide = false;
 
         for (RegionObjective obj : objectives) {
             Location objLoc = null;
@@ -433,6 +463,24 @@ public class ObjectiveUIManager {
                     int y = player.getWorld().getHighestBlockYAt(holdZone[0], holdZone[1]) + 1;
                     objLoc = new Location(player.getWorld(), holdZone[0] + 0.5, y, holdZone[1] + 0.5);
                 }
+            } else if (isRegionWideObjective(obj.type())) {
+                // Region-wide objectives - show if player is in the region
+                if (obj.regionId().equals(playerRegion)) {
+                    // Prioritize showing region-wide objectives with progress
+                    if (obj.progress() > 0) {
+                        nearest = obj;
+                        nearestDist = 0;
+                        nearestLoc = null;
+                        isRegionWide = true;
+                        break; // Region-wide with progress takes priority
+                    } else if (nearest == null || nearestDist == Double.MAX_VALUE) {
+                        nearest = obj;
+                        nearestDist = 0;
+                        nearestLoc = null;
+                        isRegionWide = true;
+                    }
+                }
+                continue;
             } else if (obj.hasLocation()) {
                 objLoc = obj.getLocation(player.getWorld());
             }
@@ -444,6 +492,7 @@ public class ObjectiveUIManager {
                 nearest = obj;
                 nearestDist = dist;
                 nearestLoc = objLoc;
+                isRegionWide = false;
             }
         }
 
@@ -463,17 +512,32 @@ public class ObjectiveUIManager {
 
         // Build action bar message
         String symbol = nearest.type().isRaid() ? "⚔" : "⚒";
-        String direction = getDirectionIndicator(player, nearestLoc);
-        int dist = (int) nearestDist;
 
-        Component message = Component.text(symbol + " ")
-                .color(nearest.type().isRaid() ? NamedTextColor.RED : NamedTextColor.GREEN)
-                .append(Component.text(nearest.type().getDisplayName())
-                        .color(NamedTextColor.YELLOW))
-                .append(Component.text(" [" + nearest.getInfluenceReward() + " IP] ")
-                        .color(NamedTextColor.GOLD))
-                .append(Component.text("- " + dist + "m " + direction)
-                        .color(NamedTextColor.GRAY));
+        Component message;
+        if (isRegionWide) {
+            // Region-wide objective - show progress instead of distance
+            int progressPct = nearest.getProgressPercent();
+            message = Component.text(symbol + " ")
+                    .color(nearest.type().isRaid() ? NamedTextColor.RED : NamedTextColor.GREEN)
+                    .append(Component.text(nearest.type().getDisplayName())
+                            .color(NamedTextColor.YELLOW))
+                    .append(Component.text(" [" + nearest.getInfluenceReward() + " IP] ")
+                            .color(NamedTextColor.GOLD))
+                    .append(Component.text("- " + progressPct + "% complete")
+                            .color(NamedTextColor.GRAY));
+        } else {
+            String direction = getDirectionIndicator(player, nearestLoc);
+            int dist = (int) nearestDist;
+
+            message = Component.text(symbol + " ")
+                    .color(nearest.type().isRaid() ? NamedTextColor.RED : NamedTextColor.GREEN)
+                    .append(Component.text(nearest.type().getDisplayName())
+                            .color(NamedTextColor.YELLOW))
+                    .append(Component.text(" [" + nearest.getInfluenceReward() + " IP] ")
+                            .color(NamedTextColor.GOLD))
+                    .append(Component.text("- " + dist + "m " + direction)
+                            .color(NamedTextColor.GRAY));
+        }
 
         player.sendActionBar(message);
     }

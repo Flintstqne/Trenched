@@ -42,6 +42,16 @@ public final class RegionCaptureListener implements Listener {
     private final Map<String, Long> bannerPlacementCooldowns = new ConcurrentHashMap<>();
     private static final long BANNER_COOLDOWN_MS = 300000; // 5 minutes
 
+    // Banner region tracking: "regionId" -> Set of "chunkAreaKey" where banners earned IP
+    // chunkAreaKey is based on 2x2 chunk areas (32x32 blocks)
+    // Key format: "regionId:team" -> Set of "areaX,areaZ"
+    private final Map<String, Set<String>> bannerAreaTracking = new ConcurrentHashMap<>();
+    private static final int BANNER_AREA_SIZE = 32; // 2x2 chunks = 32 blocks
+
+    // Track banners that have earned IP - "x,z" -> regionId
+    // Used to deduct IP when player breaks their own banner
+    private final Map<String, String> bannersEarnedIP = new ConcurrentHashMap<>();
+
     public RegionCaptureListener(RegionService regionService, TeamService teamService,
                                   ConfigManager configManager, RegionRenderer regionRenderer) {
         this.regionService = regionService;
@@ -234,15 +244,29 @@ public final class RegionCaptureListener implements Listener {
                 boolean onCooldown = lastPlacement != null && (now - lastPlacement) < BANNER_COOLDOWN_MS;
 
                 if (!onCooldown) {
-                    // Award IP and set cooldown
-                    bannerPlacementCooldowns.put(bannerKey, now);
-                    regionService.onBannerPlace(player.getUniqueId(), team, block.getX(), block.getZ());
+                    // Check 2x2 chunk area restriction - only one banner per 32x32 area per region
+                    String areaKey = getBannerAreaKey(block.getX(), block.getZ());
+                    String trackingKey = regionId + ":" + team;
+                    Set<String> usedAreas = bannerAreaTracking.computeIfAbsent(trackingKey, k -> ConcurrentHashMap.newKeySet());
 
-                    if (regionId != null) {
-                        String regionName = getRegionDisplayName(regionId);
-                        player.sendMessage(configManager.getPrefix() + ChatColor.GREEN + "+" +
-                                configManager.getRegionBannerPlacePoints() + " IP " +
-                                ChatColor.GRAY + "- Banner placed in " + regionName);
+                    if (usedAreas.contains(areaKey)) {
+                        // Already placed a banner in this 2x2 chunk area for this region
+                        player.sendMessage(configManager.getPrefix() + ChatColor.YELLOW +
+                                "Banner placed, but you've already earned IP in this area. " +
+                                "Banners must be " + BANNER_AREA_SIZE + " blocks apart to earn IP.");
+                    } else {
+                        // Award IP, set cooldown, mark area as used, and track this banner earned IP
+                        bannerPlacementCooldowns.put(bannerKey, now);
+                        usedAreas.add(areaKey);
+                        bannersEarnedIP.put(bannerKey, regionId); // Track that this banner earned IP
+                        regionService.onBannerPlace(player.getUniqueId(), team, block.getX(), block.getZ());
+
+                        if (regionId != null) {
+                            String regionName = getRegionDisplayName(regionId);
+                            player.sendMessage(configManager.getPrefix() + ChatColor.GREEN + "+" +
+                                    configManager.getRegionBannerPlacePoints() + " IP " +
+                                    ChatColor.GRAY + "- Banner placed in " + regionName);
+                        }
                     }
                 } else {
                     // On cooldown - no IP awarded
@@ -297,10 +321,32 @@ public final class RegionCaptureListener implements Listener {
             String bannerTeam = placedBanners.remove(bannerKey);
 
             if (bannerTeam != null && !bannerTeam.equalsIgnoreCase(team) && canEarnInfluence) {
+                // Breaking enemy banner - award IP
                 regionService.onBannerRemove(player.getUniqueId(), team, block.getX(), block.getZ(), bannerTeam);
                 player.sendMessage(configManager.getPrefix() + ChatColor.GREEN + "+" +
                         configManager.getRegionBannerRemovePoints() + " IP " +
                         ChatColor.GRAY + "- Enemy banner destroyed");
+
+                // If this enemy banner had earned IP, remove it from tracking
+                bannersEarnedIP.remove(bannerKey);
+            } else if (bannerTeam != null && bannerTeam.equalsIgnoreCase(team)) {
+                // Breaking own team's banner - check if it earned IP and deduct
+                String earnedInRegion = bannersEarnedIP.remove(bannerKey);
+                if (earnedInRegion != null) {
+                    // This banner earned IP - deduct it
+                    regionService.onOwnBannerRemove(player.getUniqueId(), team, block.getX(), block.getZ());
+                    player.sendMessage(configManager.getPrefix() + ChatColor.RED + "-" +
+                            configManager.getRegionBannerPlacePoints() + " IP " +
+                            ChatColor.GRAY + "- Own banner destroyed (IP returned)");
+
+                    // Also remove from area tracking so they can place again in this area
+                    String areaKey = getBannerAreaKey(block.getX(), block.getZ());
+                    String trackingKey = earnedInRegion + ":" + team;
+                    Set<String> usedAreas = bannerAreaTracking.get(trackingKey);
+                    if (usedAreas != null) {
+                        usedAreas.remove(areaKey);
+                    }
+                }
             }
         } else if (canEarnInfluence) {
             // Regular block break - only if can earn influence
@@ -335,11 +381,24 @@ public final class RegionCaptureListener implements Listener {
     }
 
     /**
+     * Gets the area key for a 2x2 chunk area (32x32 blocks) containing the given coordinates.
+     * Used to enforce one banner per area per region.
+     */
+    private String getBannerAreaKey(int x, int z) {
+        int areaX = Math.floorDiv(x, BANNER_AREA_SIZE);
+        int areaZ = Math.floorDiv(z, BANNER_AREA_SIZE);
+        return areaX + "," + areaZ;
+    }
+
+    /**
      * Clears all tracked data. Called on new round.
      */
     public void clearTrackedData() {
         playerPlacedBlocks.clear();
         placedBanners.clear();
+        bannerAreaTracking.clear();
+        bannersEarnedIP.clear();
+        bannerPlacementCooldowns.clear();
     }
 }
 
