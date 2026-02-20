@@ -295,6 +295,52 @@ public class ObjectiveUIManager {
                 player.sendActionBar(warning);
                 break;
             }
+            if (objective.type() == ObjectiveType.RAID_CAPTURE_INTEL && objective.progress() > 0) {
+                // Get intel carrier info
+                Optional<ObjectiveService.IntelCarrierInfo> intelInfo =
+                        objectiveService.getIntelCarrierInfo(objective.regionId());
+
+                if (intelInfo.isPresent()) {
+                    ObjectiveService.IntelCarrierInfo info = intelInfo.get();
+
+                    if (info.isDropped()) {
+                        // Intel is dropped - show direction to it and remaining time
+                        Location dropLoc = new Location(player.getWorld(), info.droppedX() + 0.5, info.droppedY(), info.droppedZ() + 0.5);
+                        String directionText = getDirectionIndicator(player, dropLoc) + " " +
+                                (int) player.getLocation().distance(dropLoc) + "m";
+                        int secondsRemaining = info.droppedSecondsRemaining();
+
+                        Component warning = Component.text("⚡ INTEL DROPPED! ")
+                                .color(NamedTextColor.GOLD)
+                                .decorate(TextDecoration.BOLD)
+                                .append(Component.text("Recover in " + secondsRemaining + "s! ")
+                                        .color(NamedTextColor.YELLOW)
+                                        .decoration(TextDecoration.BOLD, false))
+                                .append(Component.text(directionText)
+                                        .color(NamedTextColor.GRAY));
+                        player.sendActionBar(warning);
+                    } else if (info.carrierUuid() != null) {
+                        // Intel is being carried - show direction to carrier
+                        Player carrier = Bukkit.getPlayer(info.carrierUuid());
+                        if (carrier != null && carrier.isOnline()) {
+                            String carrierName = carrier.getName();
+                            String directionText = getDirectionIndicator(player, carrier.getLocation()) + " " +
+                                    (int) player.getLocation().distance(carrier.getLocation()) + "m";
+
+                            Component warning = Component.text("⚡ INTEL STOLEN! ")
+                                    .color(NamedTextColor.RED)
+                                    .decorate(TextDecoration.BOLD)
+                                    .append(Component.text("Carrier: " + carrierName + " ")
+                                            .color(NamedTextColor.YELLOW)
+                                            .decoration(TextDecoration.BOLD, false))
+                                    .append(Component.text(directionText)
+                                            .color(NamedTextColor.GRAY));
+                            player.sendActionBar(warning);
+                        }
+                    }
+                }
+                break;
+            }
         }
 
         // Remove boss bars for objectives no longer active/alerting
@@ -331,7 +377,21 @@ public class ObjectiveUIManager {
                 }
             }
             case RAID_ASSASSINATE_COMMANDER -> "⚠ Commander Targeted!";
-            case RAID_CAPTURE_INTEL -> "⚠ Intel Being Stolen!";
+            case RAID_CAPTURE_INTEL -> {
+                if (objective.progress() >= 0.5) {
+                    yield "⚡ INTEL STOLEN! Intercept the carrier!";
+                } else if (objective.progress() > 0 && objective.progress() < 0.5) {
+                    // Intel is dropped - try to get timeout info
+                    Optional<ObjectiveService.IntelCarrierInfo> infoOpt = objectiveService.getIntelCarrierInfo(objective.regionId());
+                    if (infoOpt.isPresent() && infoOpt.get().isDropped()) {
+                        int seconds = infoOpt.get().droppedSecondsRemaining();
+                        yield "⚡ Intel dropped! Recover in " + seconds + "s!";
+                    }
+                    yield "⚡ Intel dropped! Recover it!";
+                } else {
+                    yield "⚠ Intel Under Threat!";
+                }
+            }
             default -> "⚠ Region Under Attack!";
         };
 

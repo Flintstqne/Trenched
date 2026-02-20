@@ -92,6 +92,15 @@ public record RegionObjective(
                     yield "Defend the explosive (" + seconds + "/30 seconds)";
                 }
             }
+            case RAID_CAPTURE_INTEL -> {
+                if (progress == 0) {
+                    yield "Pick up the intel at the marked location";
+                } else if (progress < 1.0) {
+                    yield "Return intel to friendly territory!";
+                } else {
+                    yield "Intel captured!";
+                }
+            }
             case SETTLEMENT_RESOURCE_DEPOT -> {
                 // Progress is (containers/4 + items/100) / 2
                 // Estimate containers and items from progress

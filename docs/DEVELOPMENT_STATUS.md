@@ -182,7 +182,7 @@ The design document (`REGION_CAPTURE_DESIGN.md`) outlines objectives. Current st
 | **Assassinate Commander** | ✅ Complete | Kill enemy division commanders/officers (glowing targets) |
 | **Sabotage Defenses** | ✅ Complete | Destroy 50+ wall blocks |
 | **Plant Explosive** | ✅ Complete | Place TNT at target, defend 30s |
-| **Capture Intel** | ❌ Not Started | Retrieve item, return to base |
+| **Capture Intel** | ✅ Complete | Pick up intel item, return to friendly territory |
 | **Hold Ground** | ✅ Complete | Hold region center 60s |
 | **Establish Outpost** | ❌ Not Started | Build structure with bed/chest/crafting table |
 | **Secure Perimeter** | ✅ Complete | Build 100 defensive wall blocks |

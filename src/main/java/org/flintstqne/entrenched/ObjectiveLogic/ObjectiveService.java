@@ -249,6 +249,63 @@ public interface ObjectiveService {
      */
     void clearTrackedData();
 
+    // ==================== CAPTURE INTEL OBJECTIVE ====================
+
+    /**
+     * Called when a player picks up an intel item.
+     * @return true if the item was intel for an active objective
+     */
+    boolean onIntelPickup(UUID playerUuid, String team, String regionId);
+
+    /**
+     * Called when an intel carrier enters a new region.
+     * Checks if they've reached friendly territory to complete the objective.
+     */
+    void onIntelCarrierRegionChange(UUID playerUuid, String newRegionId);
+
+    /**
+     * Called when an intel carrier dies - drops the intel.
+     */
+    void onIntelCarrierDeath(UUID playerUuid, String regionId);
+
+    /**
+     * Called when a defender picks up dropped intel - returns it.
+     * @return true if the item was dropped intel that was returned
+     */
+    boolean onIntelReturned(UUID defenderUuid, String team, String regionId);
+
+    /**
+     * Gets info about the current intel carrier in a region.
+     */
+    Optional<IntelCarrierInfo> getIntelCarrierInfo(String regionId);
+
+    /**
+     * Spawns the intel item at the objective location.
+     * Called when objective is created.
+     */
+    void spawnIntelItem(String regionId, int x, int y, int z);
+
+    /**
+     * Called every second to check for timed-out dropped intel.
+     * If dropped intel times out, it respawns at the original location.
+     */
+    void tickIntelObjectives();
+
+    /**
+     * Data class for intel carrier tracking.
+     */
+    record IntelCarrierInfo(
+            String sourceRegionId,
+            int objectiveId,
+            UUID carrierUuid,
+            String carrierTeam,
+            long pickedUpAtMillis,
+            boolean isDropped,
+            int droppedX, int droppedY, int droppedZ,
+            int droppedSecondsRemaining,  // Time left before dropped intel respawns (60s)
+            int overallSecondsRemaining   // Time left before entire objective expires (10 min)
+    ) {}
+
     /**
      * Data class for hold ground tracking.
      */

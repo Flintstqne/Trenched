@@ -37,7 +37,7 @@ public enum ObjectiveType {
             "Plant explosives at the target location"),
 
     /**
-     * Retrieve an item from enemy base and return to your territory.
+     * Retrieve an intel item from enemy base and return to your territory.
      * 125 IP reward.
      */
     RAID_CAPTURE_INTEL("Capture Intel", 125, ObjectiveCategory.RAID,

@@ -13,15 +13,28 @@ import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.BlockBreakEvent;
 import org.bukkit.event.block.BlockPlaceEvent;
+import org.bukkit.event.entity.EntityPickupItemEvent;
 import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.inventory.InventoryCloseEvent;
+import org.bukkit.event.player.PlayerChangedWorldEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
+import org.bukkit.event.player.PlayerMoveEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.InventoryHolder;
 import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.plugin.java.JavaPlugin;
+import org.bukkit.potion.PotionEffect;
+import org.bukkit.potion.PotionEffectType;
 import org.bukkit.scheduler.BukkitTask;
+import org.flintstqne.entrenched.ConfigManager;
+import org.flintstqne.entrenched.RegionLogic.RegionService;
+import org.flintstqne.entrenched.RoundLogic.RoundService;
+import org.flintstqne.entrenched.TeamLogic.TeamService;
+
+import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import org.flintstqne.entrenched.ConfigManager;
 import org.flintstqne.entrenched.RegionLogic.RegionService;
 import org.flintstqne.entrenched.RoundLogic.RoundService;
@@ -48,6 +61,7 @@ public class ObjectiveListener implements Listener {
     private BukkitTask refreshTask;
     private BukkitTask holdGroundTask;
     private BukkitTask plantedExplosivesTask;
+    private BukkitTask intelTask;
     private RoundService roundService;
 
     public ObjectiveListener(JavaPlugin plugin, ObjectiveService objectiveService,
@@ -105,6 +119,11 @@ public class ObjectiveListener implements Listener {
                 objectiveService::tickPlantedExplosives,
                 20L, 20L);
 
+        // Start intel tick task (every second = 20 ticks) - handles dropped intel timeout
+        intelTask = Bukkit.getScheduler().runTaskTimer(plugin,
+                objectiveService::tickIntelObjectives,
+                20L, 20L);
+
         plugin.getLogger().info("[Objectives] Listener started, refresh every " + refreshMinutes + " minutes");
     }
 
@@ -120,6 +139,9 @@ public class ObjectiveListener implements Listener {
         }
         if (plantedExplosivesTask != null) {
             plantedExplosivesTask.cancel();
+        }
+        if (intelTask != null) {
+            intelTask.cancel();
         }
     }
 
@@ -299,17 +321,115 @@ public class ObjectiveListener implements Listener {
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onPlayerDeath(PlayerDeathEvent event) {
         Player victim = event.getEntity();
-        Player killer = victim.getKiller();
-        if (killer == null) return;
 
         int x = victim.getLocation().getBlockX();
         int z = victim.getLocation().getBlockZ();
-
         String regionId = regionService.getRegionIdForLocation(x, z);
+
+        // Check if victim was carrying intel
+        if (regionId != null) {
+            objectiveService.onIntelCarrierDeath(victim.getUniqueId(), regionId);
+
+            // Remove intel item from death drops if they were carrying it
+            event.getDrops().removeIf(item -> {
+                if (item.getType() == Material.FILLED_MAP) {
+                    ItemMeta meta = item.getItemMeta();
+                    if (meta != null && meta.hasDisplayName()) {
+                        String name = PlainTextComponentSerializer.plainText().serialize(meta.displayName());
+                        return name.contains("SECRET INTEL");
+                    }
+                }
+                return false;
+            });
+        }
+
+        // Handle kills for assassination objective
+        Player killer = victim.getKiller();
+        if (killer == null || regionId == null) return;
+
+        // Notify objective service for kill
+        objectiveService.onPlayerKill(killer.getUniqueId(), victim.getUniqueId(), regionId);
+    }
+
+    // ==================== INTEL CAPTURE EVENTS ====================
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onItemPickup(EntityPickupItemEvent event) {
+        if (!(event.getEntity() instanceof Player player)) return;
+
+        ItemStack item = event.getItem().getItemStack();
+        if (item.getType() != Material.FILLED_MAP) return;
+
+        // Check if this is an intel item
+        ItemMeta meta = item.getItemMeta();
+        if (meta == null || !meta.hasDisplayName()) return;
+
+        String name = PlainTextComponentSerializer.plainText().serialize(meta.displayName());
+        if (!name.contains("SECRET INTEL")) return;
+
+        // This is intel - check for objective
+        Optional<String> teamOpt = teamService.getPlayerTeam(player.getUniqueId());
+        if (teamOpt.isEmpty()) return;
+
+        String team = teamOpt.get();
+        int x = event.getItem().getLocation().getBlockX();
+        int z = event.getItem().getLocation().getBlockZ();
+        String regionId = regionService.getRegionIdForLocation(x, z);
+
         if (regionId == null) return;
 
-        // Notify objective service
-        objectiveService.onPlayerKill(killer.getUniqueId(), victim.getUniqueId(), regionId);
+        // Try to pick up as attacker
+        boolean pickedUp = objectiveService.onIntelPickup(player.getUniqueId(), team, regionId);
+
+        if (pickedUp) {
+            // Remove the item entity
+            event.getItem().remove();
+            event.setCancelled(true);
+
+            // Give player glowing effect
+            player.addPotionEffect(new PotionEffect(PotionEffectType.GLOWING, Integer.MAX_VALUE, 0, false, false, true));
+
+            // Notify player
+            player.sendMessage(config.getPrefix() + org.bukkit.ChatColor.GREEN +
+                    "⚡ You picked up SECRET INTEL! Return to friendly territory!");
+            player.playSound(player.getLocation(), org.bukkit.Sound.ENTITY_PLAYER_LEVELUP, 1.0f, 1.5f);
+        } else {
+            // Try to return as defender
+            boolean returned = objectiveService.onIntelReturned(player.getUniqueId(), team, regionId);
+            if (returned) {
+                event.getItem().remove();
+                event.setCancelled(true);
+
+                player.sendMessage(config.getPrefix() + org.bukkit.ChatColor.GREEN +
+                        "⚡ Intel recovered! The enemy's objective has been reset.");
+                player.playSound(player.getLocation(), org.bukkit.Sound.BLOCK_NOTE_BLOCK_CHIME, 1.0f, 1.0f);
+            }
+        }
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onPlayerMove(PlayerMoveEvent event) {
+        // Only check region changes (not every movement)
+        if (event.getFrom().getBlockX() == event.getTo().getBlockX() &&
+            event.getFrom().getBlockZ() == event.getTo().getBlockZ()) {
+            return;
+        }
+
+        Player player = event.getPlayer();
+
+        String fromRegion = regionService.getRegionIdForLocation(
+                event.getFrom().getBlockX(), event.getFrom().getBlockZ());
+        String toRegion = regionService.getRegionIdForLocation(
+                event.getTo().getBlockX(), event.getTo().getBlockZ());
+
+        // Check if player changed regions
+        if (fromRegion != null && toRegion != null && !fromRegion.equals(toRegion)) {
+            // Check if this player is carrying intel
+            objectiveService.onIntelCarrierRegionChange(player.getUniqueId(), toRegion);
+
+            // If objective completed, remove glowing effect
+            // The completion callback will handle notifications
+        }
     }
 
     @EventHandler

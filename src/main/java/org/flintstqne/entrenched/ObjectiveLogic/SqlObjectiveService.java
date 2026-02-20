@@ -74,6 +74,54 @@ public class SqlObjectiveService implements ObjectiveService {
         }
     }
 
+    // Track intel carriers - sourceRegionId -> IntelCarrierData
+    // Used for Capture Intel objective
+    private final Map<String, IntelCarrierData> intelCarriers = new ConcurrentHashMap<>();
+
+    // Track spawned intel items - regionId -> Item entity UUID
+    private final Map<String, UUID> spawnedIntelItems = new ConcurrentHashMap<>();
+
+    // Track intel objective spawn times - regionId -> spawn timestamp (for 10-minute overall limit)
+    private final Map<String, Long> intelObjectiveSpawnTimes = new ConcurrentHashMap<>();
+
+    // Intel dropped timeout in seconds (60 seconds to recover dropped intel before it respawns)
+    private static final int INTEL_DROPPED_TIMEOUT_SECONDS = 60;
+
+    // Intel objective total lifetime in seconds (10 minutes)
+    private static final int INTEL_OBJECTIVE_LIFETIME_SECONDS = 10 * 60;
+
+    // Internal data class for tracking intel carriers
+    private record IntelCarrierData(
+            int objectiveId,
+            String sourceRegionId,
+            UUID carrierUuid,
+            String carrierTeam,
+            long pickedUpAtMillis,
+            boolean isDropped,
+            int droppedX, int droppedY, int droppedZ,
+            long droppedAtMillis  // When intel was dropped (for timeout)
+    ) {
+        IntelCarrierData withDropped(int x, int y, int z) {
+            return new IntelCarrierData(objectiveId, sourceRegionId, null, carrierTeam,
+                    pickedUpAtMillis, true, x, y, z, System.currentTimeMillis());
+        }
+
+        IntelCarrierData withCarrier(UUID newCarrier, String team) {
+            return new IntelCarrierData(objectiveId, sourceRegionId, newCarrier, team,
+                    System.currentTimeMillis(), false, 0, 0, 0, 0);
+        }
+
+        int getDroppedSecondsRemaining() {
+            if (!isDropped) return 0;
+            long elapsed = (System.currentTimeMillis() - droppedAtMillis) / 1000;
+            return Math.max(0, INTEL_DROPPED_TIMEOUT_SECONDS - (int) elapsed);
+        }
+
+        boolean isDroppedTimedOut() {
+            return isDropped && getDroppedSecondsRemaining() <= 0;
+        }
+    }
+
     public SqlObjectiveService(JavaPlugin plugin, ObjectiveDb db, RoundService roundService,
                                 RegionService regionService, ConfigManager config) {
         this.plugin = plugin;
@@ -295,6 +343,11 @@ public class SqlObjectiveService implements ObjectiveService {
 
         if (objectiveId > 0) {
             plugin.getLogger().info("[Objectives] Spawned " + type.getDisplayName() + " in " + regionId);
+
+            // Special handling for Capture Intel - spawn the intel item
+            if (type == ObjectiveType.RAID_CAPTURE_INTEL && x != null && y != null && z != null) {
+                spawnIntelItem(regionId, x, y, z);
+            }
 
             // Notify callback
             if (spawnCallback != null) {
@@ -941,6 +994,18 @@ public class SqlObjectiveService implements ObjectiveService {
         objectiveBlocksTracking.clear();
         enemyChestTracking.clear();
         plantedExplosives.clear();
+        intelCarriers.clear();
+        intelObjectiveSpawnTimes.clear();
+
+        // Remove any spawned intel items
+        for (UUID itemId : spawnedIntelItems.values()) {
+            org.bukkit.entity.Entity item = org.bukkit.Bukkit.getEntity(itemId);
+            if (item != null) {
+                item.remove();
+            }
+        }
+        spawnedIntelItems.clear();
+
         lastRegionOwnedWarning.clear();
         plugin.getLogger().info("[Objectives] Cleared all tracked data for new round");
     }
@@ -1058,6 +1123,408 @@ public class SqlObjectiveService implements ObjectiveService {
                 data.getSecondsRemaining(),
                 data.defendSeconds()
         ));
+    }
+
+    // ==================== CAPTURE INTEL OBJECTIVE ====================
+
+    @Override
+    public void spawnIntelItem(String regionId, int x, int y, int z) {
+        World world = roundService.getGameWorld().orElse(null);
+        if (world == null) return;
+
+        // Remove existing intel item if any
+        UUID existingItemId = spawnedIntelItems.get(regionId);
+        if (existingItemId != null) {
+            org.bukkit.entity.Entity existing = org.bukkit.Bukkit.getEntity(existingItemId);
+            if (existing != null) {
+                existing.remove();
+            }
+        }
+
+        // Track spawn time only on FIRST spawn (not respawns after defender recovery)
+        // This ensures the 10-minute lifetime starts from objective creation
+        intelObjectiveSpawnTimes.putIfAbsent(regionId, System.currentTimeMillis());
+
+        // Create the intel item (enchanted map with custom name)
+        org.bukkit.inventory.ItemStack intelItem = new org.bukkit.inventory.ItemStack(org.bukkit.Material.FILLED_MAP);
+        org.bukkit.inventory.meta.ItemMeta meta = intelItem.getItemMeta();
+
+        // Calculate remaining time for lore display
+        long spawnTime = intelObjectiveSpawnTimes.get(regionId);
+        int secondsRemaining = getIntelObjectiveSecondsRemaining(regionId);
+        int minutesRemaining = secondsRemaining / 60;
+
+        if (meta != null) {
+            meta.displayName(net.kyori.adventure.text.Component.text("⚡ SECRET INTEL ⚡")
+                    .color(net.kyori.adventure.text.format.NamedTextColor.GOLD)
+                    .decorate(net.kyori.adventure.text.format.TextDecoration.BOLD));
+            meta.lore(java.util.List.of(
+                    net.kyori.adventure.text.Component.text("Capture this and return to friendly territory!")
+                            .color(net.kyori.adventure.text.format.NamedTextColor.YELLOW),
+                    net.kyori.adventure.text.Component.text("Region: " + regionId)
+                            .color(net.kyori.adventure.text.format.NamedTextColor.GRAY),
+                    net.kyori.adventure.text.Component.text("Time remaining: ~" + minutesRemaining + " min")
+                            .color(net.kyori.adventure.text.format.NamedTextColor.RED)
+            ));
+            meta.addEnchant(org.bukkit.enchantments.Enchantment.UNBREAKING, 1, true);
+            meta.addItemFlags(org.bukkit.inventory.ItemFlag.HIDE_ENCHANTS);
+            intelItem.setItemMeta(meta);
+        }
+
+        // Drop the item at the location
+        Location loc = new Location(world, x + 0.5, y + 1, z + 0.5);
+        org.bukkit.entity.Item droppedItem = world.dropItem(loc, intelItem);
+        droppedItem.setGlowing(true);
+        droppedItem.setCustomNameVisible(true);
+        droppedItem.customName(net.kyori.adventure.text.Component.text("⚡ SECRET INTEL")
+                .color(net.kyori.adventure.text.format.NamedTextColor.GOLD));
+        droppedItem.setUnlimitedLifetime(true); // Don't despawn
+
+        spawnedIntelItems.put(regionId, droppedItem.getUniqueId());
+
+        plugin.getLogger().info("[Objectives] Spawned intel item for Capture Intel objective in " + regionId +
+                " at " + x + "," + y + "," + z + " (" + minutesRemaining + " min remaining)");
+    }
+
+    /**
+     * Gets remaining seconds for an intel objective's overall lifetime.
+     */
+    private int getIntelObjectiveSecondsRemaining(String regionId) {
+        Long spawnTime = intelObjectiveSpawnTimes.get(regionId);
+        if (spawnTime == null) return INTEL_OBJECTIVE_LIFETIME_SECONDS;
+        long elapsed = (System.currentTimeMillis() - spawnTime) / 1000;
+        return Math.max(0, INTEL_OBJECTIVE_LIFETIME_SECONDS - (int) elapsed);
+    }
+
+    /**
+     * Checks if an intel objective has exceeded its 10-minute lifetime.
+     */
+    private boolean isIntelObjectiveExpired(String regionId) {
+        return getIntelObjectiveSecondsRemaining(regionId) <= 0;
+    }
+
+    @Override
+    public boolean onIntelPickup(UUID playerUuid, String team, String regionId) {
+        // Check if there's an active Capture Intel objective in this region
+        for (RegionObjective obj : getActiveObjectives(regionId, ObjectiveCategory.RAID)) {
+            if (obj.type() == ObjectiveType.RAID_CAPTURE_INTEL) {
+                // Verify player is attacker
+                Optional<RegionStatus> statusOpt = regionService.getRegionStatus(regionId);
+                if (statusOpt.isEmpty()) return false;
+
+                String defenderTeam = statusOpt.get().ownerTeam();
+                if (defenderTeam != null && defenderTeam.equalsIgnoreCase(team)) {
+                    return false; // Defender can't capture their own intel
+                }
+
+                // Check if intel is already being carried
+                IntelCarrierData existing = intelCarriers.get(regionId);
+                if (existing != null && !existing.isDropped()) {
+                    return false; // Someone already has it
+                }
+
+                // Start carrying the intel
+                IntelCarrierData data = new IntelCarrierData(
+                        obj.id(), regionId, playerUuid, team,
+                        System.currentTimeMillis(), false, 0, 0, 0, 0
+                );
+                intelCarriers.put(regionId, data);
+
+                // Update objective progress to show it's being carried
+                updateProgress(obj.id(), 0.5); // 50% = picked up, needs to return
+
+                // Remove the spawned item reference
+                spawnedIntelItems.remove(regionId);
+
+                plugin.getLogger().info("[Objectives] Intel picked up by " + playerUuid +
+                        " in " + regionId + " - must return to friendly territory");
+
+                return true;
+            }
+        }
+
+        // Check if this is dropped intel being picked up
+        for (Map.Entry<String, IntelCarrierData> entry : intelCarriers.entrySet()) {
+            IntelCarrierData data = entry.getValue();
+            if (data.isDropped()) {
+                // Check if player is near the dropped location
+                // This would need position checking in the listener
+                // For now, we allow pickup anywhere in the source region
+                if (entry.getKey().equals(regionId) || isPlayerNearDroppedIntel(playerUuid, data)) {
+                    // Check if it's a defender returning or attacker continuing
+                    Optional<RegionStatus> statusOpt = regionService.getRegionStatus(data.sourceRegionId());
+                    if (statusOpt.isPresent()) {
+                        String defenderTeam = statusOpt.get().ownerTeam();
+                        if (defenderTeam != null && defenderTeam.equalsIgnoreCase(team)) {
+                            // Defender recovered the intel - reset objective
+                            return false; // Let onIntelReturned handle this
+                        }
+                    }
+
+                    // Attacker picking up dropped intel
+                    IntelCarrierData newData = data.withCarrier(playerUuid, team);
+                    intelCarriers.put(data.sourceRegionId(), newData);
+
+                    plugin.getLogger().info("[Objectives] Dropped intel recovered by attacker " + playerUuid);
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private boolean isPlayerNearDroppedIntel(UUID playerUuid, IntelCarrierData data) {
+        if (!data.isDropped()) return false;
+
+        org.bukkit.entity.Player player = org.bukkit.Bukkit.getPlayer(playerUuid);
+        if (player == null) return false;
+
+        double dist = Math.sqrt(
+                Math.pow(player.getLocation().getX() - data.droppedX(), 2) +
+                Math.pow(player.getLocation().getZ() - data.droppedZ(), 2)
+        );
+        return dist < 5; // Within 5 blocks
+    }
+
+    @Override
+    public void onIntelCarrierRegionChange(UUID playerUuid, String newRegionId) {
+        // Find if this player is carrying intel
+        for (Map.Entry<String, IntelCarrierData> entry : intelCarriers.entrySet()) {
+            IntelCarrierData data = entry.getValue();
+            if (data.carrierUuid() != null && data.carrierUuid().equals(playerUuid) && !data.isDropped()) {
+                String sourceRegion = data.sourceRegionId();
+
+                // Check if player entered friendly territory
+                Optional<RegionStatus> sourceStatus = regionService.getRegionStatus(sourceRegion);
+                Optional<RegionStatus> newStatus = regionService.getRegionStatus(newRegionId);
+
+                if (sourceStatus.isPresent() && newStatus.isPresent()) {
+                    String defenderTeam = sourceStatus.get().ownerTeam();
+
+                    // Check if new region is owned by attacker's team (carrier's team)
+                    if (data.carrierTeam().equalsIgnoreCase(newStatus.get().ownerTeam())) {
+                        // Intel delivered to friendly territory!
+                        completeObjective(data.objectiveId(), playerUuid, data.carrierTeam());
+                        intelCarriers.remove(entry.getKey());
+
+                        plugin.getLogger().info("[Objectives] Capture Intel completed! " + playerUuid +
+                                " delivered intel from " + sourceRegion + " to " + newRegionId);
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    @Override
+    public void onIntelCarrierDeath(UUID playerUuid, String regionId) {
+        // Find if this player was carrying intel
+        for (Map.Entry<String, IntelCarrierData> entry : intelCarriers.entrySet()) {
+            IntelCarrierData data = entry.getValue();
+            if (data.carrierUuid() != null && data.carrierUuid().equals(playerUuid) && !data.isDropped()) {
+                // Player died while carrying intel - drop it
+                org.bukkit.entity.Player player = org.bukkit.Bukkit.getPlayer(playerUuid);
+                int dropX = 0, dropY = 64, dropZ = 0;
+                if (player != null) {
+                    dropX = player.getLocation().getBlockX();
+                    dropY = player.getLocation().getBlockY();
+                    dropZ = player.getLocation().getBlockZ();
+                }
+
+                IntelCarrierData droppedData = data.withDropped(dropX, dropY, dropZ);
+                intelCarriers.put(entry.getKey(), droppedData);
+
+                // Spawn the intel item at death location
+                World world = roundService.getGameWorld().orElse(null);
+                if (world != null) {
+                    spawnIntelItem(data.sourceRegionId(), dropX, dropY, dropZ);
+                }
+
+                // Update objective progress to show it's dropped
+                updateProgress(data.objectiveId(), 0.25); // 25% = dropped, vulnerable
+
+                plugin.getLogger().info("[Objectives] Intel carrier " + playerUuid +
+                        " died - intel dropped at " + dropX + "," + dropY + "," + dropZ);
+                return;
+            }
+        }
+    }
+
+    @Override
+    public boolean onIntelReturned(UUID defenderUuid, String team, String regionId) {
+        // Check all intel carriers for dropped intel in this region
+        for (Map.Entry<String, IntelCarrierData> entry : intelCarriers.entrySet()) {
+            IntelCarrierData data = entry.getValue();
+            if (data.isDropped()) {
+                // Check if defender is near the dropped intel
+                if (isPlayerNearDroppedIntel(defenderUuid, data)) {
+                    // Check if this player is on the defending team
+                    Optional<RegionStatus> statusOpt = regionService.getRegionStatus(data.sourceRegionId());
+                    if (statusOpt.isPresent()) {
+                        String defenderTeamExpected = statusOpt.get().ownerTeam();
+                        if (defenderTeamExpected != null && defenderTeamExpected.equalsIgnoreCase(team)) {
+                            // Defender recovered the intel - reset the objective
+                            intelCarriers.remove(entry.getKey());
+
+                            // Remove the dropped item
+                            UUID itemId = spawnedIntelItems.remove(data.sourceRegionId());
+                            if (itemId != null) {
+                                org.bukkit.entity.Entity item = org.bukkit.Bukkit.getEntity(itemId);
+                                if (item != null) {
+                                    item.remove();
+                                }
+                            }
+
+                            // Reset objective progress
+                            updateProgress(data.objectiveId(), 0.0);
+
+                            // Respawn intel at original location
+                            for (RegionObjective obj : getActiveObjectives(data.sourceRegionId(), ObjectiveCategory.RAID)) {
+                                if (obj.id() == data.objectiveId() && obj.hasLocation()) {
+                                    spawnIntelItem(data.sourceRegionId(), obj.locationX(), obj.locationY(), obj.locationZ());
+                                    break;
+                                }
+                            }
+
+                            plugin.getLogger().info("[Objectives] Intel returned by defender " + defenderUuid +
+                                    " in " + data.sourceRegionId() + " - objective reset");
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    @Override
+    public Optional<IntelCarrierInfo> getIntelCarrierInfo(String regionId) {
+        IntelCarrierData data = intelCarriers.get(regionId);
+        if (data == null) return Optional.empty();
+
+        return Optional.of(new IntelCarrierInfo(
+                data.sourceRegionId(),
+                data.objectiveId(),
+                data.carrierUuid(),
+                data.carrierTeam(),
+                data.pickedUpAtMillis(),
+                data.isDropped(),
+                data.droppedX(), data.droppedY(), data.droppedZ(),
+                data.getDroppedSecondsRemaining(),
+                getIntelObjectiveSecondsRemaining(regionId)
+        ));
+    }
+
+    @Override
+    public void tickIntelObjectives() {
+        // First, check all intel objectives for 10-minute expiration (regardless of phase)
+        Set<String> expiredRegions = new HashSet<>();
+        for (String regionId : intelObjectiveSpawnTimes.keySet()) {
+            if (isIntelObjectiveExpired(regionId)) {
+                expiredRegions.add(regionId);
+            }
+        }
+
+        // Expire intel objectives that have exceeded 10 minutes
+        for (String regionId : expiredRegions) {
+            expireIntelObjective(regionId, "10-minute lifetime exceeded");
+        }
+
+        // Then check for dropped intel timeout (60 seconds to recover before respawn)
+        Iterator<Map.Entry<String, IntelCarrierData>> iterator = intelCarriers.entrySet().iterator();
+
+        while (iterator.hasNext()) {
+            Map.Entry<String, IntelCarrierData> entry = iterator.next();
+            String regionId = entry.getKey();
+            IntelCarrierData data = entry.getValue();
+
+            // Skip if already expired by the 10-minute check above
+            if (expiredRegions.contains(regionId)) continue;
+
+            // Check if dropped intel has timed out (60 seconds)
+            if (data.isDroppedTimedOut()) {
+                // Remove the dropped item
+                UUID itemId = spawnedIntelItems.remove(regionId);
+                if (itemId != null) {
+                    org.bukkit.entity.Entity item = org.bukkit.Bukkit.getEntity(itemId);
+                    if (item != null) {
+                        item.remove();
+                    }
+                }
+
+                // Reset the intel carrier tracking
+                iterator.remove();
+
+                // Reset objective progress
+                updateProgress(data.objectiveId(), 0.0);
+
+                // Respawn intel at original location (if objective still has time remaining)
+                if (!isIntelObjectiveExpired(data.sourceRegionId())) {
+                    for (RegionObjective obj : getActiveObjectives(data.sourceRegionId(), ObjectiveCategory.RAID)) {
+                        if (obj.id() == data.objectiveId() && obj.hasLocation()) {
+                            spawnIntelItem(data.sourceRegionId(), obj.locationX(), obj.locationY(), obj.locationZ());
+                            plugin.getLogger().info("[Objectives] Dropped intel timed out in " + regionId +
+                                    " - respawned at original location");
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Expires an intel objective completely - removes item, carrier tracking, and the objective itself.
+     */
+    private void expireIntelObjective(String regionId, String reason) {
+        // Remove spawned item
+        UUID itemId = spawnedIntelItems.remove(regionId);
+        if (itemId != null) {
+            org.bukkit.entity.Entity item = org.bukkit.Bukkit.getEntity(itemId);
+            if (item != null) {
+                item.remove();
+            }
+        }
+
+        // Remove carrier tracking and get objective ID
+        IntelCarrierData carrierData = intelCarriers.remove(regionId);
+        int objectiveId = -1;
+        UUID carrierUuid = null;
+
+        if (carrierData != null) {
+            objectiveId = carrierData.objectiveId();
+            carrierUuid = carrierData.carrierUuid();
+        }
+
+        // Remove spawn time tracking
+        intelObjectiveSpawnTimes.remove(regionId);
+
+        // If someone was carrying, remove their glowing effect
+        if (carrierUuid != null) {
+            org.bukkit.entity.Player carrier = org.bukkit.Bukkit.getPlayer(carrierUuid);
+            if (carrier != null) {
+                carrier.removePotionEffect(org.bukkit.potion.PotionEffectType.GLOWING);
+                carrier.sendMessage(config.getPrefix() + org.bukkit.ChatColor.YELLOW +
+                        "⚡ The intel has expired and disappeared!");
+            }
+        }
+
+        // Find and expire the objective in the database
+        if (objectiveId < 0) {
+            // Find objective ID from active objectives
+            for (RegionObjective obj : getActiveObjectives(regionId, ObjectiveCategory.RAID)) {
+                if (obj.type() == ObjectiveType.RAID_CAPTURE_INTEL) {
+                    objectiveId = obj.id();
+                    break;
+                }
+            }
+        }
+
+        if (objectiveId > 0) {
+            db.expireObjective(objectiveId);
+            plugin.getLogger().info("[Objectives] Intel objective expired in " + regionId + ": " + reason);
+        }
     }
 
     // ==================== CALLBACKS ====================
