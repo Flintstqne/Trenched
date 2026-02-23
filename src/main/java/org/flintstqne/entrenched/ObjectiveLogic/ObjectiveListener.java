@@ -41,8 +41,10 @@ import org.flintstqne.entrenched.RoundLogic.RoundService;
 import org.flintstqne.entrenched.TeamLogic.TeamService;
 
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -234,46 +236,64 @@ public class ObjectiveListener implements Listener {
                     .anyMatch(obj -> obj.type() == ObjectiveType.SETTLEMENT_RESOURCE_DEPOT);
 
             if (hasResourceDepotObjective) {
-                // Schedule a delayed task to count remaining containers (after this block is removed)
-                Location loc = event.getBlock().getLocation();
+                // Schedule a delayed task to recount (after this block is removed)
+                World world = event.getBlock().getWorld();
                 Bukkit.getScheduler().runTaskLater(plugin, () -> {
-                    int[] counts = countContainersAndItems(loc, regionId);
-                    objectiveService.onContainerBroken(player.getUniqueId(), team, regionId, counts[0], counts[1]);
+                    updateResourceDepotProgressAtLocation(player, team, regionId, world);
                 }, 1L); // 1 tick delay to ensure block is removed
             }
         }
     }
 
     /**
-     * Counts containers and items in a 64-block horizontal, 16-block vertical area around a location.
+     * Counts containers and items within a radius of a center point.
+     * Used for Resource Depot objective tracking.
+     *
+     * @param center The center location to search around
+     * @param radius Horizontal search radius in blocks
+     * @param verticalRange Vertical search range (up and down from center)
      * @return int array [containerCount, totalItems]
      */
-    private int[] countContainersAndItems(Location loc, String regionId) {
-        if (loc == null || loc.getWorld() == null) return new int[]{0, 0};
+    private int[] countContainersAndItemsInRadius(Location center, int radius, int verticalRange) {
+        if (center == null || center.getWorld() == null) return new int[]{0, 0};
 
-        int searchRadiusHorizontal = 64;
-        int searchRadiusVertical = 16;
+        World world = center.getWorld();
+        int centerX = center.getBlockX();
+        int centerY = center.getBlockY();
+        int centerZ = center.getBlockZ();
+
         int containerCount = 0;
         int totalItems = 0;
 
-        for (int dx = -searchRadiusHorizontal; dx <= searchRadiusHorizontal; dx++) {
-            for (int dy = -searchRadiusVertical; dy <= searchRadiusVertical; dy++) {
-                for (int dz = -searchRadiusHorizontal; dz <= searchRadiusHorizontal; dz++) {
-                    Block block = loc.getWorld().getBlockAt(
-                            loc.getBlockX() + dx,
-                            loc.getBlockY() + dy,
-                            loc.getBlockZ() + dz
-                    );
+        // Track inventories we've already counted (handles double chests)
+        Set<org.bukkit.inventory.Inventory> countedInventories = new HashSet<>();
 
-                    if (isStorageContainer(block.getType())) {
-                        BlockState state = block.getState();
-                        if (state instanceof Container nearbyContainer) {
-                            containerCount++;
-                            for (ItemStack item : nearbyContainer.getInventory().getContents()) {
-                                if (item != null && item.getType() != Material.AIR) {
-                                    totalItems += item.getAmount();
-                                }
-                            }
+        // Search in the configured vertical range
+        int minY = Math.max(world.getMinHeight(), centerY - verticalRange);
+        int maxY = Math.min(world.getMaxHeight() - 1, centerY + verticalRange);
+
+        for (int x = centerX - radius; x <= centerX + radius; x++) {
+            for (int z = centerZ - radius; z <= centerZ + radius; z++) {
+                for (int y = minY; y <= maxY; y++) {
+                    Block block = world.getBlockAt(x, y, z);
+
+                    if (!isStorageContainer(block.getType())) continue;
+
+                    BlockState state = block.getState();
+                    if (!(state instanceof Container container)) continue;
+
+                    org.bukkit.inventory.Inventory inventory = container.getInventory();
+
+                    // Skip if we've already counted this inventory (double chest handling)
+                    if (countedInventories.contains(inventory)) continue;
+                    countedInventories.add(inventory);
+
+                    containerCount++;
+
+                    // Count items
+                    for (ItemStack item : inventory.getContents()) {
+                        if (item != null && item.getType() != Material.AIR) {
+                            totalItems += item.getAmount();
                         }
                     }
                 }
@@ -281,6 +301,45 @@ public class ObjectiveListener implements Listener {
         }
 
         return new int[]{containerCount, totalItems};
+    }
+
+    /**
+     * Gets the Resource Depot objective location for a region, if one exists.
+     */
+    private Optional<Location> getResourceDepotLocation(String regionId, World world) {
+        for (RegionObjective obj : objectiveService.getActiveObjectives(regionId, ObjectiveCategory.SETTLEMENT)) {
+            if (obj.type() == ObjectiveType.SETTLEMENT_RESOURCE_DEPOT && obj.hasLocation()) {
+                return Optional.ofNullable(obj.getLocation(world));
+            }
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * Updates Resource Depot progress by scanning containers around the objective location.
+     */
+    private void updateResourceDepotProgressAtLocation(Player player, String team, String regionId, World world) {
+        Optional<Location> depotLocOpt = getResourceDepotLocation(regionId, world);
+        if (depotLocOpt.isEmpty()) {
+            plugin.getLogger().fine("[ResourceDepot] No active depot objective with location in " + regionId);
+            return;
+        }
+
+        Location depotLoc = depotLocOpt.get();
+
+        // Get configurable search parameters
+        int radius = config.getResourceDepotRadius();
+        int verticalRange = config.getResourceDepotVerticalRange();
+
+        // Scan containers within the configured radius of the depot location
+        int[] counts = countContainersAndItemsInRadius(depotLoc, radius, verticalRange);
+
+        plugin.getLogger().info("[ResourceDepot] Scanned " + regionId + " at " +
+                depotLoc.getBlockX() + "," + depotLoc.getBlockY() + "," + depotLoc.getBlockZ() +
+                " (radius=" + radius + ", vertical=" + verticalRange + ")" +
+                " - Found " + counts[0] + " containers, " + counts[1] + " items");
+
+        objectiveService.updateResourceDepotProgress(player.getUniqueId(), team, regionId, counts[0], counts[1]);
     }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
@@ -315,6 +374,19 @@ public class ObjectiveListener implements Listener {
         // Also notify if it's a storage container for resource depot objective
         if (isStorageContainer(event.getBlock().getType())) {
             objectiveService.onContainerPlaced(player.getUniqueId(), team, regionId, x, y, z, blockType);
+
+            // Check if there's an active resource depot objective and update progress
+            boolean hasResourceDepotObjective = objectiveService.getActiveObjectives(regionId, ObjectiveCategory.SETTLEMENT)
+                    .stream()
+                    .anyMatch(obj -> obj.type() == ObjectiveType.SETTLEMENT_RESOURCE_DEPOT);
+
+            if (hasResourceDepotObjective) {
+                // Schedule a delayed task to update progress (after this block is placed)
+                World world = event.getBlock().getWorld();
+                Bukkit.getScheduler().runTaskLater(plugin, () -> {
+                    updateResourceDepotProgressAtLocation(player, team, regionId, world);
+                }, 1L); // 1 tick delay to ensure block is placed
+            }
         }
     }
 
@@ -471,11 +543,8 @@ public class ObjectiveListener implements Listener {
 
         if (!hasResourceDepotObjective) return;
 
-        // Count containers and items using shared helper
-        int[] counts = countContainersAndItems(loc, regionId);
-
-        // Notify objective service
-        objectiveService.onContainerInteract(player.getUniqueId(), team, regionId, counts[0], counts[1]);
+        // Update progress using the objective's location
+        updateResourceDepotProgressAtLocation(player, team, regionId, loc.getWorld());
     }
 
     /**

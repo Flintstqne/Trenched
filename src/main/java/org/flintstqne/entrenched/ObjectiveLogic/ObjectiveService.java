@@ -177,6 +177,12 @@ public interface ObjectiveService {
     void onContainerPlaced(UUID playerUuid, String team, String regionId, int x, int y, int z, String blockType);
 
     /**
+     * Updates Resource Depot progress based on container count and items.
+     * Called by the listener after counting containers in the area.
+     */
+    void updateResourceDepotProgress(UUID playerUuid, String team, String regionId, int containerCount, int totalItems);
+
+    /**
      * Called when a player breaks a container - recalculates resource depot progress.
      * @param containerCount Current container count after breaking
      * @param totalItems Total items remaining after breaking

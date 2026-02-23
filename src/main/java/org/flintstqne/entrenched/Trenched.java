@@ -220,6 +220,8 @@ public final class Trenched extends JavaPlugin {
 
         // Connect scoreboard to merit service for rank/token display
         scoreboardUtil.setMeritService(meritService);
+        // Connect scoreboard to objective service for compass display
+        scoreboardUtil.setObjectiveService(objectiveService);
         getLogger().info("[TerrainGen] Merit system initialized");
 
         // Start objective UI and listeners (initialized earlier in startup)
@@ -318,6 +320,7 @@ public final class Trenched extends JavaPlugin {
                 this, roundService, teamService, regionService, roadService, deathListener, phaseScheduler, configManager, regionRenderer, meritService
         );
         adminCommand.setNewRoundInitializer(newRoundInitializer);
+        adminCommand.setObjectiveService(objectiveService);
         var adminCmd = Objects.requireNonNull(getCommand("admin"), "Command `admin` missing from plugin.yml");
         adminCmd.setExecutor(adminCommand);
         adminCmd.setTabCompleter(adminCommand);

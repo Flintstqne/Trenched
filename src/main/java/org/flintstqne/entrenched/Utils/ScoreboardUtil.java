@@ -3,6 +3,7 @@ package org.flintstqne.entrenched.Utils;
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
 import org.bukkit.Location;
+import org.bukkit.World;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitTask;
@@ -12,6 +13,10 @@ import org.flintstqne.entrenched.ConfigManager;
 import org.flintstqne.entrenched.MeritLogic.MeritRank;
 import org.flintstqne.entrenched.MeritLogic.MeritService;
 import org.flintstqne.entrenched.MeritLogic.PlayerMeritData;
+import org.flintstqne.entrenched.ObjectiveLogic.ObjectiveCategory;
+import org.flintstqne.entrenched.ObjectiveLogic.ObjectiveService;
+import org.flintstqne.entrenched.ObjectiveLogic.ObjectiveType;
+import org.flintstqne.entrenched.ObjectiveLogic.RegionObjective;
 import org.flintstqne.entrenched.RegionLogic.RegionService;
 import org.flintstqne.entrenched.RegionLogic.RegionState;
 import org.flintstqne.entrenched.RegionLogic.RegionStatus;
@@ -21,11 +26,16 @@ import org.flintstqne.entrenched.RoundLogic.Round;
 import org.flintstqne.entrenched.RoundLogic.RoundService;
 import org.flintstqne.entrenched.TeamLogic.TeamService;
 
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class ScoreboardUtil {
 
-    private static final long UPDATE_INTERVAL_TICKS = 60L; // 3 seconds (20 ticks per second)
+    private static final long UPDATE_INTERVAL_TICKS = 5L; // 0.25 seconds for real-time compass updates
+    private static final long OBJECTIVE_CACHE_MS = 2000L; // Cache objectives for 2 seconds
 
     private final TeamService teamService;
     private final RegionRenderer regionRenderer;
@@ -34,8 +44,19 @@ public class ScoreboardUtil {
     private final ConfigManager configManager;
     private RoadService roadService; // May be set after construction
     private MeritService meritService; // May be set after construction
+    private ObjectiveService objectiveService; // May be set after construction
 
     private BukkitTask updateTask;
+    private int updateFrame = 0; // Frame counter for animation
+
+    // Cache for objectives to reduce DB calls
+    private final Map<String, CachedObjectives> objectiveCache = new ConcurrentHashMap<>();
+
+    private record CachedObjectives(List<RegionObjective> objectives, long timestamp) {
+        boolean isExpired() {
+            return System.currentTimeMillis() - timestamp > OBJECTIVE_CACHE_MS;
+        }
+    }
 
     public ScoreboardUtil(TeamService teamService, RegionRenderer regionRenderer,
                           RoundService roundService, RegionService regionService,
@@ -64,6 +85,29 @@ public class ScoreboardUtil {
     }
 
     /**
+     * Sets the ObjectiveService for objective compass display.
+     * Called after ObjectiveService is initialized.
+     */
+    public void setObjectiveService(ObjectiveService objectiveService) {
+        this.objectiveService = objectiveService;
+    }
+
+    /**
+     * Invalidates the objective cache for a region.
+     * Call this when objectives are spawned, completed, or changed.
+     */
+    public void invalidateObjectiveCache(String regionId) {
+        objectiveCache.entrySet().removeIf(e -> e.getKey().startsWith(regionId + ":"));
+    }
+
+    /**
+     * Clears the entire objective cache.
+     */
+    public void clearObjectiveCache() {
+        objectiveCache.clear();
+    }
+
+    /**
      * Starts the automatic scoreboard update task.
      * Call this once during plugin enable.
      */
@@ -73,6 +117,13 @@ public class ScoreboardUtil {
         }
 
         updateTask = Bukkit.getScheduler().runTaskTimer(plugin, () -> {
+            updateFrame++; // Increment frame  for compass animation
+
+            // Clean expired cache entries periodically (every ~5 seconds)
+            if (updateFrame % 100 == 0) {
+                objectiveCache.entrySet().removeIf(e -> e.getValue().isExpired());
+            }
+
             for (Player player : Bukkit.getOnlinePlayers()) {
                 updatePlayerScoreboard(player);
             }
@@ -247,6 +298,19 @@ public class ScoreboardUtil {
             }
         }
 
+        // === Objective Compass Section ===
+        if (objectiveService != null && regionId != null && playerTeam != null) {
+            String compassLine = getObjectiveCompassLine(player, regionId, playerTeam, regionStatus);
+            if (compassLine != null) {
+                Score separator3 = objective.getScore(ChatColor.DARK_GRAY + "· · · · · · · · ·");
+                separator3.setScore(scoreIndex--);
+
+                // Display single-line compass
+                Score compassScore = objective.getScore(compassLine);
+                compassScore.setScore(scoreIndex--);
+            }
+        }
+
         player.setScoreboard(scoreboard);
     }
 
@@ -301,5 +365,193 @@ public class ScoreboardUtil {
 
         return ChatColor.WHITE + "" + ChatColor.BOLD + "War - " + ChatColor.GRAY + warId + " " +
                 ChatColor.WHITE + "" + ChatColor.BOLD + "| Phase - " + ChatColor.GRAY + phase;
+    }
+
+    /**
+     * Gets a single-line objective compass for display on the scoreboard.
+     * Format: "⚒ ◀ · ✦ · · ▶  45m" showing direction and distance
+     */
+    private String getObjectiveCompassLine(Player player, String regionId, String playerTeam, RegionStatus regionStatus) {
+        if (objectiveService == null || regionStatus == null) return null;
+
+        // Determine which category of objectives to show
+        ObjectiveCategory category = getRelevantCategory(regionStatus, playerTeam);
+        if (category == null) return null;
+
+        // Use cached objectives to reduce DB queries
+        List<RegionObjective> objectives = getCachedObjectives(regionId, category);
+        if (objectives.isEmpty()) return null;
+
+        // Find nearest objective with a location
+        RegionObjective nearest = null;
+        Location nearestLoc = null;
+        double nearestDist = Double.MAX_VALUE;
+        World world = player.getWorld();
+
+        for (RegionObjective obj : objectives) {
+            Location objLoc = null;
+
+            if (obj.type() == ObjectiveType.RAID_HOLD_GROUND) {
+                Optional<int[]> holdZoneOpt = objectiveService.getHoldZoneInfo(obj.regionId());
+                if (holdZoneOpt.isPresent()) {
+                    int[] holdZone = holdZoneOpt.get();
+                    int y = world.getHighestBlockYAt(holdZone[0], holdZone[1]) + 1;
+                    objLoc = new Location(world, holdZone[0] + 0.5, y, holdZone[1] + 0.5);
+                }
+            } else if (obj.hasLocation()) {
+                objLoc = obj.getLocation(world);
+            }
+
+            if (objLoc == null) continue;
+
+            double dist = player.getLocation().distance(objLoc);
+            if (dist < nearestDist) {
+                nearest = obj;
+                nearestLoc = objLoc;
+                nearestDist = dist;
+            }
+        }
+
+        // Build the single-line compass
+        String symbol = (nearest != null && nearest.type().isRaid()) ? "⚔" : "⚒";
+        ChatColor symbolColor = (nearest != null && nearest.type().isRaid()) ? ChatColor.RED : ChatColor.GREEN;
+
+        if (nearest == null || nearestLoc == null) {
+            // No location - just show objective exists
+            return symbolColor + symbol + ChatColor.GRAY + " · · " + ChatColor.YELLOW + "✦" + ChatColor.GRAY + " · ·";
+        }
+
+        // Calculate direction and build compass
+        double relativeAngle = getRelativeAngle(player, nearestLoc);
+        int dist = (int) nearestDist;
+        String compass = buildSingleLineCompass(relativeAngle);
+
+        // Add invisible color codes that change each frame to force scoreboard update
+        // This ensures Minecraft re-renders the line even if text appears the same
+        String frameMarker = getInvisibleFrameMarker();
+
+        return symbolColor + symbol + " " + compass + " " + ChatColor.WHITE + dist + "m" + frameMarker;
+    }
+
+    /**
+     * Gets cached objectives for a region+category, refreshing from DB if cache is expired.
+     */
+    private List<RegionObjective> getCachedObjectives(String regionId, ObjectiveCategory category) {
+        String cacheKey = regionId + ":" + category.name();
+        CachedObjectives cached = objectiveCache.get(cacheKey);
+
+        if (cached == null || cached.isExpired()) {
+            List<RegionObjective> fresh = objectiveService.getActiveObjectives(regionId, category);
+            objectiveCache.put(cacheKey, new CachedObjectives(fresh, System.currentTimeMillis()));
+            return fresh;
+        }
+
+        return cached.objectives();
+    }
+
+    /**
+     * Creates an invisible marker that changes each frame to force scoreboard line updates.
+     * Uses invisible color code combinations that differ per frame.
+     */
+    private String getInvisibleFrameMarker() {
+        // Use color codes that are invisible but unique per frame
+        // This forces Minecraft to treat each update as a new line
+        int frameIndex = updateFrame % 16;
+        return ChatColor.values()[frameIndex].toString() + ChatColor.RESET;
+    }
+
+    /**
+     * Builds a single-line compass visual: "◀ · ✦ · ▶" with direction highlighted
+     */
+    private String buildSingleLineCompass(double relativeAngle) {
+        String dim = ChatColor.DARK_GRAY + "·";
+        String you = ChatColor.YELLOW + "✦";
+
+        String left2, left1, center, right1, right2;
+
+        // Determine which direction to highlight
+        if (relativeAngle >= -22.5 && relativeAngle < 22.5) {
+            // Straight ahead
+            left2 = dim; left1 = dim;
+            center = ChatColor.GREEN + "▲";
+            right1 = dim; right2 = dim;
+        } else if (relativeAngle >= 22.5 && relativeAngle < 67.5) {
+            // Front-right
+            left2 = dim; left1 = dim;
+            center = you;
+            right1 = ChatColor.YELLOW + "↗"; right2 = dim;
+        } else if (relativeAngle >= 67.5 && relativeAngle < 112.5) {
+            // Right
+            left2 = dim; left1 = dim;
+            center = you;
+            right1 = dim; right2 = ChatColor.YELLOW + "▶";
+        } else if (relativeAngle >= 112.5 && relativeAngle < 157.5) {
+            // Back-right
+            left2 = dim; left1 = dim;
+            center = you;
+            right1 = ChatColor.RED + "↘"; right2 = dim;
+        } else if (relativeAngle >= 157.5 || relativeAngle < -157.5) {
+            // Behind
+            left2 = dim; left1 = dim;
+            center = ChatColor.RED + "▼";
+            right1 = dim; right2 = dim;
+        } else if (relativeAngle >= -157.5 && relativeAngle < -112.5) {
+            // Back-left
+            left2 = dim; left1 = ChatColor.RED + "↙";
+            center = you;
+            right1 = dim; right2 = dim;
+        } else if (relativeAngle >= -112.5 && relativeAngle < -67.5) {
+            // Left
+            left2 = ChatColor.YELLOW + "◀"; left1 = dim;
+            center = you;
+            right1 = dim; right2 = dim;
+        } else {
+            // Front-left
+            left2 = dim; left1 = ChatColor.YELLOW + "↖";
+            center = you;
+            right1 = dim; right2 = dim;
+        }
+
+        return left2 + " " + left1 + " " + center + " " + right1 + " " + right2;
+    }
+
+    /**
+     * Gets the relative angle from the player to the target location.
+     */
+    private double getRelativeAngle(Player player, Location targetLoc) {
+        Location playerLoc = player.getLocation();
+        double dx = targetLoc.getX() - playerLoc.getX();
+        double dz = targetLoc.getZ() - playerLoc.getZ();
+
+        float yaw = playerLoc.getYaw();
+        double angleToObj = Math.toDegrees(Math.atan2(-dx, dz));
+        double relativeAngle = angleToObj - yaw;
+
+        while (relativeAngle > 180) relativeAngle -= 360;
+        while (relativeAngle < -180) relativeAngle += 360;
+
+        return relativeAngle;
+    }
+
+    /**
+     * Determines which objective category is relevant for the player in this region.
+     */
+    private ObjectiveCategory getRelevantCategory(RegionStatus status, String playerTeam) {
+        if (status.state() == RegionState.NEUTRAL) {
+            return ObjectiveCategory.SETTLEMENT;
+        }
+        if (status.state() == RegionState.OWNED || status.state() == RegionState.CONTESTED) {
+            return ObjectiveCategory.RAID;
+        }
+        return null;
+    }
+
+
+    /**
+     * Truncates a name to fit on the scoreboard.
+     */
+    private String truncateName(String name, int maxLength) {
+        if (name.length() <= maxLength) return name;
+        return name.substring(0, maxLength - 2) + "..";
     }
 }

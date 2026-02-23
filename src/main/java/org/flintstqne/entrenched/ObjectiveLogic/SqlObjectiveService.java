@@ -50,6 +50,19 @@ public class SqlObjectiveService implements ObjectiveService {
     // Used for Destroy Supply Cache objective to target enemy-placed chests
     private final Map<String, Set<String>> enemyChestTracking = new ConcurrentHashMap<>();
 
+    // Track Resource Depot last update time per region to prevent rapid open/close cheese
+    // regionId -> last update timestamp
+    private final Map<String, Long> resourceDepotLastUpdate = new ConcurrentHashMap<>();
+    private static final long RESOURCE_DEPOT_UPDATE_COOLDOWN_MS = 5000; // 5 seconds between updates
+
+    // Track Resource Depot last item count per region to detect actual changes
+    // regionId -> [containerCount, itemCount]
+    private final Map<String, int[]> resourceDepotLastCounts = new ConcurrentHashMap<>();
+
+    // Track container placement cooldowns per player - playerUuid -> last placement timestamp
+    private final Map<UUID, Long> containerPlacementCooldowns = new ConcurrentHashMap<>();
+    private static final long CONTAINER_PLACEMENT_COOLDOWN_MS = 3000; // 3 seconds between placements
+
     // Track planted explosives - regionId -> PlantedExplosiveData
     // Used for Plant Explosive objective defend timer
     private final Map<String, PlantedExplosiveData> plantedExplosives = new ConcurrentHashMap<>();
@@ -226,11 +239,13 @@ public class SqlObjectiveService implements ObjectiveService {
     public SpawnResult spawnObjectivesForRegion(String regionId) {
         Optional<Integer> roundIdOpt = getCurrentRoundId();
         if (roundIdOpt.isEmpty()) {
+            plugin.getLogger().warning("[Objectives] spawnObjectivesForRegion: No active round");
             return SpawnResult.NO_ACTIVE_ROUND;
         }
 
         Optional<RegionStatus> statusOpt = regionService.getRegionStatus(regionId);
         if (statusOpt.isEmpty()) {
+            plugin.getLogger().warning("[Objectives] spawnObjectivesForRegion: Region " + regionId + " not found");
             return SpawnResult.REGION_NOT_FOUND;
         }
 
@@ -250,6 +265,7 @@ public class SqlObjectiveService implements ObjectiveService {
             category = ObjectiveCategory.RAID;
         } else {
             // Fortified or Protected - no objectives
+            plugin.getLogger().info("[Objectives] Region " + regionId + " is " + status.state() + " - skipping");
             return SpawnResult.SUCCESS;
         }
 
@@ -284,6 +300,15 @@ public class SqlObjectiveService implements ObjectiveService {
                 candidates.add(type);
             }
         }
+
+        if (candidates.isEmpty()) {
+            plugin.getLogger().warning("[Objectives] Region " + regionId +
+                    ": No candidates available (active types: " + activeTypes + ", category: " + category + ")");
+            return SpawnResult.SUCCESS;
+        }
+
+        plugin.getLogger().info("[Objectives] Region " + regionId + ": spawning " + toSpawn +
+                " objectives from " + candidates.size() + " candidates");
 
         // Shuffle and spawn
         Collections.shuffle(candidates);
@@ -362,7 +387,10 @@ public class SqlObjectiveService implements ObjectiveService {
 
     private boolean needsLocation(ObjectiveType type) {
         return switch (type) {
-            case RAID_DESTROY_CACHE, RAID_PLANT_EXPLOSIVE, RAID_CAPTURE_INTEL, RAID_HOLD_GROUND -> true;
+            // Raid objectives
+            case RAID_DESTROY_CACHE, RAID_PLANT_EXPLOSIVE, RAID_CAPTURE_INTEL, RAID_HOLD_GROUND,
+            // Settlement objectives - need location for particles and distance display
+                 SETTLEMENT_ESTABLISH_OUTPOST, SETTLEMENT_RESOURCE_DEPOT, SETTLEMENT_SECURE_PERIMETER -> true;
             default -> false;
         };
     }
@@ -371,24 +399,41 @@ public class SqlObjectiveService implements ObjectiveService {
     public void refreshAllObjectives() {
         Optional<Integer> roundIdOpt = getCurrentRoundId();
         if (roundIdOpt.isEmpty()) {
+            plugin.getLogger().warning("[Objectives] refreshAllObjectives: No active round, skipping");
             return;
         }
 
+        plugin.getLogger().info("[Objectives] Refreshing objectives for all regions...");
+
         // Get all regions and spawn objectives as needed
-        for (RegionStatus status : regionService.getAllRegionStatuses()) {
+        List<RegionStatus> allStatuses = regionService.getAllRegionStatuses();
+        plugin.getLogger().info("[Objectives] Found " + allStatuses.size() + " regions to check");
+
+        for (RegionStatus status : allStatuses) {
             // Skip protected regions (home regions)
             if (status.state() == RegionState.PROTECTED) {
+                plugin.getLogger().fine("[Objectives] Skipping " + status.regionId() + " - PROTECTED");
                 continue;
             }
 
             // Skip fortified regions
             if (status.state() == RegionState.FORTIFIED) {
+                plugin.getLogger().fine("[Objectives] Skipping " + status.regionId() + " - FORTIFIED");
                 continue;
             }
 
+            int activeCount = countActiveObjectives(status.regionId());
+            int maxObjectives = config.getObjectivesPerRegion();
+
+            plugin.getLogger().info("[Objectives] Region " + status.regionId() +
+                    " (state=" + status.state() + "): " + activeCount + "/" + maxObjectives + " active objectives");
+
             // Spawn objectives if below max
-            if (countActiveObjectives(status.regionId()) < config.getObjectivesPerRegion()) {
-                spawnObjectivesForRegion(status.regionId());
+            if (activeCount < maxObjectives) {
+                plugin.getLogger().info("[Objectives] Region " + status.regionId() +
+                        " has " + activeCount + "/" + maxObjectives + " objectives, spawning more...");
+                SpawnResult result = spawnObjectivesForRegion(status.regionId());
+                plugin.getLogger().info("[Objectives] Spawn result for " + status.regionId() + ": " + result);
             }
         }
     }
@@ -461,9 +506,11 @@ public class SqlObjectiveService implements ObjectiveService {
                     lastRegionOwnedWarning.put(playerUuid, now);
                     org.bukkit.entity.Player player = org.bukkit.Bukkit.getPlayer(playerUuid);
                     if (player != null) {
-                        player.sendMessage(config.getPrefix() + org.bukkit.ChatColor.RED +
-                                "Action blocked! " + org.bukkit.ChatColor.GRAY +
-                                "Objectives cannot be completed in this region - it is already captured and owned.");
+                        player.sendMessage(net.kyori.adventure.text.Component.text(config.getPrefix())
+                                .append(net.kyori.adventure.text.Component.text("Action blocked! ")
+                                        .color(net.kyori.adventure.text.format.NamedTextColor.RED))
+                                .append(net.kyori.adventure.text.Component.text("Objectives cannot be completed in this region - it is already captured and owned.")
+                                        .color(net.kyori.adventure.text.format.NamedTextColor.GRAY)));
                     }
                 }
                 return CompleteResult.REGION_ALREADY_OWNED;
@@ -724,10 +771,9 @@ public class SqlObjectiveService implements ObjectiveService {
         }
 
         // Get their division to verify team
-        Optional<Division> divisionOpt = divisionService.getDivision(member.divisionId());
-        if (divisionOpt.isEmpty()) return false;
-
-        return divisionOpt.get().team().equalsIgnoreCase(team);
+        return divisionService.getDivision(member.divisionId())
+                .map(division -> division.team().equalsIgnoreCase(team))
+                .orElse(false);
     }
 
     @Override
@@ -855,51 +901,102 @@ public class SqlObjectiveService implements ObjectiveService {
             teamChests.add(blockKey);
             plugin.getLogger().fine("[Objectives] Chest placed by " + team + " at " + x + "," + y + "," + z + " in " + regionId);
         }
+
+        // Anti-cheese: Check container placement cooldown
+        long now = System.currentTimeMillis();
+        Long lastPlacement = containerPlacementCooldowns.get(playerUuid);
+        if (lastPlacement != null && (now - lastPlacement) < CONTAINER_PLACEMENT_COOLDOWN_MS) {
+            // On cooldown - don't trigger progress update for this placement
+            return;
+        }
+        containerPlacementCooldowns.put(playerUuid, now);
+
+        // Update Resource Depot progress when a container is placed
+        // The listener will call updateResourceDepotProgress with container counts after a delay
+    }
+
+    /**
+     * Checks if a player is on container placement cooldown.
+     * @return true if player should not earn progress for container placement
+     */
+    public boolean isOnContainerPlacementCooldown(UUID playerUuid) {
+        Long lastPlacement = containerPlacementCooldowns.get(playerUuid);
+        if (lastPlacement == null) return false;
+        return (System.currentTimeMillis() - lastPlacement) < CONTAINER_PLACEMENT_COOLDOWN_MS;
+    }
+
+    /**
+     * Updates Resource Depot progress based on container count and items.
+     * Called by the listener after counting containers around the objective location.
+     */
+    @Override
+    public void updateResourceDepotProgress(UUID playerUuid, String team, String regionId, int containerCount, int totalItems) {
+        // Verify this is a neutral region (settlement objectives only apply to neutral regions)
+        Optional<RegionStatus> statusOpt = regionService.getRegionStatus(regionId);
+        if (statusOpt.isEmpty()) {
+            plugin.getLogger().warning("[ResourceDepot] Region " + regionId + " not found");
+            return;
+        }
+
+        RegionStatus status = statusOpt.get();
+        if (status.state() != RegionState.NEUTRAL) {
+            plugin.getLogger().fine("[ResourceDepot] Region " + regionId + " is " + status.state() + ", not NEUTRAL - skipping");
+            return;
+        }
+
+        // Find the Resource Depot objective
+        RegionObjective depotObj = null;
+        for (RegionObjective obj : getActiveObjectives(regionId, ObjectiveCategory.SETTLEMENT)) {
+            if (obj.type() == ObjectiveType.SETTLEMENT_RESOURCE_DEPOT) {
+                depotObj = obj;
+                break;
+            }
+        }
+
+        if (depotObj == null) {
+            plugin.getLogger().warning("[ResourceDepot] No active Resource Depot objective in " + regionId);
+            return;
+        }
+
+        // Get configurable requirements
+        int requiredContainers = config.getResourceDepotMinContainers();
+        int requiredItems = config.getResourceDepotMinItems();
+
+        // Log the current state
+        plugin.getLogger().info("[ResourceDepot] Progress update in " + regionId +
+                ": " + containerCount + " containers, " + totalItems + " items" +
+                " (need: " + requiredContainers + " containers, " + requiredItems + " items)");
+
+        // Check completion
+        if (containerCount >= requiredContainers && totalItems >= requiredItems) {
+            completeObjective(depotObj.id(), playerUuid, team);
+            plugin.getLogger().info("[ResourceDepot] COMPLETED in " + regionId +
+                    " by " + playerUuid + " (" + containerCount + " containers, " + totalItems + " items)");
+        } else {
+            // Calculate progress: average of container progress and item progress
+            double containerProgress = Math.min(1.0, (double) containerCount / requiredContainers);
+            double itemProgress = Math.min(1.0, (double) totalItems / requiredItems);
+            double newProgress = (containerProgress + itemProgress) / 2.0;
+
+            updateProgress(depotObj.id(), newProgress);
+            plugin.getLogger().info("[ResourceDepot] Progress: " + String.format("%.1f%%", newProgress * 100) +
+                    " (containers: " + String.format("%.0f%%", containerProgress * 100) +
+                    ", items: " + String.format("%.0f%%", itemProgress * 100) + ")");
+        }
     }
 
     @Override
     public void onContainerBroken(UUID playerUuid, String team, String regionId, int containerCount, int totalItems) {
-        // Recalculate resource depot progress when a container is broken
-        for (RegionObjective obj : getActiveObjectives(regionId, ObjectiveCategory.SETTLEMENT)) {
-            if (obj.type() == ObjectiveType.SETTLEMENT_RESOURCE_DEPOT) {
-                // Recalculate progress based on remaining containers and items
-                double containerProgress = Math.min(1.0, containerCount / 4.0);
-                double itemProgress = Math.min(1.0, totalItems / 100.0);
-                double newProgress = (containerProgress + itemProgress) / 2.0;
-
-                // Only update if progress decreased (container was contributing)
-                if (newProgress < obj.progress()) {
-                    updateProgress(obj.id(), newProgress);
-                    plugin.getLogger().fine("[Objectives] Resource Depot progress decreased in " + regionId +
-                            " (" + containerCount + " containers, " + totalItems + " items, " +
-                            String.format("%.1f%%", newProgress * 100) + " progress)");
-                }
-                break;
-            }
-        }
+        // Delegate to updateResourceDepotProgress - the listener now handles location-based scanning
+        plugin.getLogger().fine("[ResourceDepot] Container broken, recounting...");
+        updateResourceDepotProgress(playerUuid, team, regionId, containerCount, totalItems);
     }
 
     @Override
     public void onContainerInteract(UUID playerUuid, String team, String regionId, int containerCount, int totalItems) {
-        // Check for resource depot objective
-        for (RegionObjective obj : getActiveObjectives(regionId, ObjectiveCategory.SETTLEMENT)) {
-            if (obj.type() == ObjectiveType.SETTLEMENT_RESOURCE_DEPOT) {
-                // Requirements: 4+ containers with 100+ total items
-                if (containerCount >= 4 && totalItems >= 100) {
-                    completeObjective(obj.id(), playerUuid, team);
-                    plugin.getLogger().info("[Objectives] Resource Depot completed by " + playerUuid +
-                            " in " + regionId + " (" + containerCount + " containers, " + totalItems + " items)");
-                } else {
-                    // Update progress based on how close they are to completion
-                    // Progress = (container contribution + item contribution) / 2
-                    double containerProgress = Math.min(1.0, containerCount / 4.0);
-                    double itemProgress = Math.min(1.0, totalItems / 100.0);
-                    double newProgress = (containerProgress + itemProgress) / 2.0;
-                    updateProgress(obj.id(), newProgress);
-                }
-                break;
-            }
-        }
+        // Delegate to updateResourceDepotProgress - the listener now handles location-based scanning
+        plugin.getLogger().fine("[ResourceDepot] Container closed, recounting...");
+        updateResourceDepotProgress(playerUuid, team, regionId, containerCount, totalItems);
     }
 
     @Override
@@ -996,6 +1093,11 @@ public class SqlObjectiveService implements ObjectiveService {
         plantedExplosives.clear();
         intelCarriers.clear();
         intelObjectiveSpawnTimes.clear();
+
+        // Clear Resource Depot anti-cheese tracking
+        resourceDepotLastUpdate.clear();
+        resourceDepotLastCounts.clear();
+        containerPlacementCooldowns.clear();
 
         // Remove any spawned intel items
         for (UUID itemId : spawnedIntelItems.values()) {
@@ -1150,7 +1252,6 @@ public class SqlObjectiveService implements ObjectiveService {
         org.bukkit.inventory.meta.ItemMeta meta = intelItem.getItemMeta();
 
         // Calculate remaining time for lore display
-        long spawnTime = intelObjectiveSpawnTimes.get(regionId);
         int secondsRemaining = getIntelObjectiveSecondsRemaining(regionId);
         int minutesRemaining = secondsRemaining / 60;
 
@@ -1300,10 +1401,9 @@ public class SqlObjectiveService implements ObjectiveService {
                 Optional<RegionStatus> newStatus = regionService.getRegionStatus(newRegionId);
 
                 if (sourceStatus.isPresent() && newStatus.isPresent()) {
-                    String defenderTeam = sourceStatus.get().ownerTeam();
-
                     // Check if new region is owned by attacker's team (carrier's team)
-                    if (data.carrierTeam().equalsIgnoreCase(newStatus.get().ownerTeam())) {
+                    String newRegionOwner = newStatus.get().ownerTeam();
+                    if (newRegionOwner != null && data.carrierTeam().equalsIgnoreCase(newRegionOwner)) {
                         // Intel delivered to friendly territory!
                         completeObjective(data.objectiveId(), playerUuid, data.carrierTeam());
                         intelCarriers.remove(entry.getKey());
@@ -1428,7 +1528,7 @@ public class SqlObjectiveService implements ObjectiveService {
 
         // Expire intel objectives that have exceeded 10 minutes
         for (String regionId : expiredRegions) {
-            expireIntelObjective(regionId, "10-minute lifetime exceeded");
+            expireIntelObjective(regionId);
         }
 
         // Then check for dropped intel timeout (60 seconds to recover before respawn)
@@ -1476,9 +1576,10 @@ public class SqlObjectiveService implements ObjectiveService {
 
     /**
      * Expires an intel objective completely - removes item, carrier tracking, and the objective itself.
+     * Called when the 10-minute lifetime is exceeded.
      */
-    private void expireIntelObjective(String regionId, String reason) {
-        // Remove spawned item
+    private void expireIntelObjective(String regionId) {
+        // Remove spawned item (if dropped on ground)
         UUID itemId = spawnedIntelItems.remove(regionId);
         if (itemId != null) {
             org.bukkit.entity.Entity item = org.bukkit.Bukkit.getEntity(itemId);
@@ -1500,13 +1601,19 @@ public class SqlObjectiveService implements ObjectiveService {
         // Remove spawn time tracking
         intelObjectiveSpawnTimes.remove(regionId);
 
-        // If someone was carrying, remove their glowing effect
+        // If someone was carrying, remove their glowing effect AND the intel item from inventory
         if (carrierUuid != null) {
             org.bukkit.entity.Player carrier = org.bukkit.Bukkit.getPlayer(carrierUuid);
             if (carrier != null) {
                 carrier.removePotionEffect(org.bukkit.potion.PotionEffectType.GLOWING);
-                carrier.sendMessage(config.getPrefix() + org.bukkit.ChatColor.YELLOW +
-                        "⚡ The intel has expired and disappeared!");
+
+                // Remove intel item from player's inventory
+                removeIntelFromInventory(carrier);
+
+                carrier.sendMessage(net.kyori.adventure.text.Component.text(config.getPrefix())
+                        .append(net.kyori.adventure.text.Component.text("⚡ The intel has expired and disappeared!")
+                                .color(net.kyori.adventure.text.format.NamedTextColor.YELLOW)));
+                carrier.playSound(carrier.getLocation(), org.bukkit.Sound.ENTITY_ITEM_BREAK, 1.0f, 0.5f);
             }
         }
 
@@ -1523,7 +1630,32 @@ public class SqlObjectiveService implements ObjectiveService {
 
         if (objectiveId > 0) {
             db.expireObjective(objectiveId);
-            plugin.getLogger().info("[Objectives] Intel objective expired in " + regionId + ": " + reason);
+            plugin.getLogger().info("[Objectives] Intel objective expired in " + regionId + ": 10-minute lifetime exceeded");
+        }
+    }
+
+    /**
+     * Removes intel items from a player's inventory.
+     */
+    private void removeIntelFromInventory(org.bukkit.entity.Player player) {
+        org.bukkit.inventory.PlayerInventory inventory = player.getInventory();
+
+        for (int i = 0; i < inventory.getSize(); i++) {
+            org.bukkit.inventory.ItemStack item = inventory.getItem(i);
+            if (item != null && item.getType() == org.bukkit.Material.FILLED_MAP) {
+                org.bukkit.inventory.meta.ItemMeta meta = item.getItemMeta();
+                if (meta != null && meta.hasDisplayName()) {
+                    net.kyori.adventure.text.Component displayName = meta.displayName();
+                    if (displayName != null) {
+                        String name = net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer
+                                .plainText().serialize(displayName);
+                        if (name.contains("SECRET INTEL")) {
+                            inventory.setItem(i, null);
+                            plugin.getLogger().info("[Objectives] Removed expired intel from " + player.getName() + "'s inventory");
+                        }
+                    }
+                }
+            }
         }
     }
 

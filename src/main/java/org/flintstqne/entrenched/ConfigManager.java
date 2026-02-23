@@ -410,6 +410,36 @@ public final class ConfigManager {
     }
 
     /**
+     * Gets the horizontal search radius for Resource Depot objectives.
+     * Containers within this radius of the objective location are counted.
+     */
+    public int getResourceDepotRadius() {
+        return config.getInt("regions.objectives.resource-depot-radius", 16);
+    }
+
+    /**
+     * Gets the vertical search range for Resource Depot objectives.
+     * Containers within this many blocks above/below the objective are counted.
+     */
+    public int getResourceDepotVerticalRange() {
+        return config.getInt("regions.objectives.resource-depot-vertical-range", 16);
+    }
+
+    /**
+     * Gets the minimum number of containers required for Resource Depot completion.
+     */
+    public int getResourceDepotMinContainers() {
+        return config.getInt("regions.objectives.resource-depot-min-containers", 4);
+    }
+
+    /**
+     * Gets the minimum number of items required for Resource Depot completion.
+     */
+    public int getResourceDepotMinItems() {
+        return config.getInt("regions.objectives.resource-depot-min-items", 100);
+    }
+
+    /**
      * Gets whether objective boss bars should be shown when near an objective.
      */
     public boolean isObjectiveBossBarsEnabled() {

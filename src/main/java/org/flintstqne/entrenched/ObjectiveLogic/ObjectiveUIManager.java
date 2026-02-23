@@ -177,10 +177,8 @@ public class ObjectiveUIManager {
             updateBossBars(player, objectives);
         }
 
-        // Update action bar with nearest objective hint
-        if (config.isObjectiveHintsEnabled()) {
-            updateActionBar(player, objectives);
-        }
+        // NOTE: Action bar hints removed - compass is now displayed on scoreboard
+        // The ScoreboardUtil handles objective compass display
     }
 
     /**
@@ -657,16 +655,10 @@ public class ObjectiveUIManager {
             return;
         }
 
-        // Only update if different objective or significant progress change
-        Integer lastShown = playerActionBarObjective.get(player.getUniqueId());
-        if (lastShown != null && lastShown == nearest.id()) {
-            // Still same objective, update less frequently
-            return;
-        }
-
+        // Update stored objective (for reference only, we now update every tick)
         playerActionBarObjective.put(player.getUniqueId(), nearest.id());
 
-        // Build action bar message
+        // Build action bar message with compass
         String symbol = nearest.type().isRaid() ? "⚔" : "⚒";
 
         Component message;
@@ -682,7 +674,8 @@ public class ObjectiveUIManager {
                     .append(Component.text("- " + progressPct + "% complete")
                             .color(NamedTextColor.GRAY));
         } else {
-            String direction = getDirectionIndicator(player, nearestLoc);
+            // Location-based objective - show compass and distance
+            String compass = getCompassDisplay(player, nearestLoc);
             int dist = (int) nearestDist;
 
             message = Component.text(symbol + " ")
@@ -691,8 +684,10 @@ public class ObjectiveUIManager {
                             .color(NamedTextColor.YELLOW))
                     .append(Component.text(" [" + nearest.getInfluenceReward() + " IP] ")
                             .color(NamedTextColor.GOLD))
-                    .append(Component.text("- " + dist + "m " + direction)
-                            .color(NamedTextColor.GRAY));
+                    .append(Component.text(compass + " ")
+                            .color(NamedTextColor.AQUA))
+                    .append(Component.text(dist + "m")
+                            .color(NamedTextColor.WHITE));
         }
 
         player.sendActionBar(message);
@@ -733,6 +728,79 @@ public class ObjectiveUIManager {
     }
 
     /**
+     * Gets a visual compass display showing the direction to the target.
+     * Shows a compass bar with the direction highlighted: [←·↑·→] or similar.
+     */
+    private String getCompassDisplay(Player player, Location targetLoc) {
+        if (targetLoc == null) return "[ ◇ ]";
+
+        Location playerLoc = player.getLocation();
+        double dx = targetLoc.getX() - playerLoc.getX();
+        double dz = targetLoc.getZ() - playerLoc.getZ();
+
+        // Get player's facing direction
+        float yaw = playerLoc.getYaw();
+
+        // Calculate angle to objective relative to player facing
+        double angleToObj = Math.toDegrees(Math.atan2(-dx, dz));
+        double relativeAngle = angleToObj - yaw;
+
+        // Normalize to -180 to 180
+        while (relativeAngle > 180) relativeAngle -= 360;
+        while (relativeAngle < -180) relativeAngle += 360;
+
+        // Build compass display based on relative angle
+        // Using a 5-slot compass: [← ↖ ↑ ↗ →] or [↙ ← ↖ ↑ ↗] etc.
+
+        // Simple version: show the primary direction with emphasis
+        String arrow = getDirectionArrow(relativeAngle);
+
+        // Build a visual compass bar
+        if (relativeAngle >= -22.5 && relativeAngle < 22.5) {
+            // Straight ahead
+            return "[ · · ▲ · · ]";
+        } else if (relativeAngle >= 22.5 && relativeAngle < 67.5) {
+            // Front-right
+            return "[ · · ↑ ◆ · ]";
+        } else if (relativeAngle >= 67.5 && relativeAngle < 112.5) {
+            // Right
+            return "[ · · · · ▶ ]";
+        } else if (relativeAngle >= 112.5 && relativeAngle < 157.5) {
+            // Back-right
+            return "[ · · ↓ ◆ · ]";
+        } else if (relativeAngle >= 157.5 || relativeAngle < -157.5) {
+            // Behind
+            return "[ · · ▼ · · ]";
+        } else if (relativeAngle >= -157.5 && relativeAngle < -112.5) {
+            // Back-left
+            return "[ · ◆ ↓ · · ]";
+        } else if (relativeAngle >= -112.5 && relativeAngle < -67.5) {
+            // Left
+            return "[ ◀ · · · · ]";
+        } else if (relativeAngle >= -67.5 && relativeAngle < -22.5) {
+            // Front-left
+            return "[ · ◆ ↑ · · ]";
+        }
+
+        return "[ ◇ ]";
+    }
+
+    /**
+     * Gets a simple arrow for the given angle.
+     */
+    private String getDirectionArrow(double relativeAngle) {
+        if (relativeAngle >= -22.5 && relativeAngle < 22.5) return "▲";
+        if (relativeAngle >= 22.5 && relativeAngle < 67.5) return "↗";
+        if (relativeAngle >= 67.5 && relativeAngle < 112.5) return "▶";
+        if (relativeAngle >= 112.5 && relativeAngle < 157.5) return "↘";
+        if (relativeAngle >= 157.5 || relativeAngle < -157.5) return "▼";
+        if (relativeAngle >= -157.5 && relativeAngle < -112.5) return "↙";
+        if (relativeAngle >= -112.5 && relativeAngle < -67.5) return "◀";
+        if (relativeAngle >= -67.5 && relativeAngle < -22.5) return "↖";
+        return "◇";
+    }
+
+    /**
      * Spawns particle markers at objective locations.
      */
     private void spawnObjectiveParticles() {
@@ -747,6 +815,12 @@ public class ObjectiveUIManager {
                 // Special handling for Hold Ground objectives - draw a circle
                 if (objective.type() == ObjectiveType.RAID_HOLD_GROUND) {
                     spawnHoldZoneParticles(gameWorld, status.regionId(), objective);
+                    continue;
+                }
+
+                // Special handling for Capture Intel - show particles at dropped location if dropped
+                if (objective.type() == ObjectiveType.RAID_CAPTURE_INTEL) {
+                    spawnIntelParticles(gameWorld, status.regionId(), objective);
                     continue;
                 }
 
@@ -787,6 +861,83 @@ public class ObjectiveUIManager {
                     gameWorld.spawnParticle(Particle.DUST, particleLoc, 2, 0, 0, 0, 0, dust);
                 }
             }
+        }
+    }
+
+    /**
+     * Spawns particle markers for Capture Intel objectives.
+     * Shows particles at the intel's current location (original, dropped, or carrier).
+     */
+    private void spawnIntelParticles(World world, String regionId, RegionObjective objective) {
+        Optional<ObjectiveService.IntelCarrierInfo> infoOpt = objectiveService.getIntelCarrierInfo(regionId);
+
+        Location loc;
+        Color particleColor;
+        String particleLabel;
+
+        if (infoOpt.isPresent()) {
+            ObjectiveService.IntelCarrierInfo info = infoOpt.get();
+
+            if (info.isDropped()) {
+                // Intel is dropped - show particles at dropped location
+                loc = new Location(world, info.droppedX() + 0.5, info.droppedY() + 1, info.droppedZ() + 0.5);
+                particleColor = Color.ORANGE; // Orange for dropped intel
+                particleLabel = "DROPPED";
+            } else if (info.carrierUuid() != null) {
+                // Intel is being carried - show particles following carrier
+                Player carrier = Bukkit.getPlayer(info.carrierUuid());
+                if (carrier != null && carrier.isOnline()) {
+                    loc = carrier.getLocation().clone().add(0, 2.5, 0);
+                    particleColor = Color.PURPLE; // Purple for carried intel
+                    particleLabel = "CARRIER";
+                } else {
+                    return; // Carrier not online, skip particles
+                }
+            } else {
+                // Fallback to objective location
+                if (!objective.hasLocation()) return;
+                loc = objective.getLocation(world);
+                particleColor = Color.YELLOW;
+                particleLabel = "INTEL";
+            }
+        } else {
+            // No carrier info - show at original objective location
+            if (!objective.hasLocation()) return;
+            loc = objective.getLocation(world);
+            particleColor = Color.YELLOW;
+            particleLabel = "INTEL";
+        }
+
+        if (loc == null) return;
+
+        // Only spawn particles if players are nearby
+        boolean hasNearbyPlayer = false;
+        for (Player player : world.getPlayers()) {
+            if (player.getLocation().distance(loc) < 100) {
+                hasNearbyPlayer = true;
+                break;
+            }
+        }
+
+        if (!hasNearbyPlayer) return;
+
+        // Spawn beacon-like particles
+        Particle.DustOptions dust = new Particle.DustOptions(particleColor, 1.5f);
+
+        // Vertical beam (shorter for carried intel)
+        int beamHeight = infoOpt.isPresent() && infoOpt.get().carrierUuid() != null ? 5 : 20;
+        for (int y = 0; y < beamHeight; y += 2) {
+            Location particleLoc = loc.clone().add(0, y, 0);
+            world.spawnParticle(Particle.DUST, particleLoc, 3, 0.2, 0.2, 0.2, 0, dust);
+        }
+
+        // Circle at base
+        for (int i = 0; i < 8; i++) {
+            double angle = (2 * Math.PI / 8) * i;
+            double offsetX = Math.cos(angle) * 1.5;
+            double offsetZ = Math.sin(angle) * 1.5;
+            Location particleLoc = loc.clone().add(offsetX, 0.5, offsetZ);
+            world.spawnParticle(Particle.DUST, particleLoc, 2, 0, 0, 0, 0, dust);
         }
     }
 
@@ -899,23 +1050,55 @@ public class ObjectiveUIManager {
                 Optional<RegionStatus> statusOpt = regionService.getRegionStatus(objective.regionId());
                 if (statusOpt.isEmpty()) continue;
 
-                ObjectiveCategory relevantCategory = getRelevantCategory(statusOpt.get(), team);
-                if (relevantCategory != objective.type().getCategory()) continue;
+                RegionStatus status = statusOpt.get();
+                ObjectiveCategory relevantCategory = getRelevantCategory(status, team);
 
-                // Show notification
-                Component message = Component.text("⚡ ")
-                        .color(NamedTextColor.GOLD)
-                        .append(Component.text("New Objective: ")
-                                .color(NamedTextColor.YELLOW))
-                        .append(Component.text(objective.type().getDisplayName())
-                                .color(NamedTextColor.WHITE))
-                        .append(Component.text(" [" + objective.getInfluenceReward() + " IP]")
-                                .color(NamedTextColor.GOLD));
+                // For RAID objectives, also notify defenders about threats to their region
+                boolean isDefender = status.ownerTeam() != null && status.ownerTeam().equalsIgnoreCase(team);
+                boolean isAttacker = relevantCategory == objective.type().getCategory();
 
-                player.sendMessage(message);
-                player.playSound(player.getLocation(), Sound.BLOCK_NOTE_BLOCK_PLING, 0.5f, 1.5f);
+                if (isAttacker) {
+                    // Show attacker notification
+                    Component message = Component.text("⚡ ")
+                            .color(NamedTextColor.GOLD)
+                            .append(Component.text("New Objective: ")
+                                    .color(NamedTextColor.YELLOW))
+                            .append(Component.text(objective.type().getDisplayName())
+                                    .color(NamedTextColor.WHITE))
+                            .append(Component.text(" [" + objective.getInfluenceReward() + " IP]")
+                                    .color(NamedTextColor.GOLD));
+
+                    player.sendMessage(message);
+                    player.playSound(player.getLocation(), Sound.BLOCK_NOTE_BLOCK_PLING, 0.5f, 1.5f);
+                } else if (isDefender && objective.type().isRaid()) {
+                    // Show defender warning notification
+                    Component message = Component.text("⚠ ")
+                            .color(NamedTextColor.RED)
+                            .append(Component.text("THREAT DETECTED: ")
+                                    .color(NamedTextColor.RED))
+                            .append(Component.text(getDefenderThreatDescription(objective.type()))
+                                    .color(NamedTextColor.YELLOW));
+
+                    player.sendMessage(message);
+                    player.playSound(player.getLocation(), Sound.BLOCK_NOTE_BLOCK_BASS, 0.5f, 0.5f);
+                }
             }
         }
+    }
+
+    /**
+     * Gets a defender-friendly threat description for a raid objective.
+     */
+    private String getDefenderThreatDescription(ObjectiveType type) {
+        return switch (type) {
+            case RAID_CAPTURE_INTEL -> "Enemy targeting your intel! Defend the intel item!";
+            case RAID_DESTROY_CACHE -> "Enemy targeting your supply cache!";
+            case RAID_ASSASSINATE_COMMANDER -> "Enemy targeting your commander!";
+            case RAID_SABOTAGE_DEFENSES -> "Enemy saboteurs detected!";
+            case RAID_PLANT_EXPLOSIVE -> "Explosive threat detected!";
+            case RAID_HOLD_GROUND -> "Enemy attempting to hold your territory!";
+            default -> "Enemy activity detected!";
+        };
     }
 
     /**

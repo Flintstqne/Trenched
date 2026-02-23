@@ -30,6 +30,10 @@ import org.flintstqne.entrenched.RoundLogic.Round;
 import org.flintstqne.entrenched.RoundLogic.RoundService;
 import org.flintstqne.entrenched.TeamLogic.JoinReason;
 import org.flintstqne.entrenched.TeamLogic.TeamService;
+import org.flintstqne.entrenched.ObjectiveLogic.ObjectiveCategory;
+import org.flintstqne.entrenched.ObjectiveLogic.ObjectiveService;
+import org.flintstqne.entrenched.ObjectiveLogic.ObjectiveType;
+import org.flintstqne.entrenched.ObjectiveLogic.RegionObjective;
 
 import java.util.*;
 import java.util.stream.Collectors;
@@ -52,6 +56,7 @@ public final class AdminCommand implements CommandExecutor, TabCompleter {
     private final ConfigManager configManager;
     private final RegionRenderer regionRenderer;
     private final MeritService meritService;
+    private ObjectiveService objectiveService;
     private NewRoundInitializer newRoundInitializer;
 
     public AdminCommand(JavaPlugin plugin, RoundService roundService, TeamService teamService, RegionService regionService,
@@ -71,6 +76,10 @@ public final class AdminCommand implements CommandExecutor, TabCompleter {
 
     public void setNewRoundInitializer(NewRoundInitializer initializer) {
         this.newRoundInitializer = initializer;
+    }
+
+    public void setObjectiveService(ObjectiveService objectiveService) {
+        this.objectiveService = objectiveService;
     }
 
     @Override
@@ -106,6 +115,9 @@ public final class AdminCommand implements CommandExecutor, TabCompleter {
 
             // Merit commands
             case "merit" -> handleMerit(sender, args);
+
+            // Objective commands
+            case "objective", "obj" -> handleObjective(sender, args);
 
             // Server commands
             case "reload" -> handleReload(sender);
@@ -256,13 +268,48 @@ public final class AdminCommand implements CommandExecutor, TabCompleter {
                 }
                 String regionId = args[2].toUpperCase();
                 if (regionId.equals("ALL")) {
+                    // Expire all objectives first
+                    if (objectiveService != null) {
+                        for (RegionStatus status : regionService.getAllRegionStatuses()) {
+                            objectiveService.expireObjectivesInRegion(status.regionId());
+                        }
+                        plugin.getLogger().info("[Admin] Expired objectives in all regions");
+                    } else {
+                        plugin.getLogger().warning("[Admin] ObjectiveService is null - cannot expire objectives!");
+                    }
                     regionService.initializeRegions(
                             configManager.getRegionRedHome(),
                             configManager.getRegionBlueHome()
                     );
+                    // Spawn new objectives in all regions after reset
+                    if (objectiveService != null) {
+                        Bukkit.getScheduler().runTaskLater(plugin, () -> {
+                            for (RegionStatus status : regionService.getAllRegionStatuses()) {
+                                if (status.state() != RegionState.PROTECTED && status.state() != RegionState.FORTIFIED) {
+                                    objectiveService.spawnObjectivesForRegion(status.regionId());
+                                }
+                            }
+                            plugin.getLogger().info("[Admin] Spawned new objectives in all regions");
+                        }, 20L); // 1 second delay to ensure region status is updated
+                    }
                     sender.sendMessage(configManager.getPrefix() + ChatColor.GREEN + "All regions reset.");
                 } else {
+                    // Expire objectives in this region
+                    if (objectiveService != null) {
+                        objectiveService.expireObjectivesInRegion(regionId);
+                        plugin.getLogger().info("[Admin] Expired objectives in region " + regionId);
+                    } else {
+                        plugin.getLogger().warning("[Admin] ObjectiveService is null - cannot expire objectives!");
+                    }
                     regionService.resetRegion(regionId);
+                    // Spawn new objectives in this region after reset
+                    if (objectiveService != null) {
+                        final String finalRegionId = regionId;
+                        Bukkit.getScheduler().runTaskLater(plugin, () -> {
+                            objectiveService.spawnObjectivesForRegion(finalRegionId);
+                            plugin.getLogger().info("[Admin] Spawned new objectives in region " + finalRegionId);
+                        }, 20L); // 1 second delay to ensure region status is updated
+                    }
                     sender.sendMessage(configManager.getPrefix() + ChatColor.GREEN + "Region " + regionId + " reset to neutral.");
                 }
                 yield true;
@@ -1893,6 +1940,217 @@ public final class AdminCommand implements CommandExecutor, TabCompleter {
                 yield true;
             }
         };
+    }
+
+    // ==================== OBJECTIVE COMMANDS ====================
+
+    private boolean handleObjective(CommandSender sender, String[] args) {
+        if (objectiveService == null) {
+            sender.sendMessage(ChatColor.RED + "Objective service not available.");
+            return true;
+        }
+
+        if (args.length < 2) {
+            sender.sendMessage(ChatColor.YELLOW + "Usage: /admin objective <list|info|spawn|expire|tp>");
+            return true;
+        }
+
+        String action = args[1].toLowerCase();
+
+        return switch (action) {
+            case "list" -> {
+                // List objectives in a region or all regions
+                String regionId = args.length >= 3 ? args[2].toUpperCase() : null;
+
+                if (regionId != null) {
+                    // List objectives in specific region
+                    listObjectivesInRegion(sender, regionId);
+                } else {
+                    // List objectives in all regions
+                    sender.sendMessage(ChatColor.GOLD + "=== Active Objectives (All Regions) ===");
+                    int total = 0;
+                    for (RegionStatus status : regionService.getAllRegionStatuses()) {
+                        List<RegionObjective> objectives = objectiveService.getActiveObjectives(status.regionId(), null);
+                        if (!objectives.isEmpty()) {
+                            total += objectives.size();
+                            sender.sendMessage(ChatColor.YELLOW + status.regionId() + ChatColor.GRAY + " (" + status.state() + ")" + ChatColor.WHITE + ": " + objectives.size() + " objectives");
+                        }
+                    }
+                    sender.sendMessage(ChatColor.GRAY + "Total: " + ChatColor.WHITE + total + " active objectives");
+                    sender.sendMessage(ChatColor.GRAY + "Use /admin objective list <regionId> for details");
+                }
+                yield true;
+            }
+            case "info" -> {
+                // Show detailed info about objectives in a region
+                if (args.length < 3) {
+                    // If player, use their current region
+                    if (sender instanceof Player player) {
+                        String regionId = regionService.getRegionIdForLocation(
+                                player.getLocation().getBlockX(),
+                                player.getLocation().getBlockZ()
+                        );
+                        if (regionId != null) {
+                            listObjectivesInRegion(sender, regionId);
+                        } else {
+                            sender.sendMessage(ChatColor.RED + "You are not in a valid region.");
+                        }
+                    } else {
+                        sender.sendMessage(ChatColor.RED + "Usage: /admin objective info <regionId>");
+                    }
+                    yield true;
+                }
+                String regionId = args[2].toUpperCase();
+                listObjectivesInRegion(sender, regionId);
+                yield true;
+            }
+            case "spawn" -> {
+                // Manually spawn an objective
+                if (args.length < 4) {
+                    sender.sendMessage(ChatColor.RED + "Usage: /admin objective spawn <regionId> <type>");
+                    sender.sendMessage(ChatColor.GRAY + "Types: SETTLEMENT_RESOURCE_DEPOT, SETTLEMENT_SECURE_PERIMETER, etc.");
+                    yield true;
+                }
+                String regionId = args[2].toUpperCase();
+                String typeName = args[3].toUpperCase();
+                try {
+                    ObjectiveType type = ObjectiveType.valueOf(typeName);
+                    ObjectiveService.SpawnResult result = objectiveService.spawnObjective(regionId, type);
+                    sender.sendMessage(configManager.getPrefix() + ChatColor.GREEN + "Spawn result: " + result);
+                } catch (IllegalArgumentException e) {
+                    sender.sendMessage(ChatColor.RED + "Invalid objective type: " + typeName);
+                    sender.sendMessage(ChatColor.GRAY + "Valid types: ");
+                    for (ObjectiveType t : ObjectiveType.values()) {
+                        sender.sendMessage(ChatColor.GRAY + "  - " + t.name());
+                    }
+                }
+                yield true;
+            }
+            case "expire" -> {
+                // Expire objectives
+                if (args.length < 3) {
+                    sender.sendMessage(ChatColor.RED + "Usage: /admin objective expire <regionId|all>");
+                    yield true;
+                }
+                String regionId = args[2].toUpperCase();
+                if (regionId.equals("ALL")) {
+                    for (RegionStatus status : regionService.getAllRegionStatuses()) {
+                        objectiveService.expireObjectivesInRegion(status.regionId());
+                    }
+                    sender.sendMessage(configManager.getPrefix() + ChatColor.GREEN + "Expired all objectives in all regions.");
+                } else {
+                    objectiveService.expireObjectivesInRegion(regionId);
+                    sender.sendMessage(configManager.getPrefix() + ChatColor.GREEN + "Expired all objectives in " + regionId);
+                }
+                yield true;
+            }
+            case "tp" -> {
+                // Teleport to an objective
+                if (!(sender instanceof Player player)) {
+                    sender.sendMessage(ChatColor.RED + "This command can only be used by players.");
+                    yield true;
+                }
+                if (args.length < 3) {
+                    sender.sendMessage(ChatColor.RED + "Usage: /admin objective tp <objectiveId>");
+                    yield true;
+                }
+                try {
+                    int objectiveId = Integer.parseInt(args[2]);
+                    // Find the objective
+                    boolean found = false;
+                    for (RegionStatus status : regionService.getAllRegionStatuses()) {
+                        for (RegionObjective obj : objectiveService.getActiveObjectives(status.regionId(), null)) {
+                            if (obj.id() == objectiveId) {
+                                if (obj.hasLocation()) {
+                                    Location loc = obj.getLocation(player.getWorld());
+                                    if (loc != null) {
+                                        player.teleport(loc);
+                                        sender.sendMessage(configManager.getPrefix() + ChatColor.GREEN +
+                                                "Teleported to " + obj.type().getDisplayName() + " at " +
+                                                loc.getBlockX() + ", " + loc.getBlockY() + ", " + loc.getBlockZ());
+                                    }
+                                } else {
+                                    sender.sendMessage(ChatColor.RED + "This objective has no location.");
+                                }
+                                found = true;
+                                break;
+                            }
+                        }
+                        if (found) break;
+                    }
+                    if (!found) {
+                        sender.sendMessage(ChatColor.RED + "Objective #" + objectiveId + " not found.");
+                    }
+                } catch (NumberFormatException e) {
+                    sender.sendMessage(ChatColor.RED + "Invalid objective ID.");
+                }
+                yield true;
+            }
+            default -> {
+                sender.sendMessage(ChatColor.RED + "Unknown objective action: " + action);
+                sender.sendMessage(ChatColor.YELLOW + "Usage: /admin objective <list|info|spawn|expire|tp>");
+                yield true;
+            }
+        };
+    }
+
+    /**
+     * Lists objectives in a specific region with full details.
+     */
+    private void listObjectivesInRegion(CommandSender sender, String regionId) {
+        Optional<RegionStatus> statusOpt = regionService.getRegionStatus(regionId);
+        if (statusOpt.isEmpty()) {
+            sender.sendMessage(ChatColor.RED + "Region not found: " + regionId);
+            return;
+        }
+
+        RegionStatus status = statusOpt.get();
+        sender.sendMessage(ChatColor.GOLD + "=== Objectives in " + regionId + " ===");
+        sender.sendMessage(ChatColor.GRAY + "State: " + ChatColor.WHITE + status.state() +
+                (status.ownerTeam() != null ? ChatColor.GRAY + " (Owner: " + status.ownerTeam() + ")" : ""));
+
+        // Get all objectives (both categories)
+        List<RegionObjective> settlementObjs = objectiveService.getActiveObjectives(regionId, ObjectiveCategory.SETTLEMENT);
+        List<RegionObjective> raidObjs = objectiveService.getActiveObjectives(regionId, ObjectiveCategory.RAID);
+
+        if (settlementObjs.isEmpty() && raidObjs.isEmpty()) {
+            sender.sendMessage(ChatColor.GRAY + "No active objectives in this region.");
+            return;
+        }
+
+        // Show settlement objectives
+        if (!settlementObjs.isEmpty()) {
+            sender.sendMessage(ChatColor.GREEN + "⚒ Settlement Objectives:");
+            for (RegionObjective obj : settlementObjs) {
+                showObjectiveDetails(sender, obj);
+            }
+        }
+
+        // Show raid objectives
+        if (!raidObjs.isEmpty()) {
+            sender.sendMessage(ChatColor.RED + "⚔ Raid Objectives:");
+            for (RegionObjective obj : raidObjs) {
+                showObjectiveDetails(sender, obj);
+            }
+        }
+    }
+
+    /**
+     * Shows detailed information about a single objective.
+     */
+    private void showObjectiveDetails(CommandSender sender, RegionObjective obj) {
+        sender.sendMessage(ChatColor.YELLOW + "  #" + obj.id() + " " + ChatColor.WHITE + obj.type().getDisplayName());
+        sender.sendMessage(ChatColor.GRAY + "    Progress: " + ChatColor.WHITE + obj.getProgressPercent() + "%");
+        sender.sendMessage(ChatColor.GRAY + "    IP Reward: " + ChatColor.GOLD + obj.getInfluenceReward());
+
+        if (obj.hasLocation()) {
+            sender.sendMessage(ChatColor.GRAY + "    Location: " + ChatColor.AQUA +
+                    obj.locationX() + ", " + obj.locationY() + ", " + obj.locationZ());
+        } else {
+            sender.sendMessage(ChatColor.GRAY + "    Location: " + ChatColor.DARK_GRAY + "No specific location");
+        }
+
+        sender.sendMessage(ChatColor.GRAY + "    Description: " + ChatColor.WHITE + obj.getProgressDescription());
     }
 
     // ==================== SERVER COMMANDS ====================
