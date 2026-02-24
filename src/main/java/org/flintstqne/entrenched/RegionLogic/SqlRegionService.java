@@ -35,6 +35,19 @@ public final class SqlRegionService implements RegionService {
     // Capture callback for notifications
     private CaptureCallback captureCallback;
 
+    // Track defensive blocks that earned IP: "regionId" -> Map of "x,y,z" -> [team, pointsEarned]
+    // When broken by same team, subtract the points to prevent place/break farming
+    private final Map<String, Map<String, PlacedBlockRecord>> defensiveBlockTracking = new HashMap<>();
+
+    // Track torches that earned IP
+    private final Map<String, Map<String, PlacedBlockRecord>> torchTracking = new HashMap<>();
+
+    // Track workstations that earned IP
+    private final Map<String, Map<String, PlacedBlockRecord>> workstationTracking = new HashMap<>();
+
+    // Record for tracking block placements that earned IP
+    private record PlacedBlockRecord(String team, double points, long placedAt) {}
+
     /**
      * Callback interface for capture events.
      */
@@ -233,6 +246,34 @@ public final class SqlRegionService implements RegionService {
         return InfluenceResult.SUCCESS;
     }
 
+    /**
+     * Removes influence points from a team in a region.
+     * Used for anti-farming when a player breaks their own defensive blocks.
+     */
+    private void removeInfluence(String regionId, String team, double points) {
+        int roundId = getCurrentRoundId();
+        if (roundId < 0) return;
+
+        Optional<RegionStatus> statusOpt = getRegionStatus(regionId);
+        if (statusOpt.isEmpty()) return;
+
+        RegionStatus status = statusOpt.get();
+
+        // Calculate new influence (don't go below 0)
+        double currentInfluence = status.getInfluence(team);
+        double newInfluence = Math.max(0, currentInfluence - points);
+
+        // Update database
+        if ("red".equalsIgnoreCase(team)) {
+            db.updateInfluence(regionId, roundId, newInfluence, status.blueInfluence());
+        } else {
+            db.updateInfluence(regionId, roundId, status.redInfluence(), newInfluence);
+        }
+
+        // Invalidate cache
+        invalidateCache(regionId);
+    }
+
     private double getPointsForAction(InfluenceAction action) {
         return switch (action) {
             case KILL_ENEMY, KILL_ENEMY_REPEAT -> configManager.getRegionKillPoints();
@@ -381,6 +422,11 @@ public final class SqlRegionService implements RegionService {
         invalidateCache(regionId);
 
         log("Region " + regionId + " captured by " + team + "! Fortified for " + fortificationMinutes + " minutes.");
+
+        // Clear all block tracking for this region (no longer relevant after capture)
+        defensiveBlockTracking.remove(regionId);
+        torchTracking.remove(regionId);
+        workstationTracking.remove(regionId);
 
         // Notify via callback
         if (captureCallback != null) {
@@ -771,7 +817,27 @@ public final class SqlRegionService implements RegionService {
         }
 
         if (action != null) {
-            addInfluence(playerUuid, regionId, team, action);
+            InfluenceResult result = addInfluence(playerUuid, regionId, team, action);
+
+            // Track all IP-earning blocks for anti-farming (remove IP when broken by same team)
+            if (result == InfluenceResult.SUCCESS) {
+                String blockKey = blockX + "," + blockY + "," + blockZ;
+                double points = getPointsForAction(action);
+                PlacedBlockRecord record = new PlacedBlockRecord(team, points, System.currentTimeMillis());
+
+                switch (action) {
+                    case PLACE_DEFENSIVE_BLOCK -> defensiveBlockTracking
+                            .computeIfAbsent(regionId, k -> new HashMap<>())
+                            .put(blockKey, record);
+                    case PLACE_TORCH -> torchTracking
+                            .computeIfAbsent(regionId, k -> new HashMap<>())
+                            .put(blockKey, record);
+                    case PLACE_WORKSTATION -> workstationTracking
+                            .computeIfAbsent(regionId, k -> new HashMap<>())
+                            .put(blockKey, record);
+                    default -> {}
+                }
+            }
         }
     }
 
@@ -791,11 +857,39 @@ public final class SqlRegionService implements RegionService {
         // Track stats
         db.incrementPlayerStat(playerUuid.toString(), regionId, roundId, "blocks_mined");
 
+        // Check all tracking maps for anti-farming - remove IP if same team breaks their placed blocks
+        String blockKey = blockX + "," + blockY + "," + blockZ;
+        checkAndRemoveTrackedBlock(regionId, team, blockKey, defensiveBlockTracking, "defensive block");
+        checkAndRemoveTrackedBlock(regionId, team, blockKey, torchTracking, "torch");
+        checkAndRemoveTrackedBlock(regionId, team, blockKey, workstationTracking, "workstation");
+
         // Only earn points for mining enemy blocks in enemy regions
         if (wasPlayerPlaced && placedByTeam != null && !placedByTeam.equalsIgnoreCase(team)) {
             if (!status.isOwnedBy(team) && status.state() != RegionState.NEUTRAL) {
                 addInfluence(playerUuid, regionId, team, InfluenceAction.MINE_ENEMY_BLOCK);
             }
+        }
+    }
+
+    /**
+     * Checks if a broken block was tracked for IP and removes the IP if broken by the same team.
+     */
+    private void checkAndRemoveTrackedBlock(String regionId, String team, String blockKey,
+                                            Map<String, Map<String, PlacedBlockRecord>> trackingMap, String blockTypeName) {
+        Map<String, PlacedBlockRecord> regionBlocks = trackingMap.get(regionId);
+        if (regionBlocks == null) return;
+
+        PlacedBlockRecord record = regionBlocks.remove(blockKey);
+        if (record != null && record.team().equalsIgnoreCase(team)) {
+            // Same team broke a block they placed - remove the IP
+            removeInfluence(regionId, team, record.points());
+            log("Removed " + record.points() + " IP from " + team + " in " + regionId +
+                " - " + blockTypeName + " broken (anti-farm)");
+        }
+
+        // Clean up empty maps
+        if (regionBlocks.isEmpty()) {
+            trackingMap.remove(regionId);
         }
     }
 

@@ -67,6 +67,10 @@ public class SqlObjectiveService implements ObjectiveService {
     // Used for Plant Explosive objective defend timer
     private final Map<String, PlantedExplosiveData> plantedExplosives = new ConcurrentHashMap<>();
 
+    // Track completed objective types per region to prevent repeats until all types exhausted
+    // "regionId:category" -> Set of completed ObjectiveTypes
+    private final Map<String, Set<ObjectiveType>> completedObjectiveTypes = new ConcurrentHashMap<>();
+
     // Internal data class for tracking planted explosives
     private record PlantedExplosiveData(
             int objectiveId,
@@ -280,35 +284,51 @@ public class SqlObjectiveService implements ObjectiveService {
             activeTypes.add(obj.type());
         }
 
+        // Get previously completed objective types to avoid repeats
+        String completedKey = regionId + ":" + category.name();
+        Set<ObjectiveType> completedTypes = completedObjectiveTypes.getOrDefault(completedKey, new HashSet<>());
+
+        // If all objective types have been completed, reset the tracking for fresh objectives
+        Set<ObjectiveType> allTypesInCategory = new HashSet<>(Arrays.asList(availableTypes));
+        if (completedTypes.containsAll(allTypesInCategory)) {
+            plugin.getLogger().info("[Objectives] Region " + regionId +
+                    ": All " + category + " objective types completed, resetting for fresh objectives");
+            completedTypes.clear();
+            completedObjectiveTypes.put(completedKey, completedTypes);
+        }
+
         // Spawn new objectives up to the max
         int toSpawn = maxObjectives - currentCount;
         List<ObjectiveType> candidates = new ArrayList<>();
         for (ObjectiveType type : availableTypes) {
-            if (!activeTypes.contains(type)) {
-                // Special check for assassinate commander - only spawn if valid targets exist
-                if (type == ObjectiveType.RAID_ASSASSINATE_COMMANDER) {
-                    if (!canSpawnAssassinateObjective(regionId)) {
-                        continue; // Skip - no valid targets online
-                    }
-                }
-                // Special check for destroy supply cache - only spawn if enemy chests exist
-                if (type == ObjectiveType.RAID_DESTROY_CACHE) {
-                    if (!canSpawnDestroyCacheObjective(regionId)) {
-                        continue; // Skip - no enemy chests in region
-                    }
-                }
-                candidates.add(type);
+            // Skip if already active or previously completed (until reset)
+            if (activeTypes.contains(type) || completedTypes.contains(type)) {
+                continue;
             }
+
+            // Special check for assassinate commander - only spawn if valid targets exist
+            if (type == ObjectiveType.RAID_ASSASSINATE_COMMANDER) {
+                if (!canSpawnAssassinateObjective(regionId)) {
+                    continue; // Skip - no valid targets online
+                }
+            }
+            // Special check for destroy supply cache - only spawn if enemy chests exist
+            if (type == ObjectiveType.RAID_DESTROY_CACHE) {
+                if (!canSpawnDestroyCacheObjective(regionId)) {
+                    continue; // Skip - no enemy chests in region
+                }
+            }
+            candidates.add(type);
         }
 
         if (candidates.isEmpty()) {
             plugin.getLogger().warning("[Objectives] Region " + regionId +
-                    ": No candidates available (active types: " + activeTypes + ", category: " + category + ")");
+                    ": No candidates available (active: " + activeTypes + ", completed: " + completedTypes + ", category: " + category + ")");
             return SpawnResult.SUCCESS;
         }
 
         plugin.getLogger().info("[Objectives] Region " + regionId + ": spawning " + toSpawn +
-                " objectives from " + candidates.size() + " candidates");
+                " objectives from " + candidates.size() + " candidates (excluding " + completedTypes.size() + " previously completed)");
 
         // Shuffle and spawn
         Collections.shuffle(candidates);
@@ -448,7 +468,11 @@ public class SqlObjectiveService implements ObjectiveService {
             objectiveBlocksTracking.remove(regionId + ":SUPPLY_ROUTE");
             objectiveBlocksTracking.remove(regionId + ":SABOTAGE_DEFENSES");
 
-            plugin.getLogger().info("[Objectives] Expired all objectives in " + regionId);
+            // Clear completed objective types tracking for this region (fresh slate for new owner)
+            completedObjectiveTypes.remove(regionId + ":" + ObjectiveCategory.SETTLEMENT.name());
+            completedObjectiveTypes.remove(regionId + ":" + ObjectiveCategory.RAID.name());
+
+            plugin.getLogger().info("[Objectives] Expired all objectives in " + regionId + " (cleared completed types tracking)");
         });
     }
 
@@ -537,6 +561,12 @@ public class SqlObjectiveService implements ObjectiveService {
         plugin.getLogger().info("[Objectives] " + playerUuid + " completed " +
                 objective.type().getDisplayName() + " in " + objective.regionId() +
                 " for " + objective.getInfluenceReward() + " IP");
+
+        // Track completed objective type to prevent repeat spawns
+        String completedKey = objective.regionId() + ":" + objective.type().getCategory().name();
+        completedObjectiveTypes.computeIfAbsent(completedKey, k -> ConcurrentHashMap.newKeySet())
+                .add(objective.type());
+        plugin.getLogger().fine("[Objectives] Tracked " + objective.type() + " as completed in " + completedKey);
 
         // Notify callback
         if (completionCallback != null) {
@@ -690,6 +720,16 @@ public class SqlObjectiveService implements ObjectiveService {
                 case SETTLEMENT_SUPPLY_ROUTE -> {
                     // Check if it's a road block
                     if (isRoadBlock(blockType)) {
+                        // Supply routes must be built near the border of friendly territory
+                        // This ensures roads actually connect to adjacent friendly regions
+                        int borderDistance = config.getRegionSize() / 4; // Within 1/4 of region from border
+
+                        if (!isNearFriendlyBorder(x, z, regionId, team, borderDistance)) {
+                            // Not near a friendly border - don't count this block
+                            // Silently skip (don't spam messages for every block)
+                            continue;
+                        }
+
                         // Check if this block position already earned progress
                         String trackingKey = regionId + ":SUPPLY_ROUTE";
                         Set<String> trackedBlocks = objectiveBlocksTracking.computeIfAbsent(trackingKey, k -> ConcurrentHashMap.newKeySet());
@@ -723,6 +763,101 @@ public class SqlObjectiveService implements ObjectiveService {
     private boolean isRoadBlock(String blockType) {
         return blockType.contains("PATH") || blockType.equals("GRAVEL") ||
                 blockType.equals("COBBLESTONE") || blockType.contains("STONE_BRICK");
+    }
+
+    /**
+     * Checks if a block position is near the border of friendly territory.
+     * For Supply Route objective - roads should connect to adjacent friendly regions.
+     *
+     * @param x Block X coordinate
+     * @param z Block Z coordinate
+     * @param regionId The region the block is in
+     * @param team The team building the road
+     * @param borderDistance How close to the border to check (in blocks)
+     * @return true if near a border with a friendly-owned region
+     */
+    private boolean isNearFriendlyBorder(int x, int z, String regionId, String team, int borderDistance) {
+        int[] center = regionCenters.get(regionId);
+        if (center == null) return false;
+
+        int regionSize = config.getRegionSize();
+        int halfRegion = regionSize / 2;
+
+        // Calculate region boundaries
+        int minX = center[0] - halfRegion;
+        int maxX = center[0] + halfRegion;
+        int minZ = center[1] - halfRegion;
+        int maxZ = center[1] + halfRegion;
+
+        // Check each direction for friendly border
+        // North border (negative Z)
+        if (z <= minZ + borderDistance) {
+            String northRegion = getAdjacentRegionInDirection(regionId, "NORTH");
+            if (northRegion != null && isRegionOwnedByTeam(northRegion, team)) {
+                return true;
+            }
+        }
+
+        // South border (positive Z)
+        if (z >= maxZ - borderDistance) {
+            String southRegion = getAdjacentRegionInDirection(regionId, "SOUTH");
+            if (southRegion != null && isRegionOwnedByTeam(southRegion, team)) {
+                return true;
+            }
+        }
+
+        // West border (negative X)
+        if (x <= minX + borderDistance) {
+            String westRegion = getAdjacentRegionInDirection(regionId, "WEST");
+            if (westRegion != null && isRegionOwnedByTeam(westRegion, team)) {
+                return true;
+            }
+        }
+
+        // East border (positive X)
+        if (x >= maxX - borderDistance) {
+            String eastRegion = getAdjacentRegionInDirection(regionId, "EAST");
+            if (eastRegion != null && isRegionOwnedByTeam(eastRegion, team)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Gets the adjacent region in a specific direction.
+     */
+    private String getAdjacentRegionInDirection(String regionId, String direction) {
+        if (regionId == null || regionId.length() < 2) return null;
+
+        char row = regionId.charAt(0);
+        int col;
+        try {
+            col = Integer.parseInt(regionId.substring(1));
+        } catch (NumberFormatException e) {
+            return null;
+        }
+
+        return switch (direction) {
+            case "NORTH" -> row > 'A' ? String.valueOf((char)(row - 1)) + col : null;
+            case "SOUTH" -> row < 'D' ? String.valueOf((char)(row + 1)) + col : null;
+            case "WEST" -> col > 1 ? String.valueOf(row) + (col - 1) : null;
+            case "EAST" -> col < 4 ? String.valueOf(row) + (col + 1) : null;
+            default -> null;
+        };
+    }
+
+    /**
+     * Checks if a region is owned by a specific team (including OWNED, FORTIFIED, PROTECTED states).
+     */
+    private boolean isRegionOwnedByTeam(String regionId, String team) {
+        Optional<RegionStatus> statusOpt = regionService.getRegionStatus(regionId);
+        if (statusOpt.isEmpty()) return false;
+
+        RegionStatus status = statusOpt.get();
+        // Check if the region is owned by this team (any owned state)
+        return status.isOwnedBy(team);
     }
 
     @Override
@@ -1102,6 +1237,9 @@ public class SqlObjectiveService implements ObjectiveService {
         plantedExplosives.clear();
         intelCarriers.clear();
         intelObjectiveSpawnTimes.clear();
+
+        // Clear completed objective types tracking (for fresh spawns)
+        completedObjectiveTypes.clear();
 
         // Clear Resource Depot anti-cheese tracking
         resourceDepotLastUpdate.clear();

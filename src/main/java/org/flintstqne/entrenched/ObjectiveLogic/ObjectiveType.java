@@ -67,11 +67,11 @@ public enum ObjectiveType {
             "Build defensive walls (0/100 blocks)"),
 
     /**
-     * Place 64+ path/road blocks connecting to owned region.
+     * Place 64+ path/road blocks near a border with friendly-owned territory.
      * 125 IP reward.
      */
     SETTLEMENT_SUPPLY_ROUTE("Build Supply Route", 125, ObjectiveCategory.SETTLEMENT,
-            "Build a road connecting to friendly territory (0/64 blocks)"),
+            "Build road near friendly territory border (0/64 blocks)"),
 
     /**
      * Build a structure 15+ blocks tall with line of sight.

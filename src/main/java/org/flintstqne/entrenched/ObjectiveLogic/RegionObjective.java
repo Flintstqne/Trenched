@@ -81,7 +81,7 @@ public record RegionObjective(
             case SETTLEMENT_SECURE_PERIMETER ->
                 "Build defensive walls (" + (int)(progress * 100) + "/100 blocks)";
             case SETTLEMENT_SUPPLY_ROUTE ->
-                "Build a road connecting to friendly territory (" + (int)(progress * 64) + "/64 blocks)";
+                "Build road near friendly border (" + (int)(progress * 64) + "/64 blocks)";
             case RAID_HOLD_GROUND ->
                 "Hold the region center (" + (int)(progress * 60) + "/60 seconds)";
             case RAID_PLANT_EXPLOSIVE -> {
