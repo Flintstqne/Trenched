@@ -102,11 +102,10 @@ public record RegionObjective(
                 }
             }
             case SETTLEMENT_RESOURCE_DEPOT -> {
-                // Progress is (containers/4 + items/100) / 2
-                // Estimate containers and items from progress
-                int estimatedContainers = Math.min(4, (int)(progress * 4));
-                int estimatedItems = Math.min(100, (int)(progress * 100));
-                yield "Create storage depot (" + estimatedContainers + "/4 containers, ~" + estimatedItems + "/100 items)";
+                // Progress is qualifyingContainers / requiredContainers
+                // Estimate qualifying containers from progress
+                int estimatedQualifying = Math.min(4, (int)(progress * 4));
+                yield "Stock 4 containers with 500+ items each (" + estimatedQualifying + "/4 done)";
             }
             default -> base;
         };

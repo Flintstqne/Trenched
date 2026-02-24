@@ -185,8 +185,21 @@ public class ObjectiveCommand implements CommandExecutor, TabCompleter {
 
             player.sendMessage(objLine);
 
-            // Show description
-            player.sendMessage(Component.text("    " + obj.getProgressDescription())
+            // Show description - use actual counts for resource depot
+            String description;
+            if (obj.type() == ObjectiveType.SETTLEMENT_RESOURCE_DEPOT) {
+                Optional<int[]> countsOpt = objectiveService.getResourceDepotCounts(obj.regionId());
+                if (countsOpt.isPresent()) {
+                    int[] counts = countsOpt.get();
+                    // counts = [qualifyingContainers, totalItems, requiredContainers, minItemsPerContainer]
+                    description = "Stock " + counts[2] + " containers with " + counts[3] + "+ items each (" + counts[0] + "/" + counts[2] + " done)";
+                } else {
+                    description = obj.getProgressDescription();
+                }
+            } else {
+                description = obj.getProgressDescription();
+            }
+            player.sendMessage(Component.text("    " + description)
                     .color(NamedTextColor.GRAY));
         }
 

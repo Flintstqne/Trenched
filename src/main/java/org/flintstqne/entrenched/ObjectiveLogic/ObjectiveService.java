@@ -183,6 +183,12 @@ public interface ObjectiveService {
     void updateResourceDepotProgress(UUID playerUuid, String team, String regionId, int containerCount, int totalItems);
 
     /**
+     * Gets the last known container and item counts for a resource depot objective.
+     * @return Optional of int array [containerCount, totalItems, requiredContainers, requiredItems], or empty if not tracked
+     */
+    Optional<int[]> getResourceDepotCounts(String regionId);
+
+    /**
      * Called when a player breaks a container - recalculates resource depot progress.
      * @param containerCount Current container count after breaking
      * @param totalItems Total items remaining after breaking

@@ -546,7 +546,21 @@ public class ObjectiveUIManager {
      */
     private Component getObjectiveTitle(RegionObjective objective) {
         String symbol = objective.type().isRaid() ? "⚔" : "⚒";
-        String progressText = objective.getProgressDescription();
+        String progressText;
+
+        // For resource depot, use actual tracked counts instead of estimates
+        if (objective.type() == ObjectiveType.SETTLEMENT_RESOURCE_DEPOT) {
+            Optional<int[]> countsOpt = objectiveService.getResourceDepotCounts(objective.regionId());
+            if (countsOpt.isPresent()) {
+                int[] counts = countsOpt.get();
+                // counts = [qualifyingContainers, totalItems, requiredContainers, minItemsPerContainer]
+                progressText = counts[0] + "/" + counts[2] + " containers stocked (" + counts[3] + "+ items each)";
+            } else {
+                progressText = objective.getProgressDescription();
+            }
+        } else {
+            progressText = objective.getProgressDescription();
+        }
 
         return Component.text(symbol + " ")
                 .color(objective.type().isRaid() ? NamedTextColor.RED : NamedTextColor.GREEN)

@@ -249,24 +249,33 @@ public class ObjectiveListener implements Listener {
      * Counts containers and items within a radius of a center point.
      * Used for Resource Depot objective tracking.
      *
+     * Returns: [qualifyingContainers, totalContainers, totalItems, minItemsPerContainer]
+     * A qualifying container is one that has at least minItemsPerContainer items.
+     *
      * @param center The center location to search around
      * @param radius Horizontal search radius in blocks
      * @param verticalRange Vertical search range (up and down from center)
-     * @return int array [containerCount, totalItems]
+     * @param minItemsPerContainer Minimum items required for a container to count as "qualifying"
+     * @return int array [qualifyingContainers, totalContainers, totalItems]
      */
-    private int[] countContainersAndItemsInRadius(Location center, int radius, int verticalRange) {
-        if (center == null || center.getWorld() == null) return new int[]{0, 0};
+    private int[] countContainersAndItemsInRadius(Location center, int radius, int verticalRange, int minItemsPerContainer) {
+        if (center == null || center.getWorld() == null) return new int[]{0, 0, 0};
 
         World world = center.getWorld();
         int centerX = center.getBlockX();
         int centerY = center.getBlockY();
         int centerZ = center.getBlockZ();
 
-        int containerCount = 0;
+        int qualifyingContainers = 0; // Containers with >= minItemsPerContainer items
+        int totalContainers = 0;
         int totalItems = 0;
 
-        // Track inventories we've already counted (handles double chests)
-        Set<org.bukkit.inventory.Inventory> countedInventories = new HashSet<>();
+        // Track which double chest inventories we've already counted
+        // Use the left side location as the canonical key for double chests
+        Set<String> countedDoubleChests = new HashSet<>();
+
+        // Track single container locations to avoid duplicates
+        Set<String> countedSingleContainers = new HashSet<>();
 
         // Search in the configured vertical range
         int minY = Math.max(world.getMinHeight(), centerY - verticalRange);
@@ -284,23 +293,62 @@ public class ObjectiveListener implements Listener {
 
                     org.bukkit.inventory.Inventory inventory = container.getInventory();
 
-                    // Skip if we've already counted this inventory (double chest handling)
-                    if (countedInventories.contains(inventory)) continue;
-                    countedInventories.add(inventory);
+                    // Handle double chests specially
+                    if (inventory instanceof org.bukkit.inventory.DoubleChestInventory doubleChestInv) {
+                        org.bukkit.block.DoubleChest doubleChest = (org.bukkit.block.DoubleChest) doubleChestInv.getHolder();
+                        if (doubleChest != null) {
+                            // Use the left side as canonical key for this double chest
+                            Location leftLoc = ((org.bukkit.block.Chest) doubleChest.getLeftSide()).getLocation();
+                            String doubleChestKey = leftLoc.getBlockX() + "," + leftLoc.getBlockY() + "," + leftLoc.getBlockZ();
 
-                    containerCount++;
+                            // Only count if we haven't seen this double chest before
+                            if (!countedDoubleChests.contains(doubleChestKey)) {
+                                countedDoubleChests.add(doubleChestKey);
+                                totalContainers++;
 
-                    // Count items
-                    for (ItemStack item : inventory.getContents()) {
-                        if (item != null && item.getType() != Material.AIR) {
-                            totalItems += item.getAmount();
+                                // Count items in the entire double chest inventory
+                                int containerItems = 0;
+                                for (ItemStack item : doubleChestInv.getContents()) {
+                                    if (item != null && item.getType() != Material.AIR) {
+                                        containerItems += item.getAmount();
+                                    }
+                                }
+                                totalItems += containerItems;
+
+                                // Check if this container qualifies (has enough items)
+                                if (containerItems >= minItemsPerContainer) {
+                                    qualifyingContainers++;
+                                }
+                            }
+                        }
+                    } else {
+                        // Regular single container (barrel, shulker, single chest)
+                        String locationKey = x + "," + y + "," + z;
+
+                        if (!countedSingleContainers.contains(locationKey)) {
+                            countedSingleContainers.add(locationKey);
+                            totalContainers++;
+
+                            // Count items
+                            int containerItems = 0;
+                            for (ItemStack item : inventory.getContents()) {
+                                if (item != null && item.getType() != Material.AIR) {
+                                    containerItems += item.getAmount();
+                                }
+                            }
+                            totalItems += containerItems;
+
+                            // Check if this container qualifies (has enough items)
+                            if (containerItems >= minItemsPerContainer) {
+                                qualifyingContainers++;
+                            }
                         }
                     }
                 }
             }
         }
 
-        return new int[]{containerCount, totalItems};
+        return new int[]{qualifyingContainers, totalContainers, totalItems};
     }
 
     /**
@@ -317,6 +365,7 @@ public class ObjectiveListener implements Listener {
 
     /**
      * Updates Resource Depot progress by scanning containers around the objective location.
+     * Scans the full vertical range (all Y levels) within the horizontal radius.
      */
     private void updateResourceDepotProgressAtLocation(Player player, String team, String regionId, World world) {
         Optional<Location> depotLocOpt = getResourceDepotLocation(regionId, world);
@@ -329,17 +378,27 @@ public class ObjectiveListener implements Listener {
 
         // Get configurable search parameters
         int radius = config.getResourceDepotRadius();
-        int verticalRange = config.getResourceDepotVerticalRange();
+        int minItemsPerContainer = config.getResourceDepotMinItemsPerContainer();
 
-        // Scan containers within the configured radius of the depot location
-        int[] counts = countContainersAndItemsInRadius(depotLoc, radius, verticalRange);
+        // Use full world height for vertical scanning - resource depots can be built at any Y level
+        // This ensures chests are found regardless of whether they're underground, on surface, or in the sky
+        int fullVerticalRange = (world.getMaxHeight() - world.getMinHeight()) / 2;
+
+        // Scan containers within the configured radius of the depot location (X/Z only, full Y range)
+        // Returns: [qualifyingContainers, totalContainers, totalItems]
+        int[] counts = countContainersAndItemsInRadius(depotLoc, radius, fullVerticalRange, minItemsPerContainer);
+
+        int qualifyingContainers = counts[0];
+        int totalContainers = counts[1];
+        int totalItems = counts[2];
 
         plugin.getLogger().info("[ResourceDepot] Scanned " + regionId + " at " +
-                depotLoc.getBlockX() + "," + depotLoc.getBlockY() + "," + depotLoc.getBlockZ() +
-                " (radius=" + radius + ", vertical=" + verticalRange + ")" +
-                " - Found " + counts[0] + " containers, " + counts[1] + " items");
+                depotLoc.getBlockX() + "," + depotLoc.getBlockZ() +
+                " (radius=" + radius + ", fullHeight)" +
+                " - Found " + totalContainers + " containers (" + qualifyingContainers + " with " + minItemsPerContainer + "+ items), " + totalItems + " total items");
 
-        objectiveService.updateResourceDepotProgress(player.getUniqueId(), team, regionId, counts[0], counts[1]);
+        // Pass qualifying containers count to the service
+        objectiveService.updateResourceDepotProgress(player.getUniqueId(), team, regionId, qualifyingContainers, totalItems);
     }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)

@@ -926,11 +926,15 @@ public class SqlObjectiveService implements ObjectiveService {
     }
 
     /**
-     * Updates Resource Depot progress based on container count and items.
+     * Updates Resource Depot progress based on qualifying container count.
+     * A "qualifying container" has at least the minimum items per container (default 500).
      * Called by the listener after counting containers around the objective location.
+     *
+     * @param qualifyingContainers Number of containers with 500+ items each
+     * @param totalItems Total items across all containers (for display only)
      */
     @Override
-    public void updateResourceDepotProgress(UUID playerUuid, String team, String regionId, int containerCount, int totalItems) {
+    public void updateResourceDepotProgress(UUID playerUuid, String team, String regionId, int qualifyingContainers, int totalItems) {
         // Verify this is a neutral region (settlement objectives only apply to neutral regions)
         Optional<RegionStatus> statusOpt = regionService.getRegionStatus(regionId);
         if (statusOpt.isEmpty()) {
@@ -960,29 +964,34 @@ public class SqlObjectiveService implements ObjectiveService {
 
         // Get configurable requirements
         int requiredContainers = config.getResourceDepotMinContainers();
-        int requiredItems = config.getResourceDepotMinItems();
+        int minItemsPerContainer = config.getResourceDepotMinItemsPerContainer();
+
+        // Store actual counts for UI display: [qualifyingContainers, totalItems, requiredContainers, minItemsPerContainer]
+        resourceDepotLastCounts.put(regionId, new int[]{qualifyingContainers, totalItems, requiredContainers, minItemsPerContainer});
 
         // Log the current state
         plugin.getLogger().info("[ResourceDepot] Progress update in " + regionId +
-                ": " + containerCount + " containers, " + totalItems + " items" +
-                " (need: " + requiredContainers + " containers, " + requiredItems + " items)");
+                ": " + qualifyingContainers + "/" + requiredContainers + " containers with " + minItemsPerContainer + "+ items each");
 
-        // Check completion
-        if (containerCount >= requiredContainers && totalItems >= requiredItems) {
+        // Check completion - need required number of qualifying containers
+        if (qualifyingContainers >= requiredContainers) {
             completeObjective(depotObj.id(), playerUuid, team);
+            resourceDepotLastCounts.remove(regionId); // Clean up
             plugin.getLogger().info("[ResourceDepot] COMPLETED in " + regionId +
-                    " by " + playerUuid + " (" + containerCount + " containers, " + totalItems + " items)");
+                    " by " + playerUuid + " (" + qualifyingContainers + " containers with " + minItemsPerContainer + "+ items each, " + totalItems + " total items)");
         } else {
-            // Calculate progress: average of container progress and item progress
-            double containerProgress = Math.min(1.0, (double) containerCount / requiredContainers);
-            double itemProgress = Math.min(1.0, (double) totalItems / requiredItems);
-            double newProgress = (containerProgress + itemProgress) / 2.0;
+            // Progress is simply the ratio of qualifying containers
+            double newProgress = (double) qualifyingContainers / requiredContainers;
 
             updateProgress(depotObj.id(), newProgress);
             plugin.getLogger().info("[ResourceDepot] Progress: " + String.format("%.1f%%", newProgress * 100) +
-                    " (containers: " + String.format("%.0f%%", containerProgress * 100) +
-                    ", items: " + String.format("%.0f%%", itemProgress * 100) + ")");
+                    " (" + qualifyingContainers + "/" + requiredContainers + " containers stocked)");
         }
+    }
+
+    @Override
+    public Optional<int[]> getResourceDepotCounts(String regionId) {
+        return Optional.ofNullable(resourceDepotLastCounts.get(regionId));
     }
 
     @Override

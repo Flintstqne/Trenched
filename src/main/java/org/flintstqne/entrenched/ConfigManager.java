@@ -433,8 +433,18 @@ public final class ConfigManager {
     }
 
     /**
-     * Gets the minimum number of items required for Resource Depot completion.
+     * Gets the minimum number of items PER CONTAINER required for Resource Depot.
+     * Each container must have at least this many items to count as "qualifying".
      */
+    public int getResourceDepotMinItemsPerContainer() {
+        return config.getInt("regions.objectives.resource-depot-min-items-per-container", 500);
+    }
+
+    /**
+     * Gets the minimum total items required for Resource Depot completion.
+     * @deprecated Use getResourceDepotMinItemsPerContainer() instead - we now check per container
+     */
+    @Deprecated
     public int getResourceDepotMinItems() {
         return config.getInt("regions.objectives.resource-depot-min-items", 100);
     }

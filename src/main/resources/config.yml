@@ -246,15 +246,9 @@ regions:
     # Distance to show action bar hints (in blocks)
     hint-distance: 100
 
-    # Resource Depot objective settings
-    # Horizontal search radius (containers within this distance count)
-    resource-depot-radius: 16
-    # Vertical search range (blocks above/below objective location)
-    resource-depot-vertical-range: 16
-    # Minimum containers required for completion
-    resource-depot-min-containers: 4
-    # Minimum total items required for completion
-    resource-depot-min-items: 100
+    resource-depot-radius: 16  # Horizontal radius from objective center
+    resource-depot-min-containers: 4  # Number of stocked containers needed
+    resource-depot-min-items-per-container: 500  # Items required per container
 
 # Debug Settings
 debug:
