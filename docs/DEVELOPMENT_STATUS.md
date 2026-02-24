@@ -1,6 +1,6 @@
 # Entrenched (BlockHole) Development Status
 
-**Last Updated:** February 17, 2026
+**Last Updated:** February 24, 2026
 
 ---
 
@@ -11,6 +11,7 @@ Entrenched is a Minecraft PvP plugin featuring team-based warfare with:
 - **4x4 Region Grid**: 16 capturable territories (512x512 blocks each)
 - **Supply Line System**: Physical roads connect territories
 - **Influence Points (IP)**: Capture regions through actions
+- **Objectives System**: Settlement and Raid objectives for capturing regions
 - **Divisions & Parties**: Organizational units for coordination
 - **Merit System**: Player recognition and ranking
 
@@ -44,6 +45,9 @@ Entrenched is a Minecraft PvP plugin featuring team-based warfare with:
 | **Adjacency Rules** | ✅ Complete | Must own adjacent region to attack (N/S/E/W) |
 | **Fortification** | ✅ Complete | 10-min immunity after capture |
 | **Rate Limiting** | ✅ Complete | Anti-spam for block mining, workstations, etc. |
+| **Anti-Farming (Blocks)** | ✅ Complete | Breaking defensive blocks/torches/workstations removes IP earned |
+| **Anti-Farming (Banners)** | ✅ Complete | Breaking own banners deducts IP |
+| **Anti-Farming (Kills)** | ✅ Complete | Diminishing returns for repeat kills on same player |
 
 ### Supply Line System (Roads)
 
@@ -170,35 +174,157 @@ All features are configurable via `config.yml`:
 
 ---
 
-## 🚧 NOT YET IMPLEMENTED
+## 🚧 PARTIALLY IMPLEMENTED
 
-### Region Objectives System (Partially Implemented)
+### Region Objectives System
 
-The design document (`REGION_CAPTURE_DESIGN.md`) outlines objectives. Current status:
+The objectives system provides SETTLEMENT objectives (for neutral regions) and RAID objectives (for enemy-owned regions).
 
-| Objective | Status | Description |
-|-----------|--------|-------------|
-| **Destroy Supply Cache** | ✅ Complete | Find/destroy enemy-placed chests |
-| **Assassinate Commander** | ✅ Complete | Kill enemy division commanders/officers (glowing targets) |
-| **Sabotage Defenses** | ✅ Complete | Destroy 50+ wall blocks |
-| **Plant Explosive** | ✅ Complete | Place TNT at target, defend 30s |
-| **Capture Intel** | ✅ Complete | Pick up intel item, return to friendly territory |
-| **Hold Ground** | ✅ Complete | Hold region center 60s |
-| **Establish Outpost** | ❌ Not Started | Build structure with bed/chest/crafting table |
-| **Secure Perimeter** | ✅ Complete | Build 100 defensive wall blocks |
-| **Build Supply Route** | ✅ Complete | Build 64 road blocks |
-| **Build Watchtower** | ❌ Not Started | Build 15+ block tall structure |
-| **Establish Resource Depot** | ✅ Complete | 4+ containers with 100+ items |
-| **Build Garrison Quarters** | ❌ Not Started | Build barracks with 3+ beds |
+| Objective | Category | Status | Description |
+|-----------|----------|--------|-------------|
+| **Destroy Supply Cache** | Raid | ✅ Complete | Find/destroy enemy-placed chests |
+| **Assassinate Commander** | Raid | ✅ Complete | Kill enemy division commanders/officers (glowing targets, compass tracking) |
+| **Sabotage Defenses** | Raid | ✅ Complete | Destroy 50+ wall blocks |
+| **Plant Explosive** | Raid | ✅ Complete | Place TNT at target, defend 30s (defenders can defuse) |
+| **Capture Intel** | Raid | ✅ Complete | Pick up intel item, return to friendly territory (10 min lifetime) |
+| **Hold Ground** | Raid | ✅ Complete | Hold region center 60s (both teams see alerts) |
+| **Establish Outpost** | Settlement | ❌ Not Started | Build structure with bed/chest/crafting table |
+| **Secure Perimeter** | Settlement | ✅ Complete | Build 100 defensive wall blocks (anti-cheese tracking) |
+| **Build Supply Route** | Settlement | ✅ Complete | Build 64 road blocks near friendly territory border |
+| **Build Watchtower** | Settlement | ❌ Not Started | Build 15+ block tall structure |
+| **Establish Resource Depot** | Settlement | ✅ Complete | 4+ containers with 500+ items each (anti-cheese tracking) |
+| **Build Garrison Quarters** | Settlement | ❌ Not Started | Build barracks with 3+ beds (enables quick travel spawn point) |
 
-
-### Additional Features
+#### Objectives UI & Features
 
 | Feature | Status | Description |
 |---------|--------|-------------|
-| **Influence Decay** | ✅ Complete | IP decays in contested regions with no activity (configurable rate) |
+| **Objective Spawning** | ✅ Complete | Objectives spawn automatically based on region state |
+| **Objective Respawn** | ✅ Complete | New objectives spawn after completion (10 min cooldown) |
+| **No-Repeat Spawning** | ✅ Complete | Completed objective types excluded until all types used |
+| **Boss Bars** | ✅ Complete | Progress bars for nearby objectives |
+| **Compass HUD** | ✅ Complete | Scoreboard compass shows direction/distance to nearest objective |
+| **Defender Alerts** | ✅ Complete | Defenders see alerts for enemy objectives in progress |
+| **Objective Command** | ✅ Complete | `/obj` shows active objectives, coordinates, progress |
+| **Objective Particles** | ✅ Complete | Particle effects at objective locations |
+
+---
+
+## ❌ NOT YET IMPLEMENTED
+
+### Remaining Features
+
+| Feature | Status | Description |
+|---------|--------|-------------|
+| **Establish Outpost** | ❌ Not Started | Settlement objective - Build structure with bed/chest/crafting table |
+| **Build Watchtower** | ❌ Not Started | Settlement objective - Build 15+ block tall structure |
+| **Build Garrison Quarters** | ❌ Not Started | Settlement objective - Build barracks with 3+ beds, enables quick travel spawn point |
 | **Win Condition Detection** | ❌ Not Started | Auto-detect when team wins |
 | **Round Statistics** | ❌ Not Started | Post-round stats summary |
+
+---
+
+## 💡 PLANNED FEATURES
+
+### Container Permission System
+
+A team-based container permission system to prevent enemies from accessing friendly storage.
+
+| Feature | Status | Description |
+|---------|--------|-------------|
+| **Team Chest Protection** | ✅ Complete | Enemies cannot open/break team chests in team-owned regions |
+| **Protection Drops on Capture** | ✅ Complete | When region is captured, new owners can access all enemy containers |
+| **Objective Bypass** | ✅ Complete | "Destroy Supply Cache" objective allows breaking enemy chests |
+| **No Traditional Claims** | ✅ Complete | Protection tied to region ownership, not land claims |
+
+#### Design Philosophy
+- **Sector-Based Vulnerability**: Container protection is tied to who controls the region
+- **Physical Access Points**: No invisible claim boundaries - if you can reach it, protection depends on region ownership
+- **Effort-Based Access**: Enemies must work to access protected storage (capture region or complete objectives)
+- **Capture = Full Access**: When a region is captured, ALL enemy containers in that region become accessible to the new owners
+
+#### Container Types Affected
+- Chests (single and double)
+- Trapped Chests
+- Barrels
+- Shulker Boxes
+- Hoppers, Droppers, Dispensers
+
+> **Note:** Division Depots (planned) will NOT follow this behavior. When a region with enemy Division Depots is captured, the depots remain locked. Accessing a captured Division Depot opens YOUR OWN division's storage, not the enemy's. A special tool is required to raid enemy Division Depots and loot their contents.
+
+### Division Depot System
+
+A shared storage system for divisions, similar to Ender Chests but with physical vulnerability.
+
+> **Key Difference from Regular Containers:** Division Depots do NOT follow normal capture rules. When a region is captured, regular containers become accessible, but Division Depots remain protected. Interacting with an enemy Division Depot opens YOUR division's storage, not theirs. A special raid tool is required to loot enemy depot contents.
+
+| Feature | Status | Description |
+|---------|--------|-------------|
+| **Shared Division Storage** | 📋 Planned | Functions like Ender Chest - all division members access same inventory |
+| **Physical Depot Block** | 📋 Planned | Must place a depot block in the world to access division storage |
+| **Custom Crafting Recipe** | 📋 Planned | Copper chest block with custom NBT data |
+| **Sector Capture Vulnerability** | 📋 Planned | Depots become raidable (not openable) when their sector is captured |
+| **Depot Removal Tool** | 📋 Planned | Special multipurpose tool to remove enemy depots in captured sectors |
+| **Partial Loot Drop** | 📋 Planned | Removing captured depot drops a set amount of items from storage |
+
+#### Depot Mechanics
+
+1. **Placement**
+   - Division members craft a Division Depot block (copper chest + custom NBT)
+   - Place in any region to create access point to shared division storage
+   - Multiple depots can exist - all access the same shared inventory
+
+2. **Protection**
+   - Depot is protected while region is owned/controlled by depot owner's team
+   - Cannot be broken or accessed by enemies in friendly territory
+
+3. **Vulnerability**
+   - When region is captured by enemy team, all depots in that region become vulnerable
+   - Enemies can use a special tool to "raid" the depot
+   - Raiding drops a portion of stored items (configurable %)
+   - Depot block is destroyed after raiding
+
+4. **Strategic Considerations**
+   - Depots are NOT 100% safe - encourages strategic placement
+   - Place in well-defended regions, not frontline territories
+   - Creates additional objectives for attackers (capture region → raid depots)
+   - Division must choose between convenience (many access points) and security (fewer depots)
+
+### Garrison Quick Travel System
+
+A spawn-based travel system tied to the "Build Garrison Quarters" objective.
+
+| Feature | Status | Description |
+|---------|--------|-------------|
+| **Spawn Map Item** | 📋 Planned | Players receive a map item when spawning in home region |
+| **Region Grid GUI** | 📋 Planned | Map opens inventory grid showing current server state |
+| **Garrison Teleport** | 📋 Planned | Can teleport to any garrison in friendly regions |
+| **Distance Limit** | 📋 Planned | Map disappears after moving X blocks from spawn point |
+| **One-Time Use** | 📋 Planned | Cannot use map again after it disappears |
+
+#### Garrison Mechanics
+
+1. **On Spawn (Home Region)**
+   - Player receives a special map item in their inventory
+   - Map item has custom NBT data tracking spawn location
+
+2. **Map Usage**
+   - Right-click map to open region grid GUI
+   - GUI shows all 16 regions with current ownership status
+   - Regions with friendly garrisons are highlighted/clickable
+   - Click a garrison region to teleport there
+
+3. **Map Expiration**
+   - System tracks player's distance from spawn point
+   - Once player moves X blocks away (configurable), map is removed
+   - Prevents abuse of quick travel mid-game
+   - Encourages immediate decision-making on spawn
+
+4. **Strategic Implications**
+   - Garrisons provide forward spawn options for team
+   - "Build Garrison Quarters" objective now has major gameplay value
+   - Teams can create spawn networks across the map
+   - Losing a garrison region = losing a spawn point
 
 ---
 
@@ -232,6 +358,7 @@ src/main/java/org/flintstqne/entrenched/
 │   └── SqlPartyService.java
 ├── RegionLogic/
 │   ├── RegionCaptureListener.java  # IP from actions
+│   ├── ContainerProtectionListener.java  # Team chest protection
 │   ├── RegionCommand.java
 │   ├── RegionDb.java
 │   ├── RegionNotificationManager.java
@@ -240,6 +367,24 @@ src/main/java/org/flintstqne/entrenched/
 │   ├── RegionState.java
 │   ├── RegionStatus.java
 │   └── InfluenceAction.java
+├── ObjectiveLogic/
+│   ├── ObjectiveCommand.java      # /obj command
+│   ├── ObjectiveDb.java
+│   ├── ObjectiveListener.java     # Block/inventory events
+│   ├── ObjectiveService.java
+│   ├── SqlObjectiveService.java   # Objective spawning/completion
+│   ├── ObjectiveType.java         # Objective definitions
+│   ├── ObjectiveUIManager.java    # Boss bars, compass HUD
+│   ├── RegionObjective.java
+│   └── ObjectiveCategory.java
+├── MeritLogic/
+│   ├── MeritService.java
+│   ├── SqlMeritService.java
+│   ├── MeritDb.java
+│   ├── MeritListener.java
+│   ├── MeritRank.java
+│   ├── Achievement.java
+│   └── MeritTokenSource.java
 ├── RoadLogic/
 │   ├── RoadListener.java      # Block place/break detection
 │   ├── RoadDb.java
@@ -271,24 +416,27 @@ src/main/java/org/flintstqne/entrenched/
 
 ## 🎯 Recommended Next Steps
 
-### Priority 1: Core Gameplay Polish
-1. **Test IP earning flow end-to-end** - Verify all actions award correct IP
-2. **Test region capture flow** - Confirm ownership changes work
-3. **Test supply disruption** - Verify penalties apply correctly
+### Priority 1: Complete Remaining Objectives
+1. **Establish Outpost** - Build structure with bed/chest/crafting table
+2. **Build Watchtower** - Build 15+ block tall structure with line of sight
+3. **Build Garrison Quarters** - Build barracks with 3+ beds
 
-### Priority 2: Objectives System
-1. Implement "Hold Ground" objective (simplest)
-2. Add objective spawning/tracking
-3. Add objective UI (boss bar or scoreboard)
+### Priority 2: Container & Depot System
+1. **Team Chest Protection** - Prevent enemies from opening team chests
+2. **Division Depot Block** - Custom craftable block for shared division storage
+3. **Depot Vulnerability** - Make depots raidable when sector is captured
+4. **Raid Tool** - Special tool to remove enemy depots and loot contents
 
 ### Priority 3: Win Conditions
 1. Define win condition (capture all regions? home region?)
 2. Implement win detection
 3. Add round-end summary
 
+
 ### Priority 4: Quality of Life
 1. Player statistics tracking
 2. Post-round statistics display
+3. Tutorial/onboarding for new players
 
 ---
 
@@ -308,6 +456,7 @@ src/main/java/org/flintstqne/entrenched/
 - `/division <create|invite|info|leave|...>` - Division management
 - `/party <invite|accept|leave|...>` - Party management
 - `/region <status|map|info>` - Region information
+- `/obj` - View active objectives in current region (with coordinates and progress)
 - `/supply status` - View supply levels
 - `/g`, `/tc`, `/dc`, `/pc`, `/rc` - Chat channels
 - `/merit <player> [reason]` - Give merit tokens to another player
@@ -319,6 +468,7 @@ src/main/java/org/flintstqne/entrenched/
 - `/round new` - Start new round (world reset)
 - `/round phase <1-3>` - Set phase
 - `/admin region set <region> <team>` - Set region ownership
+- `/admin region reset <region>` - Reset region to neutral
 - `/admin tp <player> <region>` - Teleport player
 - `/admin supply debug <region> <team>` - Debug supply
 - `/admin supply register <region> <team>` - Scan/register roads
@@ -328,6 +478,8 @@ src/main/java/org/flintstqne/entrenched/
 - `/admin merit reset <player>` - Reset player's merit data
 - `/admin merit info <player>` - View player's merit info
 - `/admin merit leaderboard [count]` - View merit leaderboard
+- `/admin objective spawn <region> <type>` - Manually spawn objective
+- `/admin objective list <region>` - List active objectives
 
 ---
 

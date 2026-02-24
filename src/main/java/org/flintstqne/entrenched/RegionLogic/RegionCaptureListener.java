@@ -76,11 +76,22 @@ public final class RegionCaptureListener implements Listener {
 
     /**
      * Checks if a player can earn influence in a region (must be adjacent to friendly territory).
-     * Sends a warning message if not adjacent (with cooldown to prevent spam).
+     * Silently returns false if not adjacent - use for arbitrary actions like block placement.
      *
      * @return true if the player can earn influence, false otherwise
      */
     private boolean canEarnInfluenceInRegion(Player player, String regionId, String team) {
+        return canEarnInfluenceInRegion(player, regionId, team, false);
+    }
+
+    /**
+     * Checks if a player can earn influence in a region (must be adjacent to friendly territory).
+     * Optionally sends a warning message if not adjacent (with cooldown to prevent spam).
+     *
+     * @param sendWarning If true, sends a warning message when not adjacent (for important actions like kills/banners)
+     * @return true if the player can earn influence, false otherwise
+     */
+    private boolean canEarnInfluenceInRegion(Player player, String regionId, String team, boolean sendWarning) {
         // Check if region is already owned by the team (no need to check adjacency)
         Optional<RegionStatus> statusOpt = regionService.getRegionStatus(regionId);
         if (statusOpt.isPresent() && statusOpt.get().isOwnedBy(team)) {
@@ -89,17 +100,19 @@ public final class RegionCaptureListener implements Listener {
 
         // Check adjacency
         if (!regionService.isAdjacentToTeam(regionId, team)) {
-            // Send warning with cooldown
-            long now = System.currentTimeMillis();
-            Long lastWarning = lastAdjacencyWarning.get(player.getUniqueId());
+            // Only send warning if requested (for important actions like kills/banners)
+            if (sendWarning) {
+                long now = System.currentTimeMillis();
+                Long lastWarning = lastAdjacencyWarning.get(player.getUniqueId());
 
-            if (lastWarning == null || (now - lastWarning) > ADJACENCY_WARNING_COOLDOWN_MS) {
-                lastAdjacencyWarning.put(player.getUniqueId(), now);
-                String regionName = getRegionDisplayName(regionId);
-                player.sendMessage(configManager.getPrefix() + ChatColor.RED +
-                        "You cannot earn influence in " + ChatColor.WHITE + regionName + ChatColor.RED + "!");
-                player.sendMessage(ChatColor.GRAY + "  This region is not adjacent to any territory your team controls.");
-                player.sendMessage(ChatColor.GRAY + "  Capture adjacent regions first to expand your frontline.");
+                if (lastWarning == null || (now - lastWarning) > ADJACENCY_WARNING_COOLDOWN_MS) {
+                    lastAdjacencyWarning.put(player.getUniqueId(), now);
+                    String regionName = getRegionDisplayName(regionId);
+                    player.sendMessage(configManager.getPrefix() + ChatColor.RED +
+                            "You cannot earn influence in " + ChatColor.WHITE + regionName + ChatColor.RED + "!");
+                    player.sendMessage(ChatColor.GRAY + "  This region is not adjacent to any territory your team controls.");
+                    player.sendMessage(ChatColor.GRAY + "  Capture adjacent regions first to expand your frontline.");
+                }
             }
             return false;
         }
@@ -136,7 +149,8 @@ public final class RegionCaptureListener implements Listener {
             Optional<RegionStatus> statusOpt = regionService.getRegionStatus(regionId);
             // Only check adjacency if region is not owned by killer's team
             if (statusOpt.isPresent() && !statusOpt.get().isOwnedBy(killerTeam)) {
-                if (!canEarnInfluenceInRegion(killer, regionId, killerTeam)) {
+                // Player kills are important - send warning if not adjacent
+                if (!canEarnInfluenceInRegion(killer, regionId, killerTeam, true)) {
                     return; // Can't earn IP in this region - message already sent
                 }
             }
@@ -214,20 +228,23 @@ public final class RegionCaptureListener implements Listener {
         // Track player-placed block
         playerPlacedBlocks.put(blockKey, team);
 
-        // Check adjacency for influence gain
+        // Get region info for this block
         String regionId = regionService.getRegionIdForLocation(block.getX(), block.getZ());
-        boolean canEarnInfluence = true;
-        if (regionId != null) {
-            Optional<RegionStatus> statusOpt = regionService.getRegionStatus(regionId);
-            if (statusOpt.isPresent() && !statusOpt.get().isOwnedBy(team)) {
-                canEarnInfluence = canEarnInfluenceInRegion(player, regionId, team);
-            }
-        }
 
-        // Check if it's a banner
+        // Check if it's a banner - banners are intentional capture actions, handle separately
         if (isBanner(block.getType())) {
             String bannerKey = block.getX() + "," + block.getZ();
             String bannerTeam = getBannerTeam(block.getType());
+
+            // For banners, check adjacency with warning since it's an intentional capture action
+            boolean canEarnInfluence = true;
+            if (regionId != null) {
+                Optional<RegionStatus> statusOpt = regionService.getRegionStatus(regionId);
+                if (statusOpt.isPresent() && !statusOpt.get().isOwnedBy(team)) {
+                    // Banners are important - send warning if not adjacent
+                    canEarnInfluence = canEarnInfluenceInRegion(player, regionId, team, true);
+                }
+            }
 
             // Check if placing over enemy banner
             String existingBanner = placedBanners.get(bannerKey);
@@ -275,16 +292,27 @@ public final class RegionCaptureListener implements Listener {
                             "Banner placed, but this location is on cooldown (" + remainingSeconds + "s remaining).");
                 }
             }
-        } else if (canEarnInfluence) {
-            // Regular block placement - only if can earn influence
-            regionService.onBlockPlace(
-                    player.getUniqueId(),
-                    team,
-                    block.getX(),
-                    block.getY(),
-                    block.getZ(),
-                    blockType
-            );
+        } else {
+            // Regular block placement - check adjacency silently (no warning for arbitrary blocks)
+            boolean canEarnInfluence = true;
+            if (regionId != null) {
+                Optional<RegionStatus> statusOpt = regionService.getRegionStatus(regionId);
+                if (statusOpt.isPresent() && !statusOpt.get().isOwnedBy(team)) {
+                    // Regular blocks - no warning, just silently skip if not adjacent
+                    canEarnInfluence = canEarnInfluenceInRegion(player, regionId, team, false);
+                }
+            }
+
+            if (canEarnInfluence) {
+                regionService.onBlockPlace(
+                        player.getUniqueId(),
+                        team,
+                        block.getX(),
+                        block.getY(),
+                        block.getZ(),
+                        blockType
+                );
+            }
         }
     }
 
@@ -305,20 +333,23 @@ public final class RegionCaptureListener implements Listener {
         String placedByTeam = playerPlacedBlocks.remove(blockKey);
         boolean wasPlayerPlaced = placedByTeam != null;
 
-        // Check adjacency for influence gain
+        // Get region info for this block
         String regionId = regionService.getRegionIdForLocation(block.getX(), block.getZ());
-        boolean canEarnInfluence = true;
-        if (regionId != null) {
-            Optional<RegionStatus> statusOpt = regionService.getRegionStatus(regionId);
-            if (statusOpt.isPresent() && !statusOpt.get().isOwnedBy(team)) {
-                canEarnInfluence = canEarnInfluenceInRegion(player, regionId, team);
-            }
-        }
 
-        // Check if it's a banner
+        // Check if it's a banner - banners are intentional capture actions, handle separately
         if (isBanner(block.getType())) {
             String bannerKey = block.getX() + "," + block.getZ();
             String bannerTeam = placedBanners.remove(bannerKey);
+
+            // For breaking enemy banners, check adjacency with warning since it's intentional
+            boolean canEarnInfluence = true;
+            if (regionId != null) {
+                Optional<RegionStatus> statusOpt = regionService.getRegionStatus(regionId);
+                if (statusOpt.isPresent() && !statusOpt.get().isOwnedBy(team)) {
+                    // Breaking enemy banners is important - send warning if not adjacent
+                    canEarnInfluence = canEarnInfluenceInRegion(player, regionId, team, true);
+                }
+            }
 
             if (bannerTeam != null && !bannerTeam.equalsIgnoreCase(team) && canEarnInfluence) {
                 // Breaking enemy banner - award IP
@@ -348,9 +379,19 @@ public final class RegionCaptureListener implements Listener {
                     }
                 }
             }
-        } else if (canEarnInfluence) {
-            // Regular block break - only if can earn influence
-            regionService.onBlockBreak(
+        } else {
+            // Regular block break - check adjacency silently (no warning for arbitrary blocks)
+            boolean canEarnInfluence = true;
+            if (regionId != null) {
+                Optional<RegionStatus> statusOpt = regionService.getRegionStatus(regionId);
+                if (statusOpt.isPresent() && !statusOpt.get().isOwnedBy(team)) {
+                    // Regular blocks - no warning, just silently skip if not adjacent
+                    canEarnInfluence = canEarnInfluenceInRegion(player, regionId, team, false);
+                }
+            }
+
+            if (canEarnInfluence) {
+                regionService.onBlockBreak(
                     player.getUniqueId(),
                     team,
                     block.getX(),
@@ -358,7 +399,8 @@ public final class RegionCaptureListener implements Listener {
                     block.getZ(),
                     wasPlayerPlaced,
                     placedByTeam
-            );
+                );
+            }
         }
     }
 

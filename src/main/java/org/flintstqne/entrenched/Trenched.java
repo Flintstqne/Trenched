@@ -65,6 +65,7 @@ public final class Trenched extends JavaPlugin {
     private ObjectiveService objectiveService;
     private ObjectiveUIManager objectiveUIManager;
     private ObjectiveListener objectiveListener;
+    private ContainerProtectionListener containerProtectionListener;
 
     @Override
     public void onEnable() {
@@ -229,6 +230,11 @@ public final class Trenched extends JavaPlugin {
         objectiveListener.setRoundService(roundService);
         objectiveListener.start();
         getServer().getPluginManager().registerEvents(objectiveListener, this);
+
+        // Initialize and register container protection listener
+        containerProtectionListener = new ContainerProtectionListener(regionService, teamService, objectiveService, configManager);
+        getServer().getPluginManager().registerEvents(containerProtectionListener, this);
+        getLogger().info("[TerrainGen] Container protection system initialized");
 
         // Register PlaceholderAPI expansion if available
         if (Bukkit.getPluginManager().getPlugin("PlaceholderAPI") != null) {
