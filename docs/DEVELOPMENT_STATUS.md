@@ -256,16 +256,28 @@ A team-based container permission system to prevent enemies from accessing frien
 
 A shared storage system for divisions, similar to Ender Chests but with physical vulnerability.
 
+> **📄 Full Design Document:** [DIVISION_DEPOT_DESIGN.md](./DIVISION_DEPOT_DESIGN.md)
+
 > **Key Difference from Regular Containers:** Division Depots do NOT follow normal capture rules. When a region is captured, regular containers become accessible, but Division Depots remain protected. Interacting with an enemy Division Depot opens YOUR division's storage, not theirs. A special raid tool is required to loot enemy depot contents.
 
 | Feature | Status | Description |
 |---------|--------|-------------|
-| **Shared Division Storage** | 📋 Planned | Functions like Ender Chest - all division members access same inventory |
-| **Physical Depot Block** | 📋 Planned | Must place a depot block in the world to access division storage |
-| **Custom Crafting Recipe** | 📋 Planned | Copper chest block with custom NBT data |
-| **Sector Capture Vulnerability** | 📋 Planned | Depots become raidable (not openable) when their sector is captured |
-| **Depot Removal Tool** | 📋 Planned | Special multipurpose tool to remove enemy depots in captured sectors |
-| **Partial Loot Drop** | 📋 Planned | Removing captured depot drops a set amount of items from storage |
+| **Shared Division Storage** | ✅ Complete | Functions like Ender Chest - all division members access same inventory (54 slots) |
+| **Physical Depot Block** | ✅ Complete | Copper block with custom NBT, item factory method |
+| **Depot Database Layer** | ✅ Complete | SQLite tables for depot locations, storage, and raid history |
+| **Depot Service Interface** | ✅ Complete | Full service API for depot operations (DepotService.java) |
+| **Depot Service Implementation** | ✅ Complete | SqlDepotService with placement, storage, and raid logic |
+| **Storage Persistence** | ✅ Complete | Item serialization/deserialization for database storage |
+| **Sector Capture Vulnerability** | ✅ Complete | Depots become raidable when their sector is captured |
+| **Division Raid Tool** | ✅ Complete | Special tool item with NBT tags (item factory method) |
+| **Raid Channel Mechanic** | ✅ Complete | Raid start/complete/cancel with tracking maps |
+| **Partial Loot Drop** | ✅ Complete | 30% of storage items drop on raid (configurable) |
+| **Division Notifications** | ✅ Complete | Alerts when depot is raided |
+| **Configuration Options** | ✅ Complete | Full config.yml section for depot settings |
+| **Depot Listener** | 📋 Planned | Event handlers for block place/break/interact |
+| **Vulnerability Particles** | 📋 Planned | Particle effects when depot is vulnerable |
+| **Crafting Recipes** | 📋 Planned | Register depot block and raid tool recipes |
+| **Admin Commands** | 📋 Planned | `/admin depot list/clear/give/givetool` |
 
 #### Depot Mechanics
 
@@ -422,10 +434,11 @@ src/main/java/org/flintstqne/entrenched/
 3. **Build Garrison Quarters** - Build barracks with 3+ beds
 
 ### Priority 2: Container & Depot System
-1. **Team Chest Protection** - Prevent enemies from opening team chests
-2. **Division Depot Block** - Custom craftable block for shared division storage
-3. **Depot Vulnerability** - Make depots raidable when sector is captured
-4. **Raid Tool** - Special tool to remove enemy depots and loot contents
+1. **Team Chest Protection** - ✅ Complete
+2. **Division Depot Block** - Custom craftable block for shared division storage (see [DIVISION_DEPOT_DESIGN.md](./DIVISION_DEPOT_DESIGN.md))
+3. **Depot Storage System** - Database tables, save/load inventory
+4. **Depot Vulnerability** - Make depots raidable when sector is captured
+5. **Raid Tool** - Special tool to raid enemy depots and loot contents
 
 ### Priority 3: Win Conditions
 1. Define win condition (capture all regions? home region?)

@@ -92,6 +92,60 @@ public final class DivisionDb implements AutoCloseable {
                   last_created_at INTEGER NOT NULL
                 )
                 """);
+
+            // Division Depot tables
+            st.executeUpdate("""
+                CREATE TABLE IF NOT EXISTS division_depot_locations (
+                  location_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  division_id INTEGER NOT NULL,
+                  round_id INTEGER NOT NULL,
+                  world TEXT NOT NULL,
+                  x INTEGER NOT NULL,
+                  y INTEGER NOT NULL,
+                  z INTEGER NOT NULL,
+                  placed_by TEXT NOT NULL,
+                  placed_at INTEGER NOT NULL,
+                  region_id TEXT NOT NULL,
+                  UNIQUE(world, x, y, z),
+                  FOREIGN KEY(division_id) REFERENCES divisions(division_id) ON DELETE CASCADE
+                )
+                """);
+
+            st.executeUpdate("""
+                CREATE TABLE IF NOT EXISTS division_depot_storage (
+                  storage_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  division_id INTEGER NOT NULL,
+                  round_id INTEGER NOT NULL,
+                  slot INTEGER NOT NULL,
+                  item_data BLOB,
+                  UNIQUE(division_id, round_id, slot),
+                  FOREIGN KEY(division_id) REFERENCES divisions(division_id) ON DELETE CASCADE
+                )
+                """);
+
+            st.executeUpdate("""
+                CREATE TABLE IF NOT EXISTS division_depot_raids (
+                  raid_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  depot_location_id INTEGER,
+                  victim_division_id INTEGER NOT NULL,
+                  raider_uuid TEXT NOT NULL,
+                  raider_division_id INTEGER,
+                  items_dropped INTEGER NOT NULL,
+                  raided_at INTEGER NOT NULL
+                )
+                """);
+
+            // Index for faster depot lookups by region
+            st.executeUpdate("""
+                CREATE INDEX IF NOT EXISTS idx_depot_locations_region 
+                ON division_depot_locations(region_id)
+                """);
+
+            // Index for faster depot lookups by division
+            st.executeUpdate("""
+                CREATE INDEX IF NOT EXISTS idx_depot_locations_division 
+                ON division_depot_locations(division_id)
+                """);
         }
     }
 
@@ -526,6 +580,377 @@ public final class DivisionDb implements AutoCloseable {
                 rs.getInt("z"),
                 rs.getString("created_by"),
                 rs.getLong("created_at")
+        );
+    }
+
+    // ==================== DEPOT METHODS ====================
+
+    /**
+     * Creates a depot location record.
+     */
+    public int createDepotLocation(int divisionId, int roundId, String world, int x, int y, int z,
+                                    String placedBy, String regionId) {
+        try (PreparedStatement ps = connection.prepareStatement(
+                "INSERT INTO division_depot_locations(division_id, round_id, world, x, y, z, placed_by, placed_at, region_id) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                Statement.RETURN_GENERATED_KEYS
+        )) {
+            ps.setInt(1, divisionId);
+            ps.setInt(2, roundId);
+            ps.setString(3, world);
+            ps.setInt(4, x);
+            ps.setInt(5, y);
+            ps.setInt(6, z);
+            ps.setString(7, placedBy);
+            ps.setLong(8, System.currentTimeMillis());
+            ps.setString(9, regionId);
+            ps.executeUpdate();
+
+            try (ResultSet rs = ps.getGeneratedKeys()) {
+                if (rs.next()) return rs.getInt(1);
+                throw new SQLException("Failed to get location_id");
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to create depot location", e);
+        }
+    }
+
+    /**
+     * Gets a depot at specific coordinates.
+     */
+    public Optional<DepotLocation> getDepotAt(String world, int x, int y, int z) {
+        try (PreparedStatement ps = connection.prepareStatement(
+                "SELECT * FROM division_depot_locations WHERE world = ? AND x = ? AND y = ? AND z = ?"
+        )) {
+            ps.setString(1, world);
+            ps.setInt(2, x);
+            ps.setInt(3, y);
+            ps.setInt(4, z);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) return Optional.empty();
+                return Optional.of(mapDepotLocation(rs));
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to get depot at location", e);
+        }
+    }
+
+    /**
+     * Gets all depots for a division.
+     */
+    public List<DepotLocation> getDepotsForDivision(int divisionId) {
+        try (PreparedStatement ps = connection.prepareStatement(
+                "SELECT * FROM division_depot_locations WHERE division_id = ? ORDER BY placed_at ASC"
+        )) {
+            ps.setInt(1, divisionId);
+            try (ResultSet rs = ps.executeQuery()) {
+                List<DepotLocation> depots = new ArrayList<>();
+                while (rs.next()) {
+                    depots.add(mapDepotLocation(rs));
+                }
+                return depots;
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to get depots for division", e);
+        }
+    }
+
+    /**
+     * Gets all depots in a region.
+     */
+    public List<DepotLocation> getDepotsInRegion(String regionId, int roundId) {
+        try (PreparedStatement ps = connection.prepareStatement(
+                "SELECT * FROM division_depot_locations WHERE region_id = ? AND round_id = ? ORDER BY placed_at ASC"
+        )) {
+            ps.setString(1, regionId);
+            ps.setInt(2, roundId);
+            try (ResultSet rs = ps.executeQuery()) {
+                List<DepotLocation> depots = new ArrayList<>();
+                while (rs.next()) {
+                    depots.add(mapDepotLocation(rs));
+                }
+                return depots;
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to get depots in region", e);
+        }
+    }
+
+    /**
+     * Gets all depots for a team in the current round.
+     */
+    public List<DepotLocation> getDepotsForTeam(String team, int roundId) {
+        try (PreparedStatement ps = connection.prepareStatement(
+                """
+                SELECT dl.* FROM division_depot_locations dl
+                JOIN divisions d ON dl.division_id = d.division_id
+                WHERE d.team = ? AND dl.round_id = ?
+                ORDER BY dl.placed_at ASC
+                """
+        )) {
+            ps.setString(1, team);
+            ps.setInt(2, roundId);
+            try (ResultSet rs = ps.executeQuery()) {
+                List<DepotLocation> depots = new ArrayList<>();
+                while (rs.next()) {
+                    depots.add(mapDepotLocation(rs));
+                }
+                return depots;
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to get depots for team", e);
+        }
+    }
+
+    /**
+     * Counts depots for a division.
+     */
+    public int countDepotsForDivision(int divisionId) {
+        try (PreparedStatement ps = connection.prepareStatement(
+                "SELECT COUNT(*) FROM division_depot_locations WHERE division_id = ?"
+        )) {
+            ps.setInt(1, divisionId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getInt(1) : 0;
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to count depots", e);
+        }
+    }
+
+    /**
+     * Deletes a depot location.
+     */
+    public void deleteDepotLocation(int locationId) {
+        try (PreparedStatement ps = connection.prepareStatement(
+                "DELETE FROM division_depot_locations WHERE location_id = ?"
+        )) {
+            ps.setInt(1, locationId);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to delete depot location", e);
+        }
+    }
+
+    /**
+     * Deletes a depot by coordinates.
+     */
+    public void deleteDepotAt(String world, int x, int y, int z) {
+        try (PreparedStatement ps = connection.prepareStatement(
+                "DELETE FROM division_depot_locations WHERE world = ? AND x = ? AND y = ? AND z = ?"
+        )) {
+            ps.setString(1, world);
+            ps.setInt(2, x);
+            ps.setInt(3, y);
+            ps.setInt(4, z);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to delete depot at location", e);
+        }
+    }
+
+    /**
+     * Deletes all depots for a division.
+     */
+    public void deleteDepotsForDivision(int divisionId) {
+        try (PreparedStatement ps = connection.prepareStatement(
+                "DELETE FROM division_depot_locations WHERE division_id = ?"
+        )) {
+            ps.setInt(1, divisionId);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to delete depots for division", e);
+        }
+    }
+
+    /**
+     * Deletes all depot locations for a round.
+     */
+    public void deleteDepotLocationsForRound(int roundId) {
+        try (PreparedStatement ps = connection.prepareStatement(
+                "DELETE FROM division_depot_locations WHERE round_id = ?"
+        )) {
+            ps.setInt(1, roundId);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to delete depot locations for round", e);
+        }
+    }
+
+    // ==================== DEPOT STORAGE METHODS ====================
+
+    /**
+     * Saves an item to depot storage.
+     */
+    public void saveDepotStorageSlot(int divisionId, int roundId, int slot, byte[] itemData) {
+        try (PreparedStatement ps = connection.prepareStatement(
+                "INSERT OR REPLACE INTO division_depot_storage(division_id, round_id, slot, item_data) VALUES(?, ?, ?, ?)"
+        )) {
+            ps.setInt(1, divisionId);
+            ps.setInt(2, roundId);
+            ps.setInt(3, slot);
+            ps.setBytes(4, itemData);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to save depot storage slot", e);
+        }
+    }
+
+    /**
+     * Gets all storage slots for a division.
+     */
+    public Map<Integer, byte[]> getDepotStorage(int divisionId, int roundId) {
+        try (PreparedStatement ps = connection.prepareStatement(
+                "SELECT slot, item_data FROM division_depot_storage WHERE division_id = ? AND round_id = ?"
+        )) {
+            ps.setInt(1, divisionId);
+            ps.setInt(2, roundId);
+            try (ResultSet rs = ps.executeQuery()) {
+                Map<Integer, byte[]> storage = new HashMap<>();
+                while (rs.next()) {
+                    int slot = rs.getInt("slot");
+                    byte[] data = rs.getBytes("item_data");
+                    if (data != null) {
+                        storage.put(slot, data);
+                    }
+                }
+                return storage;
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to get depot storage", e);
+        }
+    }
+
+    /**
+     * Clears all storage for a division.
+     */
+    public void clearDepotStorage(int divisionId, int roundId) {
+        try (PreparedStatement ps = connection.prepareStatement(
+                "DELETE FROM division_depot_storage WHERE division_id = ? AND round_id = ?"
+        )) {
+            ps.setInt(1, divisionId);
+            ps.setInt(2, roundId);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to clear depot storage", e);
+        }
+    }
+
+    /**
+     * Deletes all depot storage for a round.
+     */
+    public void deleteDepotStorageForRound(int roundId) {
+        try (PreparedStatement ps = connection.prepareStatement(
+                "DELETE FROM division_depot_storage WHERE round_id = ?"
+        )) {
+            ps.setInt(1, roundId);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to delete depot storage for round", e);
+        }
+    }
+
+    // ==================== DEPOT RAID METHODS ====================
+
+    /**
+     * Records a depot raid.
+     */
+    public int recordDepotRaid(Integer depotLocationId, int victimDivisionId, String raiderUuid,
+                                Integer raiderDivisionId, int itemsDropped) {
+        try (PreparedStatement ps = connection.prepareStatement(
+                "INSERT INTO division_depot_raids(depot_location_id, victim_division_id, raider_uuid, raider_division_id, items_dropped, raided_at) VALUES(?, ?, ?, ?, ?, ?)",
+                Statement.RETURN_GENERATED_KEYS
+        )) {
+            if (depotLocationId != null) {
+                ps.setInt(1, depotLocationId);
+            } else {
+                ps.setNull(1, java.sql.Types.INTEGER);
+            }
+            ps.setInt(2, victimDivisionId);
+            ps.setString(3, raiderUuid);
+            if (raiderDivisionId != null) {
+                ps.setInt(4, raiderDivisionId);
+            } else {
+                ps.setNull(4, java.sql.Types.INTEGER);
+            }
+            ps.setInt(5, itemsDropped);
+            ps.setLong(6, System.currentTimeMillis());
+            ps.executeUpdate();
+
+            try (ResultSet rs = ps.getGeneratedKeys()) {
+                if (rs.next()) return rs.getInt(1);
+                throw new SQLException("Failed to get raid_id");
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to record depot raid", e);
+        }
+    }
+
+    /**
+     * Gets the last raid time on a division's depots.
+     */
+    public Optional<Long> getLastRaidOnDivision(int victimDivisionId) {
+        try (PreparedStatement ps = connection.prepareStatement(
+                "SELECT MAX(raided_at) as last_raid FROM division_depot_raids WHERE victim_division_id = ?"
+        )) {
+            ps.setInt(1, victimDivisionId);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    long lastRaid = rs.getLong("last_raid");
+                    if (!rs.wasNull()) {
+                        return Optional.of(lastRaid);
+                    }
+                }
+                return Optional.empty();
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to get last raid time", e);
+        }
+    }
+
+    /**
+     * Gets total items lost by a division to raids.
+     */
+    public int getTotalItemsLostToRaids(int victimDivisionId) {
+        try (PreparedStatement ps = connection.prepareStatement(
+                "SELECT SUM(items_dropped) as total FROM division_depot_raids WHERE victim_division_id = ?"
+        )) {
+            ps.setInt(1, victimDivisionId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getInt("total") : 0;
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to get total items lost", e);
+        }
+    }
+
+    /**
+     * Gets total raids by a player.
+     */
+    public int getRaidCountByPlayer(String raiderUuid) {
+        try (PreparedStatement ps = connection.prepareStatement(
+                "SELECT COUNT(*) FROM division_depot_raids WHERE raider_uuid = ?"
+        )) {
+            ps.setString(1, raiderUuid);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getInt(1) : 0;
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to get raid count", e);
+        }
+    }
+
+    private DepotLocation mapDepotLocation(ResultSet rs) throws SQLException {
+        return new DepotLocation(
+                rs.getInt("location_id"),
+                rs.getInt("division_id"),
+                rs.getInt("round_id"),
+                rs.getString("world"),
+                rs.getInt("x"),
+                rs.getInt("y"),
+                rs.getInt("z"),
+                java.util.UUID.fromString(rs.getString("placed_by")),
+                rs.getLong("placed_at"),
+                rs.getString("region_id")
         );
     }
 

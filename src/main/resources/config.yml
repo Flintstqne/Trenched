@@ -132,6 +132,62 @@ parties:
     # Show party members on BlueMap
     bluemap-markers: true
 
+# Division Depot Settings
+division-depots:
+  # Enable division depot system
+  enabled: true
+
+  # Storage size (slots, max 54 for double chest)
+  storage-size: 54
+
+  # Maximum depots per division
+  max-per-division: 5
+
+  # Minimum distance between depots (blocks)
+  min-distance-between-depots: 32
+
+  # Raid settings
+  raiding:
+    # Time to raid a depot (seconds)
+    channel-time-seconds: 5
+
+    # Percentage of items dropped on raid (0.0 - 1.0)
+    loot-drop-percentage: 0.3
+
+    # Minimum items to drop (even if percentage = 0)
+    min-items-dropped: 3
+
+    # Maximum items dropped per raid
+    max-items-dropped: 27
+
+    # Cooldown between raids on same division's depots (minutes)
+    raid-cooldown-minutes: 30
+
+  # Placement restrictions
+  placement:
+    # Allow placing in contested regions
+    allow-in-contested: true
+
+    # Allow placing in neutral regions (adjacent to owned)
+    allow-in-neutral: false
+
+    # Allow placing in enemy regions
+    allow-in-enemy: false
+
+  # Visual settings
+  visuals:
+    # Particle type for placed depots
+    particle-type: "SOUL_FIRE_FLAME"
+
+    # Particle type for vulnerable depots
+    vulnerable-particle-type: "DRIP_LAVA"
+
+    # Show particles
+    show-particles: true
+
+    # Particle refresh interval (ticks)
+    particle-interval-ticks: 40
+
 # Region Capture Settings
 regions:
   # Influence point thresholds
