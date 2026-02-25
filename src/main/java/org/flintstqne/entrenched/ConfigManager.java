@@ -230,6 +230,60 @@ public final class ConfigManager {
         return config.getBoolean("parties.features.compass-to-party", true);
     }
 
+    // ==================== Division Depot Settings ====================
+
+    public boolean isDepotSystemEnabled() {
+        return config.getBoolean("division-depots.enabled", true);
+    }
+
+    public String getDepotBlockMaterial() {
+        return config.getString("division-depots.block-material", "CHEST");
+    }
+
+    public int getDepotStorageSize() {
+        return config.getInt("division-depots.storage-size", 54);
+    }
+
+    public int getDepotMaxPerDivision() {
+        return config.getInt("division-depots.max-per-division", 5);
+    }
+
+    public int getDepotMinDistance() {
+        return config.getInt("division-depots.min-distance-between-depots", 32);
+    }
+
+    public int getDepotRaidChannelSeconds() {
+        return config.getInt("division-depots.raiding.channel-time-seconds", 5);
+    }
+
+    public double getDepotLootDropPercentage() {
+        return config.getDouble("division-depots.raiding.loot-drop-percentage", 0.3);
+    }
+
+    public int getDepotMinItemsDropped() {
+        return config.getInt("division-depots.raiding.min-items-dropped", 3);
+    }
+
+    public int getDepotMaxItemsDropped() {
+        return config.getInt("division-depots.raiding.max-items-dropped", 27);
+    }
+
+    public int getDepotRaidCooldownMinutes() {
+        return config.getInt("division-depots.raiding.raid-cooldown-minutes", 30);
+    }
+
+    public boolean isDepotAllowInContested() {
+        return config.getBoolean("division-depots.placement.allow-in-contested", true);
+    }
+
+    public boolean isDepotAllowInNeutral() {
+        return config.getBoolean("division-depots.placement.allow-in-neutral", false);
+    }
+
+    public boolean isDepotAllowInEnemy() {
+        return config.getBoolean("division-depots.placement.allow-in-enemy", false);
+    }
+
     // ==================== Region Capture Settings ====================
 
     // Influence thresholds
@@ -252,6 +306,11 @@ public final class ConfigManager {
 
     public double getRegionKillSamePlayerReduction() {
         return config.getDouble("regions.enemy-actions.kill-same-player-reduction", 0.5);
+    }
+
+    // Defense rewards
+    public double getDefenseObjectiveReward() {
+        return config.getDouble("regions.defense.objective-reward", 75);
     }
 
     public int getRegionBannerPlacePoints() {

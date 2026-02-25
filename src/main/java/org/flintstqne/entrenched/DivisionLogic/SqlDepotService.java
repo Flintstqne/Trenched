@@ -7,10 +7,7 @@ import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.Inventory;
-import org.bukkit.inventory.InventoryHolder;
 import org.bukkit.inventory.ItemStack;
-import org.bukkit.inventory.meta.ItemMeta;
-import org.bukkit.persistence.PersistentDataContainer;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.util.io.BukkitObjectInputStream;
@@ -41,8 +38,9 @@ public class SqlDepotService implements DepotService {
     private final TeamService teamService;
     private final RoundService roundService;
     private final ConfigManager configManager;
+    private final DepotItem depotItem;
 
-    // NBT keys for depot items
+    // NBT keys for depot items (also available via DepotItem)
     private final NamespacedKey depotTypeKey;
     private final NamespacedKey divisionIdKey;
     private final NamespacedKey teamKey;
@@ -55,6 +53,9 @@ public class SqlDepotService implements DepotService {
 
     // Cache of open depot inventories: player UUID -> division ID
     private final Map<UUID, Integer> openDepotInventories = new ConcurrentHashMap<>();
+
+    // Track last raid drop count per player (for message display)
+    private final Map<UUID, Integer> lastRaidDropCount = new ConcurrentHashMap<>();
 
     // Storage size (54 = double chest)
     private static final int STORAGE_SIZE = 54;
@@ -71,62 +72,72 @@ public class SqlDepotService implements DepotService {
         this.roundService = roundService;
         this.configManager = configManager;
 
-        // Initialize NBT keys
-        this.depotTypeKey = new NamespacedKey(plugin, "depot_type");
-        this.divisionIdKey = new NamespacedKey(plugin, "division_id");
-        this.teamKey = new NamespacedKey(plugin, "team");
-        this.raidToolKey = new NamespacedKey(plugin, "raid_tool");
+        // Initialize DepotItem factory
+        this.depotItem = new DepotItem(plugin);
+
+        // Initialize NBT keys (use same keys as DepotItem for consistency)
+        this.depotTypeKey = depotItem.getDepotTypeKey();
+        this.divisionIdKey = depotItem.getDivisionIdKey();
+        this.teamKey = depotItem.getTeamKey();
+        this.raidToolKey = depotItem.getRaidToolKey();
+    }
+
+    /**
+     * Gets the DepotItem factory for creating depot blocks and raid tools.
+     */
+    public DepotItem getDepotItemFactory() {
+        return depotItem;
     }
 
     // ==================== Configuration Helpers ====================
 
     @Override
     public boolean isEnabled() {
-        return plugin.getConfig().getBoolean("division-depots.enabled", true);
+        return configManager.isDepotSystemEnabled();
     }
 
     @Override
     public int getMaxDepotsPerDivision() {
-        return plugin.getConfig().getInt("division-depots.max-per-division", 5);
+        return configManager.getDepotMaxPerDivision();
     }
 
     @Override
     public int getMinDistanceBetweenDepots() {
-        return plugin.getConfig().getInt("division-depots.min-distance-between-depots", 32);
+        return configManager.getDepotMinDistance();
     }
 
     @Override
     public int getRaidChannelSeconds() {
-        return plugin.getConfig().getInt("division-depots.raiding.channel-time-seconds", 5);
+        return configManager.getDepotRaidChannelSeconds();
     }
 
     @Override
     public double getLootDropPercentage() {
-        return plugin.getConfig().getDouble("division-depots.raiding.loot-drop-percentage", 0.3);
+        return configManager.getDepotLootDropPercentage();
     }
 
     private int getMinItemsDropped() {
-        return plugin.getConfig().getInt("division-depots.raiding.min-items-dropped", 3);
+        return configManager.getDepotMinItemsDropped();
     }
 
     private int getMaxItemsDropped() {
-        return plugin.getConfig().getInt("division-depots.raiding.max-items-dropped", 27);
+        return configManager.getDepotMaxItemsDropped();
     }
 
     private int getRaidCooldownMinutes() {
-        return plugin.getConfig().getInt("division-depots.raiding.raid-cooldown-minutes", 30);
+        return configManager.getDepotRaidCooldownMinutes();
     }
 
     private boolean allowInContested() {
-        return plugin.getConfig().getBoolean("division-depots.placement.allow-in-contested", true);
+        return configManager.isDepotAllowInContested();
     }
 
     private boolean allowInNeutral() {
-        return plugin.getConfig().getBoolean("division-depots.placement.allow-in-neutral", false);
+        return configManager.isDepotAllowInNeutral();
     }
 
     private boolean allowInEnemy() {
-        return plugin.getConfig().getBoolean("division-depots.placement.allow-in-enemy", false);
+        return configManager.isDepotAllowInEnemy();
     }
 
     private int getCurrentRoundId() {
@@ -148,6 +159,18 @@ public class SqlDepotService implements DepotService {
         }
 
         Division division = divisionOpt.get();
+
+        // Check if player is an officer or commander in their division
+        Optional<DivisionMember> memberOpt = divisionService.getMembership(player.getUniqueId());
+        if (memberOpt.isEmpty()) {
+            return PlaceResult.NO_DIVISION;
+        }
+
+        DivisionRole role = memberOpt.get().role();
+        if (role != DivisionRole.OFFICER && role != DivisionRole.COMMANDER) {
+            return PlaceResult.INSUFFICIENT_RANK;
+        }
+
         int roundId = getCurrentRoundId();
         if (roundId < 0) {
             return PlaceResult.INVALID_REGION;
@@ -545,6 +568,9 @@ public class SqlDepotService implements DepotService {
         // Calculate and drop loot
         int itemsDropped = dropLoot(depot, depotLocation);
 
+        // Store drop count for the raider (so listener can retrieve it)
+        lastRaidDropCount.put(raider.getUniqueId(), itemsDropped);
+
         // Record the raid
         db.recordDepotRaid(depot.locationId(), depot.divisionId(), raider.getUniqueId().toString(),
                 raiderDivisionId, itemsDropped);
@@ -674,6 +700,11 @@ public class SqlDepotService implements DepotService {
         return Math.min(toDrop, totalItems);
     }
 
+    @Override
+    public int getLastRaidDropCount(UUID raiderUuid) {
+        return lastRaidDropCount.getOrDefault(raiderUuid, 0);
+    }
+
     // ==================== Cleanup ====================
 
     @Override
@@ -722,28 +753,12 @@ public class SqlDepotService implements DepotService {
 
     @Override
     public boolean isDepotItem(ItemStack item) {
-        if (item == null || !item.hasItemMeta()) return false;
-
-        ItemMeta meta = item.getItemMeta();
-        if (meta == null) return false;
-
-        PersistentDataContainer pdc = meta.getPersistentDataContainer();
-        return pdc.has(depotTypeKey, PersistentDataType.STRING) &&
-               "division_depot".equals(pdc.get(depotTypeKey, PersistentDataType.STRING));
+        return depotItem.isDepotBlock(item);
     }
 
     @Override
     public boolean isRaidTool(ItemStack item) {
-        if (item == null || !item.hasItemMeta()) return false;
-
-        ItemMeta meta = item.getItemMeta();
-        if (meta == null) return false;
-
-        PersistentDataContainer pdc = meta.getPersistentDataContainer();
-        if (!pdc.has(raidToolKey, PersistentDataType.BYTE)) return false;
-
-        Byte value = pdc.get(raidToolKey, PersistentDataType.BYTE);
-        return value != null && value == (byte) 1;
+        return depotItem.isRaidTool(item);
     }
 
     @Override
@@ -752,65 +767,26 @@ public class SqlDepotService implements DepotService {
         if (divisionOpt.isEmpty()) {
             return null;
         }
-
-        Division division = divisionOpt.get();
-        Optional<String> teamOpt = teamService.getPlayerTeam(player.getUniqueId());
-        String team = teamOpt.orElse("unknown");
-
-        ItemStack item = new ItemStack(Material.COPPER_BLOCK);
-        ItemMeta meta = item.getItemMeta();
-        if (meta == null) return item;
-
-        // Set display name
-        ChatColor teamColor = "red".equalsIgnoreCase(team) ? ChatColor.RED : ChatColor.BLUE;
-        meta.setDisplayName(teamColor + "" + ChatColor.BOLD + "Division Depot " +
-                ChatColor.GRAY + division.formattedTag());
-
-        // Set lore
-        List<String> lore = new ArrayList<>();
-        lore.add(ChatColor.GRAY + "Shared storage for your division.");
-        lore.add("");
-        lore.add(ChatColor.YELLOW + "Place to create an access point");
-        lore.add(ChatColor.YELLOW + "to your division's shared storage.");
-        lore.add("");
-        lore.add(ChatColor.RED + "⚠ Vulnerable when region is captured!");
-        meta.setLore(lore);
-
-        // Set NBT data
-        PersistentDataContainer pdc = meta.getPersistentDataContainer();
-        pdc.set(depotTypeKey, PersistentDataType.STRING, "division_depot");
-        pdc.set(divisionIdKey, PersistentDataType.INTEGER, division.divisionId());
-        pdc.set(teamKey, PersistentDataType.STRING, team);
-
-        item.setItemMeta(meta);
-        return item;
+        return depotItem.createDepotBlock(divisionOpt.get());
     }
 
     @Override
     public ItemStack createRaidTool() {
-        ItemStack item = new ItemStack(Material.GOLDEN_HOE);
-        ItemMeta meta = item.getItemMeta();
-        if (meta == null) return item;
+        return depotItem.createRaidTool();
+    }
 
-        // Set display name
-        meta.setDisplayName(ChatColor.RED + "" + ChatColor.BOLD + "Division Raid Tool");
+    /**
+     * Gets the division ID from a depot block item.
+     */
+    public int getDivisionIdFromItem(ItemStack item) {
+        return depotItem.getDivisionIdFromItem(item);
+    }
 
-        // Set lore
-        List<String> lore = new ArrayList<>();
-        lore.add(ChatColor.GRAY + "Use on enemy Division Depots");
-        lore.add(ChatColor.GRAY + "in captured territories to raid");
-        lore.add(ChatColor.GRAY + "their division's storage.");
-        lore.add("");
-        lore.add(ChatColor.YELLOW + "Right-click on vulnerable depot");
-        lore.add(ChatColor.YELLOW + "to begin raiding process.");
-        meta.setLore(lore);
-
-        // Set NBT data
-        PersistentDataContainer pdc = meta.getPersistentDataContainer();
-        pdc.set(raidToolKey, PersistentDataType.BYTE, (byte) 1);
-
-        item.setItemMeta(meta);
-        return item;
+    /**
+     * Gets the team from a depot block item.
+     */
+    public String getTeamFromItem(ItemStack item) {
+        return depotItem.getTeamFromItem(item);
     }
 
     // ==================== Serialization Helpers ====================
@@ -837,39 +813,6 @@ public class SqlDepotService implements DepotService {
         } catch (IOException | ClassNotFoundException e) {
             plugin.getLogger().log(Level.WARNING, "Failed to deserialize item", e);
             return null;
-        }
-    }
-
-    // ==================== Custom Inventory Holder ====================
-
-    /**
-     * Custom inventory holder for depot storage.
-     */
-    public static class DepotInventoryHolder implements InventoryHolder {
-        private final int divisionId;
-        private final int roundId;
-        private Inventory inventory;
-
-        public DepotInventoryHolder(int divisionId, int roundId) {
-            this.divisionId = divisionId;
-            this.roundId = roundId;
-        }
-
-        public int getDivisionId() {
-            return divisionId;
-        }
-
-        public int getRoundId() {
-            return roundId;
-        }
-
-        public void setInventory(Inventory inventory) {
-            this.inventory = inventory;
-        }
-
-        @Override
-        public Inventory getInventory() {
-            return inventory != null ? inventory : Bukkit.createInventory(this, STORAGE_SIZE, "Division Depot");
         }
     }
 }

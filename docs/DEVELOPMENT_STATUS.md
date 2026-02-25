@@ -207,6 +207,8 @@ The objectives system provides SETTLEMENT objectives (for neutral regions) and R
 | **Defender Alerts** | ✅ Complete | Defenders see alerts for enemy objectives in progress |
 | **Objective Command** | ✅ Complete | `/obj` shows active objectives, coordinates, progress |
 | **Objective Particles** | ✅ Complete | Particle effects at objective locations |
+| **Adjacency Filtering** | ✅ Complete | Objectives only shown for regions adjacent to team territory |
+| **Cleaner Error Messages** | ✅ Complete | Single-line messages for blocked actions (owned regions, non-adjacent) |
 
 ---
 
@@ -263,7 +265,10 @@ A shared storage system for divisions, similar to Ender Chests but with physical
 | Feature | Status | Description |
 |---------|--------|-------------|
 | **Shared Division Storage** | ✅ Complete | Functions like Ender Chest - all division members access same inventory (54 slots) |
-| **Physical Depot Block** | ✅ Complete | Copper block with custom NBT, item factory method |
+| **Physical Depot Block** | ✅ Complete | Configurable block material (default: CHEST) with custom NBT |
+| **Depot Item Factory** | ✅ Complete | DepotItem.java - creates depot blocks and raid tools with NBT |
+| **Depot Inventory Holder** | ✅ Complete | DepotInventoryHolder.java - custom holder for storage tracking |
+| **Crafting Recipes** | ✅ Complete | DepotRecipes.java - registers shaped recipes for depot and raid tool |
 | **Depot Database Layer** | ✅ Complete | SQLite tables for depot locations, storage, and raid history |
 | **Depot Service Interface** | ✅ Complete | Full service API for depot operations (DepotService.java) |
 | **Depot Service Implementation** | ✅ Complete | SqlDepotService with placement, storage, and raid logic |
@@ -274,10 +279,17 @@ A shared storage system for divisions, similar to Ender Chests but with physical
 | **Partial Loot Drop** | ✅ Complete | 30% of storage items drop on raid (configurable) |
 | **Division Notifications** | ✅ Complete | Alerts when depot is raided |
 | **Configuration Options** | ✅ Complete | Full config.yml section for depot settings |
-| **Depot Listener** | 📋 Planned | Event handlers for block place/break/interact |
-| **Vulnerability Particles** | 📋 Planned | Particle effects when depot is vulnerable |
-| **Crafting Recipes** | 📋 Planned | Register depot block and raid tool recipes |
-| **Admin Commands** | 📋 Planned | `/admin depot list/clear/give/givetool` |
+| **Depot Listener** | ✅ Complete | DepotListener.java - block place/break/interact events |
+| **Container Protection Integration** | ✅ Complete | ContainerProtectionListener excludes depot blocks |
+| **Raid Channeling UI** | ✅ Complete | Title countdown during raid with movement check |
+| **Main Plugin Integration** | ✅ Complete | DepotService, DepotRecipes, DepotListener wired in Trenched.java |
+| **ConfigManager Integration** | ✅ Complete | All depot settings accessible via ConfigManager methods |
+| **Particle Effects** | ✅ Complete | DepotParticleManager.java - ambient, vulnerable, placement, raid effects |
+| **Ender Chest Behavior** | ✅ Complete | Any depot opens YOUR division storage, regardless of who placed it |
+| **Admin Commands** | ✅ Complete | `/admin depot list/info/give/givetool/clear/remove` |
+| **Officer/Commander Only** | ✅ Complete | Only officers and commanders can place depots |
+| **Depot Limit Display** | ✅ Complete | Shows current/max depot count on placement |
+| **Region Capture Alerts** | 📋 Planned | Notify division when their depots become vulnerable |
 
 #### Depot Mechanics
 

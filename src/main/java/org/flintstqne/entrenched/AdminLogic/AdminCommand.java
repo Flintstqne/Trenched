@@ -14,6 +14,11 @@ import org.bukkit.entity.Player;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.flintstqne.entrenched.ConfigManager;
 import org.flintstqne.entrenched.BlueMapHook.RegionRenderer;
+import org.flintstqne.entrenched.DivisionLogic.DepotItem;
+import org.flintstqne.entrenched.DivisionLogic.DepotLocation;
+import org.flintstqne.entrenched.DivisionLogic.DepotService;
+import org.flintstqne.entrenched.DivisionLogic.Division;
+import org.flintstqne.entrenched.DivisionLogic.DivisionService;
 import org.flintstqne.entrenched.MeritLogic.MeritRank;
 import org.flintstqne.entrenched.MeritLogic.MeritService;
 import org.flintstqne.entrenched.MeritLogic.PlayerMeritData;
@@ -58,6 +63,9 @@ public final class AdminCommand implements CommandExecutor, TabCompleter {
     private final MeritService meritService;
     private ObjectiveService objectiveService;
     private NewRoundInitializer newRoundInitializer;
+    private DepotService depotService;
+    private DepotItem depotItem;
+    private DivisionService divisionService;
 
     public AdminCommand(JavaPlugin plugin, RoundService roundService, TeamService teamService, RegionService regionService,
                         RoadService roadService, DeathListener deathListener, PhaseScheduler phaseScheduler,
@@ -80,6 +88,15 @@ public final class AdminCommand implements CommandExecutor, TabCompleter {
 
     public void setObjectiveService(ObjectiveService objectiveService) {
         this.objectiveService = objectiveService;
+    }
+
+    public void setDepotService(DepotService depotService, DepotItem depotItem) {
+        this.depotService = depotService;
+        this.depotItem = depotItem;
+    }
+
+    public void setDivisionService(DivisionService divisionService) {
+        this.divisionService = divisionService;
     }
 
     @Override
@@ -118,6 +135,9 @@ public final class AdminCommand implements CommandExecutor, TabCompleter {
 
             // Objective commands
             case "objective", "obj" -> handleObjective(sender, args);
+
+            // Depot commands
+            case "depot" -> handleDepot(sender, args);
 
             // Server commands
             case "reload" -> handleReload(sender);
@@ -236,7 +256,7 @@ public final class AdminCommand implements CommandExecutor, TabCompleter {
 
     private boolean handleRegion(CommandSender sender, String[] args) {
         if (args.length < 2) {
-            sender.sendMessage(ChatColor.YELLOW + "Usage: /admin region <capture|reset|setstate|addip|info>");
+            sender.sendMessage(ChatColor.YELLOW + "Usage: /admin region <capture|reset|setstate|setowner|addip|info>");
             return true;
         }
 
@@ -373,6 +393,55 @@ public final class AdminCommand implements CommandExecutor, TabCompleter {
                     long remaining = (status.fortifiedUntil() - System.currentTimeMillis()) / 1000;
                     sender.sendMessage(ChatColor.GRAY + "Fortified for: " + ChatColor.AQUA + remaining + "s");
                 }
+                yield true;
+            }
+            case "setowner" -> {
+                // Set region owner to a team and state to OWNED (no fortification)
+                // This allows regular gameplay to resume immediately
+                if (args.length < 4) {
+                    sender.sendMessage(ChatColor.RED + "Usage: /admin region setowner <regionId> <red|blue>");
+                    yield true;
+                }
+                String regionId = args[2].toUpperCase();
+                String team = args[3].toLowerCase();
+                if (!team.equals("red") && !team.equals("blue")) {
+                    sender.sendMessage(ChatColor.RED + "Team must be: red or blue");
+                    yield true;
+                }
+
+                // Check if region exists
+                Optional<RegionStatus> existingStatus = regionService.getRegionStatus(regionId);
+                if (existingStatus.isEmpty()) {
+                    sender.sendMessage(ChatColor.RED + "Region not found: " + regionId);
+                    yield true;
+                }
+
+                // Expire any existing objectives
+                if (objectiveService != null) {
+                    objectiveService.expireObjectivesInRegion(regionId);
+                }
+
+                // Set owner and state to OWNED (no fortification timer)
+                regionService.setRegionOwner(regionId, team);
+                regionService.setRegionState(regionId, RegionState.OWNED);
+
+                // Clear influence points to start fresh
+                regionService.resetInfluence(regionId);
+
+                // Update BlueMap
+                if (regionRenderer != null) {
+                    Bukkit.getScheduler().runTaskLater(plugin, () -> {
+                        World world = roundService.getGameWorld().orElse(null);
+                        if (world != null) {
+                            regionRenderer.scheduleUpdateForOverworld(world);
+                        }
+                    }, 5L);
+                }
+
+                sender.sendMessage(configManager.getPrefix() + ChatColor.GREEN + "Region " + regionId +
+                        " is now owned by " + (team.equals("red") ? ChatColor.RED : ChatColor.BLUE) + team.toUpperCase() +
+                        ChatColor.GREEN + " (OWNED state, no fortification)");
+                sender.sendMessage(ChatColor.GRAY + "Regular gameplay can now resume - enemies can contest this region.");
                 yield true;
             }
             default -> {
@@ -2161,6 +2230,332 @@ public final class AdminCommand implements CommandExecutor, TabCompleter {
         return true;
     }
 
+    // ==================== DEPOT COMMANDS ====================
+
+    private boolean handleDepot(CommandSender sender, String[] args) {
+        if (depotService == null) {
+            sender.sendMessage(ChatColor.RED + "Depot system is not enabled.");
+            return true;
+        }
+
+        if (args.length < 2) {
+            sender.sendMessage(ChatColor.YELLOW + "Usage: /admin depot <list|info|give|givetool|clear|remove>");
+            return true;
+        }
+
+        String action = args[1].toLowerCase();
+
+        switch (action) {
+            case "list" -> handleDepotList(sender, args);
+            case "info" -> handleDepotInfo(sender, args);
+            case "give" -> handleDepotGive(sender, args);
+            case "givetool" -> handleDepotGiveTool(sender, args);
+            case "clear" -> handleDepotClear(sender, args);
+            case "remove" -> handleDepotRemove(sender, args);
+            default -> sender.sendMessage(ChatColor.RED + "Unknown depot action: " + action);
+        }
+
+        return true;
+    }
+
+    private void handleDepotList(CommandSender sender, String[] args) {
+        // /admin depot list [team|region|division]
+        if (args.length < 3) {
+            sender.sendMessage(ChatColor.YELLOW + "Usage: /admin depot list <team|region|division> <name>");
+            sender.sendMessage(ChatColor.GRAY + "Examples:");
+            sender.sendMessage(ChatColor.GRAY + "  /admin depot list team red");
+            sender.sendMessage(ChatColor.GRAY + "  /admin depot list region B2");
+            sender.sendMessage(ChatColor.GRAY + "  /admin depot list division 1");
+            return;
+        }
+
+        String type = args[2].toLowerCase();
+
+        if (args.length < 4 && !type.equals("all")) {
+            sender.sendMessage(ChatColor.RED + "Please specify a " + type + " name.");
+            return;
+        }
+
+        List<DepotLocation> depots;
+        String label;
+
+        switch (type) {
+            case "team" -> {
+                String team = args[3].toLowerCase();
+                depots = depotService.getDepotsForTeam(team);
+                label = "Team " + team.toUpperCase();
+            }
+            case "region" -> {
+                String regionId = args[3].toUpperCase();
+                depots = depotService.getDepotsInRegion(regionId);
+                label = "Region " + regionId;
+            }
+            case "division" -> {
+                try {
+                    int divisionId = Integer.parseInt(args[3]);
+                    depots = depotService.getDepotsForDivision(divisionId);
+                    label = "Division #" + divisionId;
+                } catch (NumberFormatException e) {
+                    sender.sendMessage(ChatColor.RED + "Invalid division ID: " + args[3]);
+                    return;
+                }
+            }
+            case "all" -> {
+                List<DepotLocation> red = depotService.getDepotsForTeam("red");
+                List<DepotLocation> blue = depotService.getDepotsForTeam("blue");
+                depots = new ArrayList<>(red);
+                depots.addAll(blue);
+                label = "All Depots";
+            }
+            default -> {
+                sender.sendMessage(ChatColor.RED + "Invalid type. Use: team, region, division, or all");
+                return;
+            }
+        }
+
+        sender.sendMessage(ChatColor.GOLD + "=== " + label + " Depots (" + depots.size() + ") ===");
+
+        if (depots.isEmpty()) {
+            sender.sendMessage(ChatColor.GRAY + "No depots found.");
+            return;
+        }
+
+        for (DepotLocation depot : depots) {
+            String divName = divisionService != null ?
+                    divisionService.getDivision(depot.divisionId())
+                            .map(Division::formattedTag).orElse("Unknown") : "Div#" + depot.divisionId();
+            boolean vulnerable = depotService.isDepotVulnerable(depot);
+
+            sender.sendMessage(ChatColor.GRAY + " - " +
+                    ChatColor.WHITE + depot.regionId() + " " +
+                    ChatColor.GRAY + "(" + depot.x() + "," + depot.y() + "," + depot.z() + ") " +
+                    ChatColor.YELLOW + divName + " " +
+                    (vulnerable ? ChatColor.RED + "[VULNERABLE]" : ChatColor.GREEN + "[PROTECTED]"));
+        }
+    }
+
+    private void handleDepotInfo(CommandSender sender, String[] args) {
+        // /admin depot info - shows depot at player location
+        if (!(sender instanceof Player player)) {
+            sender.sendMessage(ChatColor.RED + "This command can only be used by players.");
+            return;
+        }
+
+        // Check the block the player is looking at
+        Block targetBlock = player.getTargetBlockExact(5);
+        if (targetBlock == null) {
+            sender.sendMessage(ChatColor.RED + "Look at a depot block to get info.");
+            return;
+        }
+
+        Optional<DepotLocation> depotOpt = depotService.getDepotAt(targetBlock.getLocation());
+        if (depotOpt.isEmpty()) {
+            sender.sendMessage(ChatColor.RED + "That block is not a division depot.");
+            return;
+        }
+
+        DepotLocation depot = depotOpt.get();
+        String divName = divisionService != null ?
+                divisionService.getDivision(depot.divisionId())
+                        .map(d -> d.formattedTag() + " (" + d.name() + ")").orElse("Unknown") :
+                "Division #" + depot.divisionId();
+
+        sender.sendMessage(ChatColor.GOLD + "=== Depot Info ===");
+        sender.sendMessage(ChatColor.GRAY + "Location: " + ChatColor.WHITE + depot.x() + ", " + depot.y() + ", " + depot.z());
+        sender.sendMessage(ChatColor.GRAY + "Region: " + ChatColor.WHITE + depot.regionId());
+        sender.sendMessage(ChatColor.GRAY + "Division: " + ChatColor.WHITE + divName);
+        sender.sendMessage(ChatColor.GRAY + "Placed By: " + ChatColor.WHITE + depot.placedBy());
+        sender.sendMessage(ChatColor.GRAY + "Placed At: " + ChatColor.WHITE + new Date(depot.placedAt()));
+        sender.sendMessage(ChatColor.GRAY + "Vulnerable: " +
+                (depotService.isDepotVulnerable(depot) ? ChatColor.RED + "YES" : ChatColor.GREEN + "NO"));
+    }
+
+    private void handleDepotGive(CommandSender sender, String[] args) {
+        // /admin depot give <player> [amount]
+        if (depotItem == null) {
+            sender.sendMessage(ChatColor.RED + "Depot item factory not available.");
+            return;
+        }
+
+        if (args.length < 3) {
+            sender.sendMessage(ChatColor.YELLOW + "Usage: /admin depot give <player> [amount]");
+            return;
+        }
+
+        Player target = Bukkit.getPlayer(args[2]);
+        if (target == null) {
+            sender.sendMessage(ChatColor.RED + "Player not found: " + args[2]);
+            return;
+        }
+
+        int amount = 1;
+        if (args.length >= 4) {
+            try {
+                amount = Integer.parseInt(args[3]);
+                amount = Math.min(64, Math.max(1, amount));
+            } catch (NumberFormatException e) {
+                sender.sendMessage(ChatColor.RED + "Invalid amount: " + args[3]);
+                return;
+            }
+        }
+
+        var item = depotItem.createGenericDepotBlock();
+        if (item != null) {
+            item.setAmount(amount);
+            target.getInventory().addItem(item);
+            sender.sendMessage(configManager.getPrefix() + ChatColor.GREEN + "Gave " + amount +
+                    " Division Depot block(s) to " + target.getName());
+            target.sendMessage(configManager.getPrefix() + ChatColor.GREEN + "You received " + amount +
+                    " Division Depot block(s) from an admin.");
+        } else {
+            sender.sendMessage(ChatColor.RED + "Failed to create depot item.");
+        }
+    }
+
+    private void handleDepotGiveTool(CommandSender sender, String[] args) {
+        // /admin depot givetool <player> [amount]
+        if (depotItem == null) {
+            sender.sendMessage(ChatColor.RED + "Depot item factory not available.");
+            return;
+        }
+
+        if (args.length < 3) {
+            sender.sendMessage(ChatColor.YELLOW + "Usage: /admin depot givetool <player> [amount]");
+            return;
+        }
+
+        Player target = Bukkit.getPlayer(args[2]);
+        if (target == null) {
+            sender.sendMessage(ChatColor.RED + "Player not found: " + args[2]);
+            return;
+        }
+
+        int amount = 1;
+        if (args.length >= 4) {
+            try {
+                amount = Integer.parseInt(args[3]);
+                amount = Math.min(64, Math.max(1, amount));
+            } catch (NumberFormatException e) {
+                sender.sendMessage(ChatColor.RED + "Invalid amount: " + args[3]);
+                return;
+            }
+        }
+
+        var item = depotItem.createRaidTool();
+        if (item != null) {
+            item.setAmount(amount);
+            target.getInventory().addItem(item);
+            sender.sendMessage(configManager.getPrefix() + ChatColor.GREEN + "Gave " + amount +
+                    " Raid Tool(s) to " + target.getName());
+            target.sendMessage(configManager.getPrefix() + ChatColor.GREEN + "You received " + amount +
+                    " Raid Tool(s) from an admin.");
+        } else {
+            sender.sendMessage(ChatColor.RED + "Failed to create raid tool.");
+        }
+    }
+
+    private void handleDepotClear(CommandSender sender, String[] args) {
+        // /admin depot clear <team|region|division|all> <name>
+        if (args.length < 3) {
+            sender.sendMessage(ChatColor.YELLOW + "Usage: /admin depot clear <team|region|division|all> [name]");
+            return;
+        }
+
+        String type = args[2].toLowerCase();
+        List<DepotLocation> depotsToRemove;
+        String label;
+
+        switch (type) {
+            case "team" -> {
+                if (args.length < 4) {
+                    sender.sendMessage(ChatColor.RED + "Specify team: red or blue");
+                    return;
+                }
+                String team = args[3].toLowerCase();
+                depotsToRemove = depotService.getDepotsForTeam(team);
+                label = "team " + team;
+            }
+            case "region" -> {
+                if (args.length < 4) {
+                    sender.sendMessage(ChatColor.RED + "Specify region ID");
+                    return;
+                }
+                String regionId = args[3].toUpperCase();
+                depotsToRemove = depotService.getDepotsInRegion(regionId);
+                label = "region " + regionId;
+            }
+            case "division" -> {
+                if (args.length < 4) {
+                    sender.sendMessage(ChatColor.RED + "Specify division ID");
+                    return;
+                }
+                try {
+                    int divisionId = Integer.parseInt(args[3]);
+                    depotsToRemove = depotService.getDepotsForDivision(divisionId);
+                    label = "division #" + divisionId;
+                } catch (NumberFormatException e) {
+                    sender.sendMessage(ChatColor.RED + "Invalid division ID");
+                    return;
+                }
+            }
+            case "all" -> {
+                List<DepotLocation> red = depotService.getDepotsForTeam("red");
+                List<DepotLocation> blue = depotService.getDepotsForTeam("blue");
+                depotsToRemove = new ArrayList<>(red);
+                depotsToRemove.addAll(blue);
+                label = "ALL depots";
+            }
+            default -> {
+                sender.sendMessage(ChatColor.RED + "Invalid type. Use: team, region, division, or all");
+                return;
+            }
+        }
+
+        int count = depotsToRemove.size();
+        for (DepotLocation depot : depotsToRemove) {
+            // Remove the physical block
+            World world = Bukkit.getWorld(depot.world());
+            if (world != null) {
+                world.getBlockAt(depot.x(), depot.y(), depot.z()).setType(Material.AIR);
+            }
+            // Remove from database
+            depotService.breakDepot(null, new Location(world, depot.x(), depot.y(), depot.z()));
+        }
+
+        sender.sendMessage(configManager.getPrefix() + ChatColor.GREEN + "Cleared " + count + " depot(s) from " + label);
+    }
+
+    private void handleDepotRemove(CommandSender sender, String[] args) {
+        // /admin depot remove - removes depot player is looking at
+        if (!(sender instanceof Player player)) {
+            sender.sendMessage(ChatColor.RED + "This command can only be used by players.");
+            return;
+        }
+
+        Block targetBlock = player.getTargetBlockExact(5);
+        if (targetBlock == null) {
+            sender.sendMessage(ChatColor.RED + "Look at a depot block to remove it.");
+            return;
+        }
+
+        Optional<DepotLocation> depotOpt = depotService.getDepotAt(targetBlock.getLocation());
+        if (depotOpt.isEmpty()) {
+            sender.sendMessage(ChatColor.RED + "That block is not a division depot.");
+            return;
+        }
+
+        DepotLocation depot = depotOpt.get();
+
+        // Remove the block
+        targetBlock.setType(Material.AIR);
+
+        // Remove from database
+        depotService.breakDepot(null, targetBlock.getLocation());
+
+        sender.sendMessage(configManager.getPrefix() + ChatColor.GREEN + "Removed depot at " +
+                depot.x() + ", " + depot.y() + ", " + depot.z());
+    }
+
     private boolean handleStatus(CommandSender sender) {
         sender.sendMessage(ChatColor.GOLD + "=== Server Status ===");
 
@@ -2192,11 +2587,12 @@ public final class AdminCommand implements CommandExecutor, TabCompleter {
         sender.sendMessage(ChatColor.GOLD + "=== Admin Commands ===");
         sender.sendMessage(ChatColor.YELLOW + "/admin round <new|end|info>" + ChatColor.GRAY + " - Round management");
         sender.sendMessage(ChatColor.YELLOW + "/admin phase <advance|set|info>" + ChatColor.GRAY + " - Phase management");
-        sender.sendMessage(ChatColor.YELLOW + "/admin region <capture|reset|setstate|addip|info>" + ChatColor.GRAY + " - Region control");
+        sender.sendMessage(ChatColor.YELLOW + "/admin region <capture|reset|setstate|setowner|addip|info>" + ChatColor.GRAY + " - Region control");
         sender.sendMessage(ChatColor.YELLOW + "/admin team <setspawn|wipe|info>" + ChatColor.GRAY + " - Team management");
         sender.sendMessage(ChatColor.YELLOW + "/admin player <setteam|respawn|tp>" + ChatColor.GRAY + " - Player control");
         sender.sendMessage(ChatColor.YELLOW + "/admin supply <recalculate|info|clear>" + ChatColor.GRAY + " - Supply lines");
         sender.sendMessage(ChatColor.YELLOW + "/admin merit <give|givetokens|set|reset|info|leaderboard>" + ChatColor.GRAY + " - Merit system");
+        sender.sendMessage(ChatColor.YELLOW + "/admin depot <list|info|give|givetool|clear|remove>" + ChatColor.GRAY + " - Division depots");
         sender.sendMessage(ChatColor.YELLOW + "/admin reload" + ChatColor.GRAY + " - Reload config");
         sender.sendMessage(ChatColor.YELLOW + "/admin status" + ChatColor.GRAY + " - Server status");
     }
@@ -2213,17 +2609,18 @@ public final class AdminCommand implements CommandExecutor, TabCompleter {
 
         if (args.length == 1) {
             // Main subcommands
-            completions.addAll(Arrays.asList("round", "phase", "region", "team", "player", "supply", "merit", "reload", "status"));
+            completions.addAll(Arrays.asList("round", "phase", "region", "team", "player", "supply", "merit", "depot", "reload", "status"));
         } else if (args.length == 2) {
             String sub = args[0].toLowerCase();
             switch (sub) {
                 case "round" -> completions.addAll(Arrays.asList("new", "end", "info"));
                 case "phase" -> completions.addAll(Arrays.asList("advance", "set", "info"));
-                case "region" -> completions.addAll(Arrays.asList("capture", "reset", "setstate", "addip", "info"));
+                case "region" -> completions.addAll(Arrays.asList("capture", "reset", "setstate", "setowner", "addip", "info"));
                 case "team" -> completions.addAll(Arrays.asList("setspawn", "wipe", "info"));
                 case "player" -> completions.addAll(Arrays.asList("setteam", "respawn", "tp"));
                 case "supply" -> completions.addAll(Arrays.asList("recalculate", "info", "debug", "diagnose", "gaptest", "borderinfo", "roadpath", "scan", "scantest", "scanborder", "worldscan", "register", "clear"));
                 case "merit" -> completions.addAll(Arrays.asList("give", "givetokens", "set", "reset", "info", "leaderboard"));
+                case "depot" -> completions.addAll(Arrays.asList("list", "info", "give", "givetool", "clear", "remove"));
             }
         } else if (args.length == 3) {
             String sub = args[0].toLowerCase();
@@ -2244,7 +2641,7 @@ public final class AdminCommand implements CommandExecutor, TabCompleter {
                 }
                 case "region" -> {
                     if (action.equals("capture") || action.equals("reset") || action.equals("setstate") ||
-                            action.equals("addip") || action.equals("info")) {
+                            action.equals("setowner") || action.equals("addip") || action.equals("info")) {
                         completions.addAll(getAllRegionIds());
                         if (action.equals("reset")) {
                             completions.add("all");
@@ -2282,6 +2679,16 @@ public final class AdminCommand implements CommandExecutor, TabCompleter {
                         completions.addAll(Arrays.asList("5", "10", "20", "50"));
                     }
                 }
+                case "depot" -> {
+                    if (action.equals("list") || action.equals("clear")) {
+                        completions.addAll(Arrays.asList("team", "region", "division", "all"));
+                    } else if (action.equals("give") || action.equals("givetool")) {
+                        // Player names
+                        for (Player p : Bukkit.getOnlinePlayers()) {
+                            completions.add(p.getName());
+                        }
+                    }
+                }
             }
         } else if (args.length == 4) {
             String sub = args[0].toLowerCase();
@@ -2289,7 +2696,7 @@ public final class AdminCommand implements CommandExecutor, TabCompleter {
 
             switch (sub) {
                 case "region" -> {
-                    if (action.equals("capture") || action.equals("addip")) {
+                    if (action.equals("capture") || action.equals("setowner") || action.equals("addip")) {
                         completions.addAll(Arrays.asList("red", "blue"));
                     } else if (action.equals("setstate")) {
                         for (RegionState state : RegionState.values()) {
@@ -2313,6 +2720,21 @@ public final class AdminCommand implements CommandExecutor, TabCompleter {
                     if (action.equals("give") || action.equals("givetokens") || action.equals("set")) {
                         // Suggest common amounts
                         completions.addAll(Arrays.asList("1", "5", "10", "25", "50", "100"));
+                    }
+                }
+                case "depot" -> {
+                    String typeArg = args[2].toLowerCase();
+                    if (action.equals("list") || action.equals("clear")) {
+                        if (typeArg.equals("team")) {
+                            completions.addAll(Arrays.asList("red", "blue"));
+                        } else if (typeArg.equals("region")) {
+                            completions.addAll(getAllRegionIds());
+                        } else if (typeArg.equals("division")) {
+                            completions.addAll(Arrays.asList("1", "2", "3", "4", "5"));
+                        }
+                    } else if (action.equals("give") || action.equals("givetool")) {
+                        // Amounts
+                        completions.addAll(Arrays.asList("1", "2", "5", "10"));
                     }
                 }
             }

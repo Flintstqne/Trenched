@@ -1,35 +1,49 @@
 # Division Depot System - Implementation Design
 
 **Created:** February 24, 2026  
-**Status:** Planning Phase
+**Status:** ✅ Implemented (Phase 1-5 Complete)
 
 ---
 
 ## 🎯 Overview
 
-The Division Depot is a shared storage system for divisions, functioning like an Ender Chest but with physical vulnerability mechanics tied to region control. Unlike regular containers that become fully accessible when a region is captured, Division Depots require a special raid tool to access enemy contents.
+The Division Depot is a shared storage system for divisions, functioning **exactly like an Ender Chest**:
+- **Any player** with a division can use **any depot block** (even enemy depots)
+- The depot opens **their own division's inventory**, not the placer's
+- Physical vulnerability mechanics are tied to region control
+- Enemy depot contents can only be accessed via a special **Raid Tool**
 
 ---
 
 ## 📋 Core Concepts
 
+### Ender Chest-Like Behavior
+
+| Action | Result |
+|--------|--------|
+| Player A (Div 1) uses Depot placed by Div 1 | Opens Div 1 storage |
+| Player A (Div 1) uses Depot placed by Div 2 (same team) | Opens Div 1 storage |
+| Player A (Div 1) uses Depot placed by enemy Div 3 | Opens Div 1 storage |
+| Player with NO division uses any depot | Denied - must be in a division |
+
 ### Key Differences from Regular Containers
 
 | Feature | Regular Containers | Division Depots |
 |---------|-------------------|-----------------|
-| Protection | Protected in owned regions | Protected in owned regions |
-| On Region Capture | Enemies can fully access | Enemies CANNOT access |
+| Protection | Protected in owned regions | Always protected from direct access |
+| On Region Capture | Enemies can fully access | Enemies see THEIR OWN storage |
 | Enemy Interaction | Open/break freely | Opens YOUR division's storage |
 | Raiding | Direct access | Requires special raid tool |
 | Contents | Per-container | Shared across all division depots |
+| Who Can Use | Owner/team only | Anyone with a division |
 
 ### Design Philosophy
 
-1. **Shared Storage**: All Division Depots for a division access the same virtual inventory
+1. **Ender Chest Model**: Any depot block = access your division's shared storage
 2. **Physical Access Points**: Must place depot blocks in the world to use
-3. **Not 100% Safe**: Encourages strategic placement, not frontline territories
-4. **Effort-Based Raiding**: Enemies must capture region AND use special tool
-5. **Partial Loot**: Raiding drops some items, not everything
+3. **Not 100% Safe**: Vulnerable depots can be raided with special tool
+4. **Effort-Based Raiding**: Enemies must capture region AND use raid tool
+5. **Partial Loot**: Raiding drops some items (configurable %), not everything
 
 ---
 
@@ -37,11 +51,15 @@ The Division Depot is a shared storage system for divisions, functioning like an
 
 ### 1. Division Depot Block
 
-**Block Type:** Custom-textured block using Copper Block with NBT data
+**Block Type:** Configurable via config.yml (default: CHEST)
 
 ```yaml
-Material: COPPER_BLOCK (or custom via ItemsAdder/Oraxen if available)
-Custom NBT:
+# config.yml
+division-depots:
+  block-material: "CHEST"  # Options: CHEST, BARREL, COPPER_BLOCK, any valid block
+```
+
+**Custom NBT Data:**
   - depot_type: "division_depot"
   - division_id: <int>
   - team: "red" | "blue"
@@ -367,53 +385,143 @@ src/main/java/org/flintstqne/entrenched/
 
 ## 🔄 Implementation Order
 
-### Phase 1: Database & Data Layer
-1. Add depot tables to `DivisionDb.java`
-2. Create `DepotLocation.java` record
-3. Create `DepotService.java` interface
-4. Implement `SqlDepotService.java`
+### Phase 1: Database & Data Layer ✅ COMPLETE
+1. ✅ Add depot tables to `DivisionDb.java`
+2. ✅ Create `DepotLocation.java` record
+3. ✅ Create `DepotService.java` interface
+4. ✅ Implement `SqlDepotService.java`
 
-### Phase 2: Depot Block & Storage
-5. Create `DepotItem.java` (factory for craftable depot block)
-6. Create `DepotInventoryHolder.java` (custom inventory for storage)
-7. Add crafting recipe registration
-8. Implement storage save/load in SqlDepotService
+### Phase 2: Depot Block & Storage ✅ COMPLETE
+5. ✅ Create `DepotItem.java` (factory for craftable depot block)
+6. ✅ Create `DepotInventoryHolder.java` (custom inventory for storage)
+7. ✅ Create `DepotRecipes.java` (crafting recipe registration)
+8. ✅ Implement storage save/load in SqlDepotService
 
-### Phase 3: Listener & Interaction
-9. Create `DepotListener.java`
-10. Implement placement validation
-11. Implement storage opening/closing
-12. Implement same-team vs enemy interaction logic
+### Phase 3: Listener & Interaction ✅ COMPLETE
+9. ✅ Create `DepotListener.java`
+10. ✅ Implement placement validation
+11. ✅ Implement storage opening/closing
+12. ✅ Implement same-team vs enemy interaction logic
+13. ✅ Update `ContainerProtectionListener.java` to exclude depots
 
-### Phase 4: Vulnerability & Raiding
-13. Create `RaidTool.java` (factory for raid tool item)
-14. Add crafting recipe for raid tool
-15. Implement vulnerability detection (check region ownership)
-16. Implement raid channeling mechanic
-17. Implement loot drop on successful raid
+### Phase 4: Vulnerability & Raiding ✅ COMPLETE
+14. ✅ Raid Tool already created in DepotItem.java
+15. ✅ Crafting recipe for raid tool in DepotRecipes.java
+16. ✅ Vulnerability detection in SqlDepotService (isDepotVulnerable)
+17. ✅ Raid channeling mechanic in DepotListener (startRaidChannel)
+18. ✅ Loot drop on successful raid in SqlDepotService
 
-### Phase 5: Integration & Polish
-18. Update `ContainerProtectionListener.java` to exclude depots
-19. Add region capture notifications for vulnerable depots
-20. Add division notifications (placement, vulnerability, raids)
-21. Add particle effects
-22. Add configuration options
-23. Update DEVELOPMENT_STATUS.md
+### Phase 5: Integration & Polish ✅ COMPLETE
+19. ✅ ContainerProtectionListener excludes depots
+20. 📋 Region capture notifications for vulnerable depots (TODO)
+21. ✅ Division notifications (placement, raids)
+22. ✅ Particle effects (DepotParticleManager.java)
+23. ✅ Configuration options in ConfigManager
+24. ✅ DEVELOPMENT_STATUS.md updated
+25. ✅ Main plugin integration in Trenched.java
+26. ✅ Ender chest-like behavior (any depot opens YOUR division storage)
 
 ---
 
-## ⚠️ Edge Cases to Handle
+## ⚠️ Edge Cases & Behavior
 
-1. **Player leaves division**: Depot remains, other members can still use
-2. **Division disbanded**: All depots destroyed, contents dropped
-3. **Server restart**: Depot locations and storage persist in database
-4. **Region flip-flops**: Vulnerability updates when ownership changes
-5. **Depot in home region**: Never vulnerable (home regions can't be captured)
-6. **Multiple raiders**: First to complete channel gets loot
-7. **Raider dies during channel**: Channel cancelled
-8. **Empty depot raided**: Still destroyed, no loot drops
-9. **Depot under placed block**: Prevent placement above if blocked?
-10. **Division reaches depot limit**: Clear error message
+### Handled/Implemented
+
+| Scenario | Behavior | Status |
+|----------|----------|--------|
+| **Server restart** | Depot locations and storage persist in SQLite database. On server restart, all depots are still in place and storage contents are intact. | ✅ Implemented |
+| **Player leaves division** | N/A - Depots function like Ender Chests. The depot block remains, and any player with a division can still use it to access their own storage. | ✅ Works by design |
+| **Division disbanded** | N/A - The physical depot block remains in the world. Other players can still use it to access their own division storage. | ✅ Works by design |
+| **Depot in home region** | Never vulnerable because home regions cannot be captured. This is intentional - home regions are safe zones. | ✅ Works by design |
+| **Empty depot raided** | Depot is still destroyed, no loot drops. The raid is considered "successful" even with nothing to loot. | ✅ Implemented |
+| **Raider dies during channel** | Channel is cancelled. The depot remains intact. | ✅ Implemented |
+
+### Region Flip-Flops: Dynamic Vulnerability
+
+**How it works:**
+
+Vulnerability is checked **in real-time** based on current region ownership, NOT stored as a depot property.
+
+```
+Example scenario:
+1. Red team places depot in region B2 (Red owns B2) → NOT vulnerable
+2. Blue team captures B2 → Depot is NOW vulnerable (checked on interaction)
+3. Red team recaptures B2 → Depot is NO LONGER vulnerable
+4. Blue captures B2 again → Depot is vulnerable again
+```
+
+**Code logic (`isDepotVulnerable`):**
+```java
+// Get depot's team from division
+String depotTeam = division.team();
+
+// Check current region ownership
+RegionStatus status = regionService.getRegionStatus(depot.regionId());
+
+// Vulnerable if ENEMY owns the region
+if (status.ownerTeam() != null && !status.ownerTeam().equals(depotTeam)) {
+    return true;  // VULNERABLE
+}
+return false;  // PROTECTED
+```
+
+**Key point:** There's no "vulnerability flag" stored. Every time someone interacts with a depot or the particle system checks, it queries the **current** region ownership.
+
+### Multiple Raiders: Channel System
+
+**How raid channeling works:**
+
+1. **Start Raid:** Player right-clicks vulnerable depot with Raid Tool
+   - System checks: Is depot vulnerable? Is player on enemy team? Is someone already raiding?
+   - If valid, player is added to `activeRaids` tracking map
+   - 5-second countdown begins with title display
+
+2. **During Channel (5 seconds):**
+   - Player sees countdown titles: "⚔ RAIDING ⚔ - 5 seconds remaining", etc.
+   - Player must stay within 2 blocks of starting position
+   - Player must keep Raid Tool equipped
+   - If player moves too far, unequips tool, or goes offline → raid cancelled
+
+3. **Completion:**
+   - First player to complete the channel gets the loot
+   - 30% of stored items drop on the ground
+   - Depot block is destroyed
+   - Raiding division is notified
+
+4. **If someone else tries to raid the same depot:**
+   - They receive error: "Someone else is already raiding this depot!"
+   - Only one raider per depot at a time
+
+### Division Depot Limit
+
+**Default limit: 5 depots per division** (configurable in `config.yml`)
+
+```yaml
+division-depots:
+  max-per-division: 5
+```
+
+**Who can place depots:**
+- Only **Officers** and **Commanders** can place Division Depots
+- Regular members can USE any depot but cannot place them
+- Error message for non-officers: "Only Officers and Commanders can place division depots!"
+
+**Behavior when placing:**
+- On success: "Division Depot placed! (3/5 depots)" - shows current count
+- When limit reached: "Your division has reached the maximum depot limit! (5/5)"
+- Additional hint: "Remove an existing depot to place a new one."
+
+**Why have a limit?**
+- Prevents depot spam across the map
+- Encourages strategic placement decisions
+- Balance: More depots = more access points but more vulnerability risk
+
+### Removed/N/A Edge Cases
+
+| Scenario | Why N/A |
+|----------|---------|
+| "Depot under placed block" | Not relevant - depot blocks work like any other block. You can place blocks above/around them normally. |
+| "Prevent placement if blocked" | Not implemented - no special restrictions beyond standard Minecraft block placement rules. |
 
 ---
 

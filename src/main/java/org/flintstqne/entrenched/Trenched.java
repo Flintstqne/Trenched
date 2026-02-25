@@ -67,6 +67,13 @@ public final class Trenched extends JavaPlugin {
     private ObjectiveListener objectiveListener;
     private ContainerProtectionListener containerProtectionListener;
 
+    // Division Depot System
+    private DepotService depotService;
+    private DepotItem depotItem;
+    private DepotRecipes depotRecipes;
+    private DepotListener depotListener;
+    private DepotParticleManager depotParticleManager;
+
     @Override
     public void onEnable() {
         // Initialize configuration first
@@ -236,6 +243,28 @@ public final class Trenched extends JavaPlugin {
         getServer().getPluginManager().registerEvents(containerProtectionListener, this);
         getLogger().info("[TerrainGen] Container protection system initialized");
 
+        // Initialize Division Depot System
+        if (configManager.isDepotSystemEnabled()) {
+            depotItem = new DepotItem(this);
+            depotService = new SqlDepotService(this, divisionDb, divisionService, regionService, teamService, roundService, configManager);
+            depotRecipes = new DepotRecipes(this, depotItem);
+            depotRecipes.registerRecipes();
+            depotListener = new DepotListener(this, depotService, divisionService, teamService, regionService, configManager, depotItem);
+            getServer().getPluginManager().registerEvents(depotListener, this);
+
+            // Initialize and start particle manager for depot visual effects
+            depotParticleManager = new DepotParticleManager(this, depotService, divisionService, teamService, configManager);
+            depotParticleManager.start();
+            depotListener.setParticleManager(depotParticleManager);
+
+            // Connect depot service to container protection (so it can exclude depot blocks)
+            containerProtectionListener.setDepotService(depotService, depotItem);
+
+            getLogger().info("[Trenched] Division Depot system initialized");
+        } else {
+            getLogger().info("[Trenched] Division Depot system disabled in config");
+        }
+
         // Register PlaceholderAPI expansion if available
         if (Bukkit.getPluginManager().getPlugin("PlaceholderAPI") != null) {
             new org.flintstqne.entrenched.Utils.PlaceholderExpansion(meritService, teamService, divisionService, configManager).register();
@@ -327,6 +356,10 @@ public final class Trenched extends JavaPlugin {
         );
         adminCommand.setNewRoundInitializer(newRoundInitializer);
         adminCommand.setObjectiveService(objectiveService);
+        adminCommand.setDivisionService(divisionService);
+        if (depotService != null && depotItem != null) {
+            adminCommand.setDepotService(depotService, depotItem);
+        }
         var adminCmd = Objects.requireNonNull(getCommand("admin"), "Command `admin` missing from plugin.yml");
         adminCmd.setExecutor(adminCommand);
         adminCmd.setTabCompleter(adminCommand);
@@ -566,6 +599,14 @@ public final class Trenched extends JavaPlugin {
         if (objectiveListener != null) objectiveListener.stop();
         if (regionNotificationManager != null) regionNotificationManager.stop();
         if (phaseScheduler != null) phaseScheduler.stop();
+
+        // Unregister depot recipes
+        if (depotRecipes != null) depotRecipes.unregisterRecipes();
+
+        // Stop depot particle manager
+        if (depotParticleManager != null) depotParticleManager.stop();
+
+        // Close databases
         if (objectiveDb != null) objectiveDb.close();
         if (roadDb != null) roadDb.close();
         if (regionDb != null) regionDb.close();
@@ -588,6 +629,27 @@ public final class Trenched extends JavaPlugin {
      */
     public PhaseScheduler getPhaseScheduler() {
         return phaseScheduler;
+    }
+
+    /**
+     * Gets the DepotService instance, or null if depots are disabled.
+     */
+    public DepotService getDepotService() {
+        return depotService;
+    }
+
+    /**
+     * Gets the DepotItem factory, or null if depots are disabled.
+     */
+    public DepotItem getDepotItem() {
+        return depotItem;
+    }
+
+    /**
+     * Checks if the Division Depot system is enabled.
+     */
+    public boolean isDepotSystemEnabled() {
+        return depotService != null;
     }
 
     /**

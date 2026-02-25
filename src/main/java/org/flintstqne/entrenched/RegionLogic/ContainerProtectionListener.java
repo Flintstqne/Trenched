@@ -12,6 +12,8 @@ import org.bukkit.event.block.BlockBreakEvent;
 import org.bukkit.event.block.BlockPlaceEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
 import org.flintstqne.entrenched.ConfigManager;
+import org.flintstqne.entrenched.DivisionLogic.DepotItem;
+import org.flintstqne.entrenched.DivisionLogic.DepotService;
 import org.flintstqne.entrenched.ObjectiveLogic.ObjectiveCategory;
 import org.flintstqne.entrenched.ObjectiveLogic.ObjectiveService;
 import org.flintstqne.entrenched.ObjectiveLogic.ObjectiveType;
@@ -20,13 +22,15 @@ import org.flintstqne.entrenched.TeamLogic.TeamService;
 
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Prevents enemies from opening or breaking team containers (chests, barrels, etc.)
  * unless they have a valid "Destroy Supply Cache" objective targeting that container.
+ *
+ * NOTE: Division Depots (COPPER_BLOCK with NBT) are excluded from this listener.
+ * They are handled separately by DepotListener.
  */
 public class ContainerProtectionListener implements Listener {
 
@@ -34,6 +38,10 @@ public class ContainerProtectionListener implements Listener {
     private final TeamService teamService;
     private final ObjectiveService objectiveService;
     private final ConfigManager configManager;
+
+    // Optional depot service - if set, copper blocks are checked for depot status
+    private DepotService depotService;
+    private DepotItem depotItem;
 
     // Track which team placed which container: "x,y,z" -> team
     private final Map<String, String> containerOwnership = new ConcurrentHashMap<>();
@@ -48,6 +56,15 @@ public class ContainerProtectionListener implements Listener {
         this.teamService = teamService;
         this.objectiveService = objectiveService;
         this.configManager = configManager;
+    }
+
+    /**
+     * Sets the depot service for checking if blocks are depots.
+     * Call this after DepotService is initialized.
+     */
+    public void setDepotService(DepotService depotService, DepotItem depotItem) {
+        this.depotService = depotService;
+        this.depotItem = depotItem;
     }
 
     /**
@@ -110,6 +127,9 @@ public class ContainerProtectionListener implements Listener {
         Block block = event.getClickedBlock();
         if (block == null || !isContainer(block.getType())) return;
 
+        // Skip depot blocks - they are handled by DepotListener
+        if (isDepotBlock(block)) return;
+
         Player player = event.getPlayer();
 
         // Check if player is on a team
@@ -162,6 +182,9 @@ public class ContainerProtectionListener implements Listener {
     public void onBlockBreak(BlockBreakEvent event) {
         Block block = event.getBlock();
         if (!isContainer(block.getType())) return;
+
+        // Skip depot blocks - they are handled by DepotListener
+        if (isDepotBlock(block)) return;
 
         Player player = event.getPlayer();
 
@@ -244,6 +267,22 @@ public class ContainerProtectionListener implements Listener {
                 // The objective system will handle completion detection
                 return true;
             }
+        }
+        return false;
+    }
+
+    /**
+     * Checks if a block is a Division Depot.
+     * Depots are handled by DepotListener, not this listener.
+     */
+    private boolean isDepotBlock(Block block) {
+        // If depot item is available, check the configured material
+        if (depotItem != null && block.getType() != depotItem.getDepotMaterial()) {
+            return false;
+        }
+        // If depot service is available, check if this is a registered depot location
+        if (depotService != null) {
+            return depotService.getDepotAt(block.getLocation()).isPresent();
         }
         return false;
     }

@@ -515,13 +515,13 @@ public class SqlObjectiveService implements ObjectiveService {
             return CompleteResult.OBJECTIVE_EXPIRED;
         }
 
-        // Check if the region is already owned (not contested) - can't complete objectives in owned regions
+        // Check if the region can be contested
         Optional<RegionStatus> regionStatusOpt = regionService.getRegionStatus(objective.regionId());
         if (regionStatusOpt.isPresent()) {
             RegionStatus regionStatus = regionStatusOpt.get();
-            // If the region is OWNED (not NEUTRAL, not CONTESTED), block objective completion
-            if (regionStatus.state() == RegionState.OWNED ||
-                regionStatus.state() == RegionState.FORTIFIED ||
+
+            // FORTIFIED and PROTECTED regions cannot have objectives completed
+            if (regionStatus.state() == RegionState.FORTIFIED ||
                 regionStatus.state() == RegionState.PROTECTED) {
                 // Notify the player that objective completion is blocked (with debounce)
                 long now = System.currentTimeMillis();
@@ -530,10 +530,28 @@ public class SqlObjectiveService implements ObjectiveService {
                     lastRegionOwnedWarning.put(playerUuid, now);
                     org.bukkit.entity.Player player = org.bukkit.Bukkit.getPlayer(playerUuid);
                     if (player != null) {
+                        String reason = regionStatus.state() == RegionState.PROTECTED ?
+                            "This is a protected home region." :
+                            "This region is fortified and cannot be attacked yet.";
                         player.sendMessage(net.kyori.adventure.text.Component.text(config.getPrefix())
-                                .append(net.kyori.adventure.text.Component.text("Action blocked! ")
-                                        .color(net.kyori.adventure.text.format.NamedTextColor.RED))
-                                .append(net.kyori.adventure.text.Component.text("Objectives cannot be completed in this region - it is already captured and owned.")
+                                .append(net.kyori.adventure.text.Component.text(reason)
+                                        .color(net.kyori.adventure.text.format.NamedTextColor.GRAY)));
+                    }
+                }
+                return CompleteResult.REGION_ALREADY_OWNED;
+            }
+
+            // For OWNED regions: RAID objectives are allowed (they contest the region)
+            // SETTLEMENT objectives are NOT allowed in owned regions
+            if (regionStatus.state() == RegionState.OWNED && !objective.type().isRaid()) {
+                long now = System.currentTimeMillis();
+                Long lastWarning = lastRegionOwnedWarning.get(playerUuid);
+                if (lastWarning == null || (now - lastWarning) > REGION_OWNED_WARNING_COOLDOWN_MS) {
+                    lastRegionOwnedWarning.put(playerUuid, now);
+                    org.bukkit.entity.Player player = org.bukkit.Bukkit.getPlayer(playerUuid);
+                    if (player != null) {
+                        player.sendMessage(net.kyori.adventure.text.Component.text(config.getPrefix())
+                                .append(net.kyori.adventure.text.Component.text("This region is already captured - settlement objectives disabled.")
                                         .color(net.kyori.adventure.text.format.NamedTextColor.GRAY)));
                     }
                 }
@@ -640,17 +658,21 @@ public class SqlObjectiveService implements ObjectiveService {
                     String defenderTeam = statusOpt.get().ownerTeam();
                     if (defenderTeam == null) continue;
 
-                    // Check if this was an enemy (defender) chest
+                    // Player must be attacking (not the defender)
+                    if (defenderTeam.equalsIgnoreCase(team)) continue;
+
+                    // Remove from tracking if it was tracked
                     String trackingKey = regionId + ":" + defenderTeam;
                     Set<String> enemyChests = enemyChestTracking.get(trackingKey);
-
-                    if (enemyChests != null && enemyChests.remove(blockKey)) {
-                        // This was an enemy chest - complete the objective
-                        completeObjective(obj.id(), playerUuid, team);
-                        plugin.getLogger().info("[Objectives] Supply Cache destroyed by " + playerUuid +
-                                " at " + x + "," + y + "," + z + " in " + regionId);
-                        break;
+                    if (enemyChests != null) {
+                        enemyChests.remove(blockKey);
                     }
+
+                    // Complete the objective - any chest broken by attacker counts
+                    completeObjective(obj.id(), playerUuid, team);
+                    plugin.getLogger().info("[Objectives] Supply Cache destroyed by " + playerUuid +
+                            " at " + x + "," + y + "," + z + " in " + regionId);
+                    break;
                 }
             }
         }
@@ -879,12 +901,65 @@ public class SqlObjectiveService implements ObjectiveService {
                         if (killerTeamOpt.isPresent() && !killerTeamOpt.get().equalsIgnoreCase(defenderTeam)) {
                             // Valid assassination - complete objective
                             completeObjective(obj.id(), killerUuid, killerTeamOpt.get());
+
+                            // Remove glowing effect from the victim immediately
+                            org.bukkit.entity.Player victim = org.bukkit.Bukkit.getPlayer(victimUuid);
+                            if (victim != null) {
+                                victim.removePotionEffect(org.bukkit.potion.PotionEffectType.GLOWING);
+                            }
+
                             plugin.getLogger().info("[Objectives] Assassination completed! " + killerUuid +
                                     " killed commander/officer " + victimUuid + " in " + regionId);
                         }
                     }
                 }
                 break;
+            }
+
+            // Check for Hold Ground defense - if defender kills attacker who had progress
+            if (obj.type() == ObjectiveType.RAID_HOLD_GROUND) {
+                Optional<RegionStatus> statusOpt = regionService.getRegionStatus(regionId);
+                if (statusOpt.isEmpty()) continue;
+
+                String defenderTeam = statusOpt.get().ownerTeam();
+                if (defenderTeam == null) continue;
+
+                if (teamService != null) {
+                    Optional<String> killerTeamOpt = teamService.getPlayerTeam(killerUuid);
+                    Optional<String> victimTeamOpt = teamService.getPlayerTeam(victimUuid);
+
+                    // Check if defender killed attacker
+                    if (killerTeamOpt.isPresent() && victimTeamOpt.isPresent() &&
+                        killerTeamOpt.get().equalsIgnoreCase(defenderTeam) &&
+                        !victimTeamOpt.get().equalsIgnoreCase(defenderTeam)) {
+
+                        // Check if victim had hold ground progress
+                        int victimProgress = db.getHoldGroundProgress(obj.id(), victimUuid);
+                        if (victimProgress > 0) {
+                            // Clear their progress
+                            db.clearHoldGroundProgressForPlayer(obj.id(), victimUuid);
+
+                            // Reduce enemy influence for successful defense
+                            double defenseReward = config.getDefenseObjectiveReward() * (victimProgress / 60.0);
+                            if (defenseReward > 0) {
+                                regionService.reduceInfluence(regionId, victimTeamOpt.get(), defenseReward);
+
+                                // Notify the defender
+                                org.bukkit.entity.Player killer = org.bukkit.Bukkit.getPlayer(killerUuid);
+                                if (killer != null) {
+                                    killer.sendMessage(net.kyori.adventure.text.Component.text(config.getPrefix())
+                                            .append(net.kyori.adventure.text.Component.text("🛡 Territory defended! ")
+                                                    .color(net.kyori.adventure.text.format.NamedTextColor.GREEN))
+                                            .append(net.kyori.adventure.text.Component.text("-" + (int)defenseReward + " enemy IP")
+                                                    .color(net.kyori.adventure.text.format.NamedTextColor.YELLOW)));
+                                }
+                            }
+
+                            plugin.getLogger().info("[Objectives] Hold Ground defense - " + killerUuid +
+                                    " killed attacker " + victimUuid + " with " + victimProgress + "s progress in " + regionId);
+                        }
+                    }
+                }
             }
         }
     }
@@ -1020,10 +1095,43 @@ public class SqlObjectiveService implements ObjectiveService {
         String defenderTeam = statusOpt.get().ownerTeam();
         if (defenderTeam == null) return false;
 
+        // First check tracked chests from this session
         String trackingKey = regionId + ":" + defenderTeam;
         Set<String> enemyChests = enemyChestTracking.get(trackingKey);
+        if (enemyChests != null && !enemyChests.isEmpty()) {
+            return true;
+        }
 
-        return enemyChests != null && !enemyChests.isEmpty();
+        // If no tracked chests, scan the region for existing chests
+        // This handles chests that existed before the plugin started tracking
+        World world = roundService.getGameWorld().orElse(null);
+        if (world == null) return false;
+
+        int[] center = regionCenters.get(regionId);
+        if (center == null) return false;
+
+        int regionSize = config.getRegionSize();
+        int halfSize = regionSize / 2;
+        int scanRadius = Math.min(halfSize, 64); // Scan up to 64 blocks from center
+
+        // Scan for chests in the region (limited scan for performance)
+        int foundChests = 0;
+        for (int x = center[0] - scanRadius; x <= center[0] + scanRadius && foundChests == 0; x += 8) {
+            for (int z = center[1] - scanRadius; z <= center[1] + scanRadius && foundChests == 0; z += 8) {
+                // Check if this coordinate is in the region
+                String checkRegion = regionService.getRegionIdForLocation(x, z);
+                if (!regionId.equals(checkRegion)) continue;
+
+                for (int y = world.getMinHeight(); y < world.getMaxHeight() && foundChests == 0; y += 16) {
+                    org.bukkit.block.Block block = world.getBlockAt(x, y, z);
+                    if (block.getType().name().contains("CHEST")) {
+                        foundChests++;
+                    }
+                }
+            }
+        }
+
+        return foundChests > 0;
     }
 
     @Override
@@ -1235,6 +1343,17 @@ public class SqlObjectiveService implements ObjectiveService {
         objectiveBlocksTracking.clear();
         enemyChestTracking.clear();
         plantedExplosives.clear();
+
+        // Remove glowing from any active intel carriers before clearing
+        for (IntelCarrierData data : intelCarriers.values()) {
+            if (data.carrierUuid() != null && !data.isDropped()) {
+                org.bukkit.entity.Player carrier = org.bukkit.Bukkit.getPlayer(data.carrierUuid());
+                if (carrier != null) {
+                    carrier.removePotionEffect(org.bukkit.potion.PotionEffectType.GLOWING);
+                    removeIntelFromInventory(carrier);
+                }
+            }
+        }
         intelCarriers.clear();
         intelObjectiveSpawnTimes.clear();
 
@@ -1318,8 +1437,23 @@ public class SqlObjectiveService implements ObjectiveService {
             // Reset objective progress
             updateProgress(data.objectiveId(), 0.0);
 
+            // Reduce attacker influence as reward for successful defense
+            double defenseReward = config.getDefenseObjectiveReward();
+            regionService.reduceInfluence(regionId, data.planterTeam(), defenseReward);
+
+            // Notify the defender
+            org.bukkit.entity.Player defender = org.bukkit.Bukkit.getPlayer(playerUuid);
+            if (defender != null) {
+                defender.sendMessage(net.kyori.adventure.text.Component.text(config.getPrefix())
+                        .append(net.kyori.adventure.text.Component.text("💣 Explosive defused! ")
+                                .color(net.kyori.adventure.text.format.NamedTextColor.GREEN))
+                        .append(net.kyori.adventure.text.Component.text("-" + (int)defenseReward + " enemy IP")
+                                .color(net.kyori.adventure.text.format.NamedTextColor.YELLOW)));
+                defender.playSound(defender.getLocation(), org.bukkit.Sound.ENTITY_PLAYER_LEVELUP, 1.0f, 1.2f);
+            }
+
             plugin.getLogger().info("[Objectives] TNT defused by " + playerUuid +
-                    " at " + x + "," + y + "," + z + " in " + regionId);
+                    " at " + x + "," + y + "," + z + " in " + regionId + " - reduced " + defenseReward + " enemy IP");
         }
     }
 
@@ -1342,13 +1476,16 @@ public class SqlObjectiveService implements ObjectiveService {
                 plugin.getLogger().info("[Objectives] Plant Explosive completed by " + data.planterUuid() +
                         " in " + regionId + " - explosive detonated!");
 
-                // Optionally create explosion effect at location
+                // Create real explosion at location
                 World world = roundService.getGameWorld().orElse(null);
                 if (world != null) {
                     Location loc = new Location(world, data.x() + 0.5, data.y(), data.z() + 0.5);
-                    // Visual explosion only, no block damage
-                    world.createExplosion(loc, 0, false, false);
-                    world.playSound(loc, org.bukkit.Sound.ENTITY_GENERIC_EXPLODE, 2.0f, 1.0f);
+
+                    // Remove the TNT block first (it's about to explode)
+                    world.getBlockAt(data.x(), data.y(), data.z()).setType(org.bukkit.Material.AIR);
+
+                    // Create real explosion - power 4 (same as regular TNT), fire=false, breaks blocks=true
+                    world.createExplosion(loc, 4.0f, false, true);
                 }
             } else {
                 // Update objective progress for UI
@@ -1549,11 +1686,26 @@ public class SqlObjectiveService implements ObjectiveService {
 
                 if (sourceStatus.isPresent() && newStatus.isPresent()) {
                     // Check if new region is owned by attacker's team (carrier's team)
-                    String newRegionOwner = newStatus.get().ownerTeam();
-                    if (newRegionOwner != null && data.carrierTeam().equalsIgnoreCase(newRegionOwner)) {
+                    RegionStatus newRegion = newStatus.get();
+                    if (newRegion.isOwnedBy(data.carrierTeam())) {
                         // Intel delivered to friendly territory!
                         completeObjective(data.objectiveId(), playerUuid, data.carrierTeam());
                         intelCarriers.remove(entry.getKey());
+
+                        // Remove glowing effect from the carrier
+                        org.bukkit.entity.Player carrier = org.bukkit.Bukkit.getPlayer(playerUuid);
+                        if (carrier != null) {
+                            carrier.removePotionEffect(org.bukkit.potion.PotionEffectType.GLOWING);
+
+                            // Remove intel item from inventory
+                            removeIntelFromInventory(carrier);
+
+                            // Notify player
+                            carrier.sendMessage(net.kyori.adventure.text.Component.text(config.getPrefix())
+                                    .append(net.kyori.adventure.text.Component.text("⚡ Intel delivered! Objective complete!")
+                                            .color(net.kyori.adventure.text.format.NamedTextColor.GREEN)));
+                            carrier.playSound(carrier.getLocation(), org.bukkit.Sound.UI_TOAST_CHALLENGE_COMPLETE, 1.0f, 1.0f);
+                        }
 
                         plugin.getLogger().info("[Objectives] Capture Intel completed! " + playerUuid +
                                 " delivered intel from " + sourceRegion + " to " + newRegionId);
@@ -1577,6 +1729,12 @@ public class SqlObjectiveService implements ObjectiveService {
                     dropX = player.getLocation().getBlockX();
                     dropY = player.getLocation().getBlockY();
                     dropZ = player.getLocation().getBlockZ();
+
+                    // Remove glowing effect from the dead carrier
+                    player.removePotionEffect(org.bukkit.potion.PotionEffectType.GLOWING);
+
+                    // Remove intel item from their inventory
+                    removeIntelFromInventory(player);
                 }
 
                 IntelCarrierData droppedData = data.withDropped(dropX, dropY, dropZ);
@@ -1625,6 +1783,21 @@ public class SqlObjectiveService implements ObjectiveService {
 
                             // Reset objective progress
                             updateProgress(data.objectiveId(), 0.0);
+
+                            // Reduce attacker influence as reward for intel recovery
+                            double defenseReward = config.getDefenseObjectiveReward();
+                            regionService.reduceInfluence(data.sourceRegionId(), data.carrierTeam(), defenseReward);
+
+                            // Notify the defender
+                            org.bukkit.entity.Player defender = org.bukkit.Bukkit.getPlayer(defenderUuid);
+                            if (defender != null) {
+                                defender.sendMessage(net.kyori.adventure.text.Component.text(config.getPrefix())
+                                        .append(net.kyori.adventure.text.Component.text("⚡ Intel recovered! ")
+                                                .color(net.kyori.adventure.text.format.NamedTextColor.GREEN))
+                                        .append(net.kyori.adventure.text.Component.text("-" + (int)defenseReward + " enemy IP")
+                                                .color(net.kyori.adventure.text.format.NamedTextColor.YELLOW)));
+                                defender.playSound(defender.getLocation(), org.bukkit.Sound.ENTITY_PLAYER_LEVELUP, 1.0f, 1.2f);
+                            }
 
                             // Respawn intel at original location
                             for (RegionObjective obj : getActiveObjectives(data.sourceRegionId(), ObjectiveCategory.RAID)) {

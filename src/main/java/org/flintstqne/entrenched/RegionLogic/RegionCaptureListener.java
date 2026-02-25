@@ -108,10 +108,9 @@ public final class RegionCaptureListener implements Listener {
                 if (lastWarning == null || (now - lastWarning) > ADJACENCY_WARNING_COOLDOWN_MS) {
                     lastAdjacencyWarning.put(player.getUniqueId(), now);
                     String regionName = getRegionDisplayName(regionId);
-                    player.sendMessage(configManager.getPrefix() + ChatColor.RED +
-                            "You cannot earn influence in " + ChatColor.WHITE + regionName + ChatColor.RED + "!");
-                    player.sendMessage(ChatColor.GRAY + "  This region is not adjacent to any territory your team controls.");
-                    player.sendMessage(ChatColor.GRAY + "  Capture adjacent regions first to expand your frontline.");
+                    player.sendMessage(configManager.getPrefix() + ChatColor.GRAY +
+                            "No influence earned - " + ChatColor.WHITE + regionName + ChatColor.GRAY +
+                            " is not adjacent to your territory.");
                 }
             }
             return false;

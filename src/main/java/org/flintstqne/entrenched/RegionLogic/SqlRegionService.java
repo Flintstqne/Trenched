@@ -8,6 +8,7 @@ import org.flintstqne.entrenched.RoundLogic.Round;
 import org.flintstqne.entrenched.RoundLogic.RoundService;
 
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Logger;
 
 /**
@@ -27,8 +28,8 @@ public final class SqlRegionService implements RegionService {
     // Road service for supply calculations (optional, set after construction)
     private RoadService roadService;
 
-    // Cache for region statuses (refreshed periodically)
-    private final Map<String, RegionStatus> regionCache = new HashMap<>();
+    // Cache for region statuses (refreshed periodically) - ConcurrentHashMap for thread safety
+    private final Map<String, RegionStatus> regionCache = new ConcurrentHashMap<>();
     private long lastCacheRefresh = 0;
     private static final long CACHE_TTL_MS = 5000; // 5 seconds
 
@@ -154,7 +155,8 @@ public final class SqlRegionService implements RegionService {
     @Override
     public List<RegionStatus> getRegionsByOwner(String team) {
         refreshCacheIfNeeded();
-        return regionCache.values().stream()
+        // Create a copy to avoid ConcurrentModificationException when iterating async
+        return new ArrayList<>(regionCache.values()).stream()
                 .filter(r -> r.isOwnedBy(team))
                 .toList();
     }
@@ -525,6 +527,24 @@ public final class SqlRegionService implements RegionService {
     }
 
     @Override
+    public void setRegionOwner(String regionId, String team) {
+        int roundId = getCurrentRoundId();
+        if (roundId < 0) return;
+
+        db.updateRegionOwner(regionId, roundId, team);
+        invalidateCache(regionId);
+    }
+
+    @Override
+    public void resetInfluence(String regionId) {
+        int roundId = getCurrentRoundId();
+        if (roundId < 0) return;
+
+        db.updateInfluence(regionId, roundId, 0, 0);
+        invalidateCache(regionId);
+    }
+
+    @Override
     public void addInfluence(String regionId, String team, double amount, UUID playerUuid) {
         int roundId = getCurrentRoundId();
         if (roundId < 0) return;
@@ -549,6 +569,21 @@ public final class SqlRegionService implements RegionService {
         if (playerUuid != null) {
             db.addInfluenceEarned(playerUuid.toString(), regionId, roundId, amount);
         }
+
+        // Update region state (OWNED -> CONTESTED if enemy is gaining influence)
+        // Need to refresh status after influence update
+        Optional<RegionStatus> updatedStatusOpt = getRegionStatus(regionId);
+        if (updatedStatusOpt.isPresent()) {
+            updateRegionState(regionId, updatedStatusOpt.get(), team);
+        }
+
+        // Check for capture
+        checkAndProcessCapture(regionId, team);
+    }
+
+    @Override
+    public void reduceInfluence(String regionId, String team, double amount) {
+        reduceEnemyInfluence(regionId, team, amount);
     }
 
     @Override
@@ -769,9 +804,6 @@ public final class SqlRegionService implements RegionService {
 
         RegionStatus status = statusOpt.get();
 
-        // Can only earn kill points in enemy or neutral regions
-        if (status.isOwnedBy(killerTeam)) return;
-
         // Calculate multiplier based on repeat kills
         double multiplier = getKillMultiplier(killerUuid, victimUuid, regionId);
 
@@ -780,9 +812,66 @@ public final class SqlRegionService implements RegionService {
         db.incrementPlayerStat(killerUuid.toString(), regionId, roundId, "kills");
         db.incrementPlayerStat(victimUuid.toString(), regionId, roundId, "deaths");
 
-        // Add influence
+        // DEFENDER KILL: If killer owns this region (CONTESTED), reduce enemy influence
+        if (status.isOwnedBy(killerTeam) && status.state() == RegionState.CONTESTED) {
+            double killPoints = configManager.getRegionKillPoints() * multiplier;
+            reduceEnemyInfluence(regionId, victimTeam, killPoints);
+
+            // Notify defender
+            org.bukkit.entity.Player killer = org.bukkit.Bukkit.getPlayer(killerUuid);
+            if (killer != null) {
+                killer.sendMessage(configManager.getPrefix() + org.bukkit.ChatColor.GREEN +
+                        "-" + (int)killPoints + " enemy IP " +
+                        org.bukkit.ChatColor.GRAY + "- Defending territory!");
+            }
+            return;
+        }
+
+        // ATTACKER KILL: Can only earn kill points in enemy or neutral regions
+        if (status.isOwnedBy(killerTeam)) return;
+
+        // Add influence for attacker
         InfluenceAction action = multiplier < 1.0 ? InfluenceAction.KILL_ENEMY_REPEAT : InfluenceAction.KILL_ENEMY;
         addInfluence(killerUuid, regionId, killerTeam, action, multiplier);
+    }
+
+    /**
+     * Reduces enemy influence in a contested region.
+     * Used when defenders kill attackers.
+     */
+    private void reduceEnemyInfluence(String regionId, String enemyTeam, double amount) {
+        int roundId = getCurrentRoundId();
+        if (roundId < 0) return;
+
+        Optional<RegionStatus> statusOpt = getRegionStatus(regionId);
+        if (statusOpt.isEmpty()) return;
+
+        RegionStatus status = statusOpt.get();
+        double newRed = status.redInfluence();
+        double newBlue = status.blueInfluence();
+
+        if ("red".equalsIgnoreCase(enemyTeam)) {
+            newRed = Math.max(0, newRed - amount);
+        } else if ("blue".equalsIgnoreCase(enemyTeam)) {
+            newBlue = Math.max(0, newBlue - amount);
+        }
+
+        db.updateInfluence(regionId, roundId, newRed, newBlue);
+        invalidateCache(regionId);
+
+        // Check if enemy influence is now 0 - return to OWNED state
+        if (newRed == 0 && newBlue == 0 && status.ownerTeam() != null) {
+            db.updateRegionState(regionId, roundId, RegionState.OWNED);
+            invalidateCache(regionId);
+
+            logger.info("Region " + regionId + " returned to OWNED after defenders cleared enemy influence");
+
+            // Broadcast to server
+            org.bukkit.Bukkit.broadcastMessage(configManager.getPrefix() +
+                    org.bukkit.ChatColor.GREEN + "Region " + regionId + " has been successfully defended by " +
+                    (status.ownerTeam().equalsIgnoreCase("red") ? org.bukkit.ChatColor.RED : org.bukkit.ChatColor.BLUE) +
+                    status.ownerTeam().toUpperCase() + org.bukkit.ChatColor.GREEN + "!");
+        }
     }
 
     @Override

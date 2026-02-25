@@ -370,17 +370,39 @@ public class ScoreboardUtil {
     /**
      * Gets a single-line objective compass for display on the scoreboard.
      * Format: "⚒ ◀ · ✦ · · ▶  45m" showing direction and distance
+     *
+     * Shows compass for:
+     * - Attackers: pointing to objectives they need to complete
+     * - Defenders: pointing to objectives enemies are actively working on (with progress > 0)
      */
     private String getObjectiveCompassLine(Player player, String regionId, String playerTeam, RegionStatus regionStatus) {
         if (objectiveService == null || regionStatus == null) return null;
 
-        // Determine which category of objectives to show
-        ObjectiveCategory category = getRelevantCategory(regionStatus, playerTeam);
-        if (category == null) return null;
+        List<RegionObjective> objectives = null;
+        boolean isDefender = false;
 
-        // Use cached objectives to reduce DB queries
-        List<RegionObjective> objectives = getCachedObjectives(regionId, category);
-        if (objectives.isEmpty()) return null;
+        // Check if player is a defender (owns this region)
+        if (regionStatus.ownerTeam() != null && regionStatus.ownerTeam().equalsIgnoreCase(playerTeam)) {
+            isDefender = true;
+            // For defenders: show RAID objectives that have progress (enemies actively working on them)
+            List<RegionObjective> raidObjectives = getCachedObjectives(regionId, ObjectiveCategory.RAID);
+            objectives = raidObjectives.stream()
+                    .filter(obj -> obj.progress() > 0 || obj.type() == ObjectiveType.RAID_HOLD_GROUND)
+                    .toList();
+        } else {
+            // For attackers: check if region is valid for capturing
+            if (!isRegionValidForCapture(regionId, playerTeam, regionStatus)) {
+                return null;
+            }
+
+            // Determine which category of objectives to show
+            ObjectiveCategory category = getRelevantCategory(regionStatus, playerTeam);
+            if (category == null) return null;
+
+            objectives = getCachedObjectives(regionId, category);
+        }
+
+        if (objectives == null || objectives.isEmpty()) return null;
 
         // Find nearest objective with a location
         RegionObjective nearest = null;
@@ -413,8 +435,20 @@ public class ScoreboardUtil {
         }
 
         // Build the single-line compass
-        String symbol = (nearest != null && nearest.type().isRaid()) ? "⚔" : "⚒";
-        ChatColor symbolColor = (nearest != null && nearest.type().isRaid()) ? ChatColor.RED : ChatColor.GREEN;
+        // For defenders: show shield icon with warning color
+        // For attackers: show attack/build icon
+        String symbol;
+        ChatColor symbolColor;
+        if (isDefender) {
+            symbol = "🛡";  // Shield icon for defense
+            symbolColor = ChatColor.YELLOW;  // Warning color
+        } else if (nearest != null && nearest.type().isRaid()) {
+            symbol = "⚔";
+            symbolColor = ChatColor.RED;
+        } else {
+            symbol = "⚒";
+            symbolColor = ChatColor.GREEN;
+        }
 
         if (nearest == null || nearestLoc == null) {
             // No location - just show objective exists
@@ -544,6 +578,31 @@ public class ScoreboardUtil {
             return ObjectiveCategory.RAID;
         }
         return null;
+    }
+
+    /**
+     * Checks if a region is valid for the team to capture/influence.
+     * A region is valid if:
+     * - It's adjacent to territory the team owns, OR
+     * - It's a contested region where the team is the original owner (defending)
+     */
+    private boolean isRegionValidForCapture(String regionId, String playerTeam, RegionStatus status) {
+        // If team already owns this region fully, they can't "capture" it
+        if (status.isOwnedBy(playerTeam)) {
+            return false;
+        }
+
+        // Check if region is adjacent to team's territory
+        if (regionService.isAdjacentToTeam(regionId, playerTeam)) {
+            return true;
+        }
+
+        // Special case: contested region where this team is the original owner
+        if (status.state() == RegionState.CONTESTED && playerTeam.equalsIgnoreCase(status.ownerTeam())) {
+            return true;
+        }
+
+        return false;
     }
 
 

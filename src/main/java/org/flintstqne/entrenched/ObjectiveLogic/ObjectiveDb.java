@@ -478,6 +478,21 @@ public final class ObjectiveDb implements AutoCloseable {
         }
     }
 
+    /**
+     * Clears hold ground progress for a specific player in an objective.
+     */
+    public void clearHoldGroundProgressForPlayer(int objectiveId, UUID playerUuid) {
+        String sql = "DELETE FROM hold_ground_progress WHERE objective_id = ? AND player_uuid = ?";
+
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setInt(1, objectiveId);
+            ps.setString(2, playerUuid.toString());
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to clear hold ground progress for player", e);
+        }
+    }
+
     // ==================== HELPERS ====================
 
     private RegionObjective mapObjective(ResultSet rs) throws SQLException {

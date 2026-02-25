@@ -137,6 +137,10 @@ division-depots:
   # Enable division depot system
   enabled: true
 
+  # Block material for depot (must be a placeable block)
+  # Options: CHEST, BARREL, COPPER_BLOCK, or any valid block material
+  block-material: "CHEST"
+
   # Storage size (slots, max 54 for double chest)
   storage-size: 54
 

@@ -109,6 +109,22 @@ public class ObjectiveCommand implements CommandExecutor, TabCompleter {
 
         RegionStatus status = statusOpt.get();
 
+        // Check if region is valid for capturing (adjacent to team territory)
+        if (!isRegionValidForCapture(regionId, team, status)) {
+            player.sendMessage(Component.text("═══ ")
+                    .color(NamedTextColor.GOLD)
+                    .append(Component.text("Objectives in " + regionId)
+                            .color(NamedTextColor.YELLOW)
+                            .decorate(TextDecoration.BOLD))
+                    .append(Component.text(" ═══")
+                            .color(NamedTextColor.GOLD)));
+            player.sendMessage(Component.text("This region is not adjacent to your territory.")
+                    .color(NamedTextColor.GRAY));
+            player.sendMessage(Component.text("Capture adjacent regions first to expand your frontline.")
+                    .color(NamedTextColor.GRAY));
+            return true;
+        }
+
         // Determine relevant category
         ObjectiveCategory relevantCategory = getRelevantCategory(status, team);
 
@@ -382,6 +398,31 @@ public class ObjectiveCommand implements CommandExecutor, TabCompleter {
             }
         }
         return null;
+    }
+
+    /**
+     * Checks if a region is valid for the team to capture/influence.
+     * A region is valid if:
+     * - It's adjacent to territory the team owns, OR
+     * - It's a contested region where the team is the original owner (defending)
+     */
+    private boolean isRegionValidForCapture(String regionId, String playerTeam, RegionStatus status) {
+        // If team already owns this region fully, they can't "capture" it
+        if (status.isOwnedBy(playerTeam)) {
+            return false;
+        }
+
+        // Check if region is adjacent to team's territory
+        if (regionService.isAdjacentToTeam(regionId, playerTeam)) {
+            return true;
+        }
+
+        // Special case: contested region where this team is the original owner
+        if (status.state() == RegionState.CONTESTED && playerTeam.equalsIgnoreCase(status.ownerTeam())) {
+            return true;
+        }
+
+        return false;
     }
 
     @Override

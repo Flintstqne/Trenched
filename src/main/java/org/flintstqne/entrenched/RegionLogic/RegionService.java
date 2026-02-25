@@ -143,9 +143,25 @@ public interface RegionService {
     void setRegionState(String regionId, RegionState state);
 
     /**
+     * Sets a region's owner directly without triggering capture logic (admin command).
+     */
+    void setRegionOwner(String regionId, String team);
+
+    /**
+     * Resets influence points for both teams in a region (admin command).
+     */
+    void resetInfluence(String regionId);
+
+    /**
      * Adds influence directly without player context (admin command).
      */
     void addInfluence(String regionId, String team, double amount, UUID playerUuid);
+
+    /**
+     * Reduces influence for a team in a region.
+     * Used when defenders successfully counter objectives.
+     */
+    void reduceInfluence(String regionId, String team, double amount);
 
     /**
      * Initializes/resets all regions with team homes.

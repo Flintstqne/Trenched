@@ -20,6 +20,7 @@ public interface DepotService {
     enum PlaceResult {
         SUCCESS,
         NO_DIVISION,
+        INSUFFICIENT_RANK,    // Must be officer or commander
         LIMIT_REACHED,
         TOO_CLOSE_TO_OTHER_DEPOT,
         INVALID_REGION,
@@ -171,6 +172,11 @@ public interface DepotService {
      * Calculates how many items will drop when a depot is raided.
      */
     int calculateLootDropCount(int divisionId);
+
+    /**
+     * Gets the actual number of items dropped in the last completed raid by this player.
+     */
+    int getLastRaidDropCount(UUID raiderUuid);
 
     /**
      * Gets the raid channel time in seconds.

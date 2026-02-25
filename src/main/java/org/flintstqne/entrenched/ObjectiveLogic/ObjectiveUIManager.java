@@ -162,6 +162,13 @@ public class ObjectiveUIManager {
             return;
         }
 
+        // Check if region is valid for capturing (adjacent to team's territory)
+        // Only show objectives in regions the team can actually influence
+        if (!isRegionValidForCapture(regionId, playerTeam, status)) {
+            clearBossBars(player.getUniqueId());
+            return;
+        }
+
         // Determine which objectives are relevant for this player (attackers/settlers)
         ObjectiveCategory relevantCategory = getRelevantCategory(status, playerTeam);
         if (relevantCategory == null) {
@@ -255,14 +262,30 @@ public class ObjectiveUIManager {
         for (RegionObjective objective : raidObjectives) {
             if (objective.type() == ObjectiveType.RAID_HOLD_GROUND && objective.progress() > 0) {
                 int seconds = (int) (objective.progress() * 60);
+
+                // Get hold zone location for direction
+                String directionText = "";
+                Optional<int[]> holdZoneOpt = objectiveService.getHoldZoneInfo(regionId);
+                if (holdZoneOpt.isPresent()) {
+                    int[] holdZone = holdZoneOpt.get();
+                    int y = player.getWorld().getHighestBlockYAt(holdZone[0], holdZone[1]) + 1;
+                    Location targetLoc = new Location(player.getWorld(), holdZone[0] + 0.5, y, holdZone[1] + 0.5);
+                    int distance = (int) Math.sqrt(
+                            Math.pow(player.getLocation().getX() - holdZone[0], 2) +
+                            Math.pow(player.getLocation().getZ() - holdZone[1], 2));
+                    directionText = " " + getDirectionIndicator(player, targetLoc) + " " + distance + "m";
+                }
+
                 Component warning = Component.text("⚠ ALERT: ")
                         .color(NamedTextColor.RED)
                         .decorate(TextDecoration.BOLD)
-                        .append(Component.text("Enemy holding region center! ")
+                        .append(Component.text("Enemy holding region center!")
                                 .color(NamedTextColor.YELLOW)
                                 .decoration(TextDecoration.BOLD, false))
-                        .append(Component.text("(" + seconds + "/60s)")
-                                .color(NamedTextColor.WHITE));
+                        .append(Component.text(" (" + seconds + "/60s)")
+                                .color(NamedTextColor.WHITE))
+                        .append(Component.text(directionText)
+                                .color(NamedTextColor.AQUA));
                 player.sendActionBar(warning);
                 break;
             }
@@ -397,6 +420,35 @@ public class ObjectiveUIManager {
         return Component.text(warningText)
                 .color(NamedTextColor.RED)
                 .decorate(TextDecoration.BOLD);
+    }
+
+    /**
+     * Checks if a region is valid for the team to capture/influence.
+     * A region is valid if:
+     * - It's adjacent to territory the team owns, OR
+     * - It's a contested region where the team is the original owner (defending)
+     *
+     * This prevents showing objectives in regions that can't actually be influenced.
+     */
+    private boolean isRegionValidForCapture(String regionId, String playerTeam, RegionStatus status) {
+        // If team already owns this region fully, they can't "capture" it (they're defending)
+        if (status.isOwnedBy(playerTeam)) {
+            return false;
+        }
+
+        // Check if region is adjacent to team's territory
+        if (regionService.isAdjacentToTeam(regionId, playerTeam)) {
+            return true;
+        }
+
+        // Special case: contested region where this team is the original owner
+        // They can still complete objectives even if not adjacent (they're defending their turf)
+        if (status.state() == RegionState.CONTESTED && playerTeam.equalsIgnoreCase(status.ownerTeam())) {
+            return true;
+        }
+
+        // Not adjacent, not a valid capture target
+        return false;
     }
 
     /**
