@@ -10,6 +10,7 @@ import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.plugin.java.JavaPlugin;
+import org.flintstqne.entrenched.RoadLogic.DeathListener;
 import org.flintstqne.entrenched.Utils.ScoreboardUtil;
 
 import java.util.Arrays;
@@ -20,6 +21,7 @@ public class TeamSelectionView {
     private final TeamService teamService;
     private final JavaPlugin plugin;
     private final ScoreboardUtil scoreboardUtil;
+    private final DeathListener deathListener;
     private static final int MAX_TEAM_IMBALANCE = 2;
 
     //The balance check uses MAX_TEAM_IMBALANCE = 2,
@@ -27,13 +29,18 @@ public class TeamSelectionView {
     // (e.g., 5 vs 4 is allowed, 6 vs 4 is not)
 
     public TeamSelectionView(TeamService teamService, JavaPlugin plugin) {
-        this(teamService, plugin, null);
+        this(teamService, plugin, null, null);
     }
 
     public TeamSelectionView(TeamService teamService, JavaPlugin plugin, ScoreboardUtil scoreboardUtil) {
+        this(teamService, plugin, scoreboardUtil, null);
+    }
+
+    public TeamSelectionView(TeamService teamService, JavaPlugin plugin, ScoreboardUtil scoreboardUtil, DeathListener deathListener) {
         this.teamService = teamService;
         this.plugin = plugin;
         this.scoreboardUtil = scoreboardUtil;
+        this.deathListener = deathListener;
     }
 
     public ChestGui createGui() {
@@ -78,6 +85,7 @@ public class TeamSelectionView {
                     gui.setOnClose(null); // Allow closing now
                     player.closeInventory();
                     if (scoreboardUtil != null) scoreboardUtil.updatePlayerScoreboard(player);
+                    if (deathListener != null) deathListener.onPlayerSelectTeam(player);
                     // Teleport player to team spawn if configured
                     teamService.getTeamSpawn("red").ifPresent(spawn -> player.teleport(spawn));
                 }
@@ -116,6 +124,7 @@ public class TeamSelectionView {
                     gui.setOnClose(null);
                     player.closeInventory();
                     if (scoreboardUtil != null) scoreboardUtil.updatePlayerScoreboard(player);
+                    if (deathListener != null) deathListener.onPlayerSelectTeam(player);
                     // Teleport player to team spawn if configured
                     teamService.getTeamSpawn("blue").ifPresent(spawn -> player.teleport(spawn));
                 }

@@ -303,7 +303,7 @@ public final class Trenched extends JavaPlugin {
         teamCmd.setTabCompleter(teamCommand);
 
         Objects.requireNonNull(getCommand("teamgui"), "Command `teamgui` missing from plugin.yml")
-                .setExecutor(new TeamGuiCommand(teamService, this, scoreboardUtil));
+                .setExecutor(new TeamGuiCommand(teamService, this, scoreboardUtil, deathListener));
 
         // Division commands
         DivisionCommand divisionCommand = new DivisionCommand(divisionService, teamService, configManager);
@@ -499,7 +499,7 @@ public final class Trenched extends JavaPlugin {
             // Show team selection GUI if no team (if enabled)
             if (configManager.isShowTeamGuiOnJoin()) {
                 Bukkit.getScheduler().runTaskLater(Trenched.this, () -> {
-                    TeamSelectionView view = new TeamSelectionView(teamService, Trenched.this, scoreboardUtil);
+                    TeamSelectionView view = new TeamSelectionView(teamService, Trenched.this, scoreboardUtil, deathListener);
                     view.createGui().show(player);
                     player.sendMessage(configManager.getPrefix() + ChatColor.YELLOW + "Please select a team to continue!");
                 }, configManager.getTeamGuiDelayTicks());

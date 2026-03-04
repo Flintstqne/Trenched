@@ -15,6 +15,7 @@ import org.bukkit.event.entity.EntityPickupItemEvent;
 import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.player.PlayerDropItemEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
+import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerRespawnEvent;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.potion.PotionEffect;
@@ -45,6 +46,9 @@ public final class DeathListener implements Listener {
 
     // Track who killed each player for death message
     private final Map<UUID, String> lastKiller = new ConcurrentHashMap<>();
+
+    // Track players without a team (hidden until they select one)
+    private final java.util.Set<UUID> teamlessPlayers = ConcurrentHashMap.newKeySet();
 
     public DeathListener(JavaPlugin plugin, RoadService roadService,
                          TeamService teamService, ConfigManager configManager) {
@@ -154,11 +158,18 @@ public final class DeathListener implements Listener {
         // Set to adventure mode (can't break blocks)
         player.setGameMode(GameMode.ADVENTURE);
 
-        // Make invisible
+        // Make invisible - hide from all other players
         player.addPotionEffect(new PotionEffect(
                 PotionEffectType.INVISIBILITY,
                 totalDelaySeconds * 20 + 20, 0, false, false, true
         ));
+
+        // Hide player from all other online players (handles armor/held items visibility)
+        for (Player online : Bukkit.getOnlinePlayers()) {
+            if (!online.getUniqueId().equals(uuid)) {
+                online.hidePlayer(plugin, player);
+            }
+        }
 
         // Allow flying
         player.setAllowFlight(true);
@@ -250,6 +261,13 @@ public final class DeathListener implements Listener {
         player.removePotionEffect(PotionEffectType.INVISIBILITY);
         player.removePotionEffect(PotionEffectType.WEAKNESS);
 
+        // Show player to all other online players again
+        for (Player online : Bukkit.getOnlinePlayers()) {
+            if (!online.getUniqueId().equals(uuid)) {
+                online.showPlayer(plugin, player);
+            }
+        }
+
         // Teleport to team spawn
         Optional<String> teamOpt = teamService.getPlayerTeam(uuid);
         if (teamOpt.isPresent()) {
@@ -318,10 +336,70 @@ public final class DeathListener implements Listener {
 
     @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = true)
     public void onEntityDamageByEntity(EntityDamageByEntityEvent event) {
+        // Get the actual damager (handle projectiles)
+        Player damager = null;
+        if (event.getDamager() instanceof Player p) {
+            damager = p;
+        } else if (event.getDamager() instanceof org.bukkit.entity.Projectile projectile) {
+            if (projectile.getShooter() instanceof Player shooter) {
+                damager = shooter;
+            }
+        }
+
+        if (damager == null) return;
+
         // Prevent players in respawn state from dealing damage
-        if (event.getDamager() instanceof Player damager) {
-            if (isInRespawnDelay(damager.getUniqueId())) {
+        if (isInRespawnDelay(damager.getUniqueId())) {
+            event.setCancelled(true);
+            return;
+        }
+
+        // Prevent friendly fire - players on same team cannot damage each other
+        if (event.getEntity() instanceof Player victim) {
+            Optional<String> damagerTeam = teamService.getPlayerTeam(damager.getUniqueId());
+            Optional<String> victimTeam = teamService.getPlayerTeam(victim.getUniqueId());
+
+            if (damagerTeam.isPresent() && victimTeam.isPresent()
+                    && damagerTeam.get().equals(victimTeam.get())) {
                 event.setCancelled(true);
+            }
+        }
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onPlayerJoin(PlayerJoinEvent event) {
+        Player joiner = event.getPlayer();
+        UUID joinerUuid = joiner.getUniqueId();
+
+        // Hide all players currently in respawn delay from the joining player
+        for (UUID respawningUuid : pendingRespawn.keySet()) {
+            if (isInRespawnDelay(respawningUuid)) {
+                Player respawningPlayer = Bukkit.getPlayer(respawningUuid);
+                if (respawningPlayer != null && respawningPlayer.isOnline()) {
+                    joiner.hidePlayer(plugin, respawningPlayer);
+                }
+            }
+        }
+
+        // Hide all teamless players from the joining player
+        for (UUID teamlessUuid : teamlessPlayers) {
+            if (!teamlessUuid.equals(joinerUuid)) {
+                Player teamlessPlayer = Bukkit.getPlayer(teamlessUuid);
+                if (teamlessPlayer != null && teamlessPlayer.isOnline()) {
+                    joiner.hidePlayer(plugin, teamlessPlayer);
+                }
+            }
+        }
+
+        // Check if the joining player has a team
+        Optional<String> teamOpt = teamService.getPlayerTeam(joinerUuid);
+        if (teamOpt.isEmpty()) {
+            // Player has no team - hide them from everyone else
+            teamlessPlayers.add(joinerUuid);
+            for (Player online : Bukkit.getOnlinePlayers()) {
+                if (!online.getUniqueId().equals(joinerUuid)) {
+                    online.hidePlayer(plugin, joiner);
+                }
             }
         }
     }
@@ -368,10 +446,49 @@ public final class DeathListener implements Listener {
      */
     public void onPlayerQuit(UUID uuid) {
         RespawnData data = pendingRespawn.remove(uuid);
-        if (data != null && data.countdownTask != null) {
-            data.countdownTask.cancel();
+        if (data != null) {
+            if (data.countdownTask != null) {
+                data.countdownTask.cancel();
+            }
+
+            // Restore visibility for all other players (in case they had this player hidden)
+            Player quittingPlayer = Bukkit.getPlayer(uuid);
+            if (quittingPlayer != null) {
+                for (Player online : Bukkit.getOnlinePlayers()) {
+                    if (!online.getUniqueId().equals(uuid)) {
+                        online.showPlayer(plugin, quittingPlayer);
+                    }
+                }
+            }
         }
+
+        // Clean up teamless tracking
+        teamlessPlayers.remove(uuid);
+
         lastKiller.remove(uuid);
+    }
+
+    /**
+     * Called when a player selects a team - shows them to all other players.
+     */
+    public void onPlayerSelectTeam(Player player) {
+        UUID uuid = player.getUniqueId();
+
+        if (teamlessPlayers.remove(uuid)) {
+            // Player was hidden as teamless - show them to everyone now
+            for (Player online : Bukkit.getOnlinePlayers()) {
+                if (!online.getUniqueId().equals(uuid)) {
+                    online.showPlayer(plugin, player);
+                }
+            }
+        }
+    }
+
+    /**
+     * Checks if a player is currently hidden due to having no team.
+     */
+    public boolean isTeamless(UUID uuid) {
+        return teamlessPlayers.contains(uuid);
     }
 
     /**

@@ -6,6 +6,7 @@ import org.bukkit.command.CommandExecutor;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.java.JavaPlugin;
+import org.flintstqne.entrenched.RoadLogic.DeathListener;
 import org.flintstqne.entrenched.Utils.ScoreboardUtil;
 
 public class TeamGuiCommand implements CommandExecutor {
@@ -13,7 +14,11 @@ public class TeamGuiCommand implements CommandExecutor {
     private final TeamSelectionView view;
 
     public TeamGuiCommand(TeamService teamService, JavaPlugin plugin, ScoreboardUtil scoreboardUtil) {
-        this.view = new TeamSelectionView(teamService, plugin, scoreboardUtil);
+        this(teamService, plugin, scoreboardUtil, null);
+    }
+
+    public TeamGuiCommand(TeamService teamService, JavaPlugin plugin, ScoreboardUtil scoreboardUtil, DeathListener deathListener) {
+        this.view = new TeamSelectionView(teamService, plugin, scoreboardUtil, deathListener);
     }
 
     @Override
