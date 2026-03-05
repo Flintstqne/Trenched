@@ -148,9 +148,9 @@ public final class RegionCaptureListener implements Listener {
             Optional<RegionStatus> statusOpt = regionService.getRegionStatus(regionId);
             // Only check adjacency if region is not owned by killer's team
             if (statusOpt.isPresent() && !statusOpt.get().isOwnedBy(killerTeam)) {
-                // Player kills are important - send warning if not adjacent
-                if (!canEarnInfluenceInRegion(killer, regionId, killerTeam, true)) {
-                    return; // Can't earn IP in this region - message already sent
+                // Player kills - don't send warning if not adjacent (silent check)
+                if (!canEarnInfluenceInRegion(killer, regionId, killerTeam, false)) {
+                    return; // Can't earn IP in this region
                 }
             }
         }

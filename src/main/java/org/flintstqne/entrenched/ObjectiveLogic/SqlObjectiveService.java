@@ -1,7 +1,9 @@
 package org.flintstqne.entrenched.ObjectiveLogic;
 
 import org.bukkit.Location;
+import org.bukkit.Material;
 import org.bukkit.World;
+import org.bukkit.block.Block;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.flintstqne.entrenched.ConfigManager;
 import org.flintstqne.entrenched.DivisionLogic.DivisionMember;
@@ -356,20 +358,138 @@ public class SqlObjectiveService implements ObjectiveService {
         Integer locX = null, locY = null, locZ = null;
 
         if (needsLocation(type)) {
-            int offsetRange = config.getRegionSize() / 4; // Within 1/4 of region from center
-            locX = center[0] + ThreadLocalRandom.current().nextInt(-offsetRange, offsetRange);
-            locZ = center[1] + ThreadLocalRandom.current().nextInt(-offsetRange, offsetRange);
-
-            // Get Y level from world (best effort, defaults to 64)
             World world = roundService.getGameWorld().orElse(null);
             if (world != null) {
-                locY = world.getHighestBlockYAt(locX, locZ) + 1;
+                int offsetRange = config.getRegionSize() / 4; // Within 1/4 of region from center
+
+                // Try up to 10 times to find a safe location
+                int[] safeLocation = null;
+                for (int attempt = 0; attempt < 10 && safeLocation == null; attempt++) {
+                    int tryX = center[0] + ThreadLocalRandom.current().nextInt(-offsetRange, offsetRange);
+                    int tryZ = center[1] + ThreadLocalRandom.current().nextInt(-offsetRange, offsetRange);
+                    safeLocation = findSafeSpawnLocation(world, tryX, tryZ);
+                }
+
+                if (safeLocation != null) {
+                    locX = safeLocation[0];
+                    locY = safeLocation[1];
+                    locZ = safeLocation[2];
+                } else {
+                    // Fallback: use highest block at center
+                    locX = center[0];
+                    locZ = center[1];
+                    locY = world.getHighestBlockYAt(locX, locZ) + 1;
+                }
             } else {
+                int offsetRange = config.getRegionSize() / 4;
+                locX = center[0] + ThreadLocalRandom.current().nextInt(-offsetRange, offsetRange);
+                locZ = center[1] + ThreadLocalRandom.current().nextInt(-offsetRange, offsetRange);
                 locY = 64;
             }
         }
 
         return spawnObjective(regionId, type, locX, locY, locZ);
+    }
+
+    /**
+     * Finds a safe spawn location at the given X/Z coordinates.
+     * Avoids water, lava, leaves, and other unsuitable blocks.
+     * Returns null if no safe location found at this X/Z.
+     *
+     * @param world The world to search in
+     * @param x The X coordinate
+     * @param z The Z coordinate
+     * @return int[3] containing {x, y, z} or null if no safe location found
+     */
+    private int[] findSafeSpawnLocation(World world, int x, int z) {
+        // Start from the highest block and work down to find solid ground
+        int highestY = world.getHighestBlockYAt(x, z);
+
+        // Check from high to low to find actual solid ground (not leaves/trees)
+        for (int y = highestY; y > world.getMinHeight() + 10; y--) {
+            Block block = world.getBlockAt(x, y, z);
+            Block blockAbove = world.getBlockAt(x, y + 1, z);
+            Block blockTwoAbove = world.getBlockAt(x, y + 2, z);
+
+            Material type = block.getType();
+            Material typeAbove = blockAbove.getType();
+            Material typeTwoAbove = blockTwoAbove.getType();
+
+            // Check if the block below is solid ground (not water, lava, leaves, etc.)
+            if (isSolidGround(type) && isPassable(typeAbove) && isPassable(typeTwoAbove)) {
+                // Found safe location - return position above the solid block
+                return new int[]{x, y + 1, z};
+            }
+        }
+
+        return null; // No safe location found
+    }
+
+    /**
+     * Checks if a material is solid ground suitable for spawning objectives on.
+     */
+    private boolean isSolidGround(Material material) {
+        if (material == null || !material.isSolid()) {
+            return false;
+        }
+
+        String name = material.name();
+
+        // Exclude leaves
+        if (name.contains("LEAVES")) {
+            return false;
+        }
+
+        // Exclude logs (trees)
+        if (name.contains("LOG") || name.contains("WOOD")) {
+            return false;
+        }
+
+        // Exclude water and lava
+        if (material == Material.WATER || material == Material.LAVA) {
+            return false;
+        }
+
+        // Exclude ice variants (often over water)
+        if (name.contains("ICE")) {
+            return false;
+        }
+
+        // Exclude lily pads and other water plants
+        if (material == Material.LILY_PAD || material == Material.SEAGRASS ||
+            material == Material.TALL_SEAGRASS || material == Material.KELP ||
+            material == Material.KELP_PLANT) {
+            return false;
+        }
+
+        // Exclude scaffolding and unstable blocks
+        if (material == Material.SCAFFOLDING || name.contains("POWDER")) {
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * Checks if a material is passable (air or non-solid) for the space above spawn.
+     */
+    private boolean isPassable(Material material) {
+        if (material == null || material == Material.AIR || material == Material.CAVE_AIR ||
+            material == Material.VOID_AIR) {
+            return true;
+        }
+
+        // Water and lava are not passable for spawning
+        if (material == Material.WATER || material == Material.LAVA) {
+            return false;
+        }
+
+        // Non-solid blocks like grass, flowers are fine
+        if (!material.isSolid()) {
+            return true;
+        }
+
+        return false;
     }
 
     @Override
