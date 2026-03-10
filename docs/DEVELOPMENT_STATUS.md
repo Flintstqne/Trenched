@@ -101,6 +101,7 @@ Entrenched is a Minecraft PvP plugin featuring team-based warfare with:
 | **Division Info** | ✅ Complete | View roster, online members |
 | **Creation Cooldown** | ✅ Complete | 48h cooldown (OP bypasses) |
 | **Tab Completion** | ✅ Complete | All subcommands |
+| **Division Waypoints** | ✅ Complete | Officers can set, list, and remove shared waypoints |
 
 ### Party System
 
@@ -453,7 +454,7 @@ src/main/java/org/flintstqne/entrenched/
 5. **Raid Tool** - Special tool to raid enemy depots and loot contents
 
 ### Priority 3: Win Conditions
-1. Define win condition (capture all regions? home region?)
+1. Finalize automatic territory-control winner logic
 2. Implement win detection
 3. Add round-end summary
 

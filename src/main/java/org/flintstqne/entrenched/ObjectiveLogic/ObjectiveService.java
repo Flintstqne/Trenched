@@ -257,6 +257,21 @@ public interface ObjectiveService {
     Optional<int[]> getHoldZoneInfo(String regionId);
 
     /**
+     * Ticks organic building validation and integrity checks.
+     */
+    void tickStructureObjectives();
+
+    /**
+     * Gets the currently registered building for an objective, if any.
+     */
+    Optional<RegisteredBuilding> getRegisteredBuilding(int objectiveId);
+
+    /**
+     * Gets the latest building detection snapshot for an objective.
+     */
+    Optional<BuildingDetectionResult> getBuildingDetectionResult(int objectiveId);
+
+    /**
      * Clears all tracked data (block tracking, etc.). Called on new round.
      */
     void clearTrackedData();

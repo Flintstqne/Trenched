@@ -35,10 +35,6 @@ import org.flintstqne.entrenched.TeamLogic.TeamService;
 
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
-import org.flintstqne.entrenched.ConfigManager;
-import org.flintstqne.entrenched.RegionLogic.RegionService;
-import org.flintstqne.entrenched.RoundLogic.RoundService;
-import org.flintstqne.entrenched.TeamLogic.TeamService;
 
 import java.util.HashMap;
 import java.util.HashSet;
@@ -64,6 +60,7 @@ public class ObjectiveListener implements Listener {
     private BukkitTask holdGroundTask;
     private BukkitTask plantedExplosivesTask;
     private BukkitTask intelTask;
+    private BukkitTask structureTask;
     private RoundService roundService;
 
     public ObjectiveListener(JavaPlugin plugin, ObjectiveService objectiveService,
@@ -126,6 +123,10 @@ public class ObjectiveListener implements Listener {
                 objectiveService::tickIntelObjectives,
                 20L, 20L);
 
+        structureTask = Bukkit.getScheduler().runTaskTimer(plugin,
+                objectiveService::tickStructureObjectives,
+                20L, 20L);
+
         plugin.getLogger().info("[Objectives] Listener started, refresh every " + refreshMinutes + " minutes");
     }
 
@@ -144,6 +145,9 @@ public class ObjectiveListener implements Listener {
         }
         if (intelTask != null) {
             intelTask.cancel();
+        }
+        if (structureTask != null) {
+            structureTask.cancel();
         }
     }
 

@@ -107,6 +107,12 @@ public record RegionObjective(
                 int estimatedQualifying = Math.min(4, (int)(progress * 4));
                 yield "Stock 4 containers with 500+ items each (" + estimatedQualifying + "/4 done)";
             }
+            case SETTLEMENT_ESTABLISH_OUTPOST ->
+                "Build a functional field outpost (" + getProgressPercent() + "% quality)";
+            case SETTLEMENT_WATCHTOWER ->
+                "Build a usable watchtower (" + getProgressPercent() + "% quality)";
+            case SETTLEMENT_GARRISON_QUARTERS ->
+                "Build enclosed barracks with team beds (" + getProgressPercent() + "% quality)";
             default -> base;
         };
     }

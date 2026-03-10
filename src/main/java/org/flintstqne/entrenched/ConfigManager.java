@@ -427,10 +427,6 @@ public final class ConfigManager {
         return config.getString("regions.home.blue", "D4");
     }
 
-    public int getRegionMinRegionsToAttackHome() {
-        return config.getInt("regions.home.min-regions-to-attack", 2);
-    }
-
     // ==================== Objective Settings ====================
 
     /**
@@ -497,6 +493,30 @@ public final class ConfigManager {
      */
     public int getResourceDepotMinItemsPerContainer() {
         return config.getInt("regions.objectives.resource-depot-min-items-per-container", 500);
+    }
+
+    public int getBuildingDetectionRadius() {
+        return config.getInt("regions.objectives.building-detection-radius", 16);
+    }
+
+    public int getBuildingDetectionVerticalRange() {
+        return config.getInt("regions.objectives.building-detection-vertical-range", 12);
+    }
+
+    public long getBuildingDetectionDebounceTicks() {
+        return config.getLong("regions.objectives.building-detection-debounce-ticks", 20L);
+    }
+
+    public int getBuildingValidationSeconds() {
+        return config.getInt("regions.objectives.building-validation-seconds", 3);
+    }
+
+    public int getBuildingInvalidationSeconds() {
+        return config.getInt("regions.objectives.building-invalidation-seconds", 10);
+    }
+
+    public int getBuildingIntegrityCheckSeconds() {
+        return config.getInt("regions.objectives.building-integrity-check-seconds", 5);
     }
 
     /**

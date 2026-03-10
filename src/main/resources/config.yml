@@ -284,8 +284,6 @@ regions:
     red: "A1"
     # Blue team home region
     blue: "D4"
-    # Enemy must have this many or fewer regions to attack home
-    min-regions-to-attack: 2
 
   # Objective settings
   objectives:
@@ -309,6 +307,12 @@ regions:
     resource-depot-radius: 16  # Horizontal radius from objective center
     resource-depot-min-containers: 4  # Number of stocked containers needed
     resource-depot-min-items-per-container: 500  # Items required per container
+    building-detection-radius: 16
+    building-detection-vertical-range: 12
+    building-detection-debounce-ticks: 20
+    building-validation-seconds: 3
+    building-invalidation-seconds: 10
+    building-integrity-check-seconds: 5
 
 # Debug Settings
 debug:

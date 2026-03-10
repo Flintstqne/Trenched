@@ -333,6 +333,41 @@ public class ObjectiveCommand implements CommandExecutor, TabCompleter {
                 .append(Component.text(obj.getProgressDescription())
                         .color(NamedTextColor.GRAY)));
 
+        objectiveService.getBuildingDetectionResult(obj.id()).ifPresent(detection -> {
+            player.sendMessage(Component.text("Build Scan: ")
+                    .color(NamedTextColor.WHITE)
+                    .append(Component.text(detection.getProgressPercent() + "%")
+                            .color(detection.valid() ? NamedTextColor.GREEN : NamedTextColor.YELLOW))
+                    .append(Component.text(" [" + String.format("%.1f", detection.totalScore()) + "/"
+                                    + String.format("%.1f", detection.requiredScore()) + "]")
+                            .color(NamedTextColor.GRAY)));
+
+            player.sendMessage(Component.text("  Structure/Interior/Access: ")
+                    .color(NamedTextColor.GRAY)
+                    .append(Component.text(String.format("%.1f / %.1f / %.1f",
+                                    detection.structureScore(), detection.interiorScore(), detection.accessScore()))
+                            .color(NamedTextColor.WHITE)));
+
+            player.sendMessage(Component.text("  Signature/Context: ")
+                    .color(NamedTextColor.GRAY)
+                    .append(Component.text(String.format("%.1f / %.1f",
+                                    detection.signatureScore(), detection.contextScore()))
+                            .color(NamedTextColor.WHITE))
+                    .append(Component.text("  Variant: " + detection.variant())
+                            .color(NamedTextColor.AQUA)));
+
+            player.sendMessage(Component.text("  " + detection.summary())
+                    .color(detection.valid() ? NamedTextColor.GREEN : NamedTextColor.GRAY));
+        });
+
+        objectiveService.getRegisteredBuilding(obj.id()).ifPresent(building ->
+                player.sendMessage(Component.text("Registered Building: ")
+                        .color(NamedTextColor.WHITE)
+                        .append(Component.text(building.type().getDisplayName() + " [" + building.status() + "]")
+                                .color(building.status() == RegisteredBuildingStatus.ACTIVE
+                                        ? NamedTextColor.GREEN
+                                        : NamedTextColor.RED))));
+
         if (obj.hasLocation()) {
             int dist = (int) Math.sqrt(
                     Math.pow(obj.locationX() - player.getLocation().getX(), 2) +

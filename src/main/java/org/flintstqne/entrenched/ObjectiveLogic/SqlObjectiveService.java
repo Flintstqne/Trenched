@@ -5,6 +5,7 @@ import org.bukkit.Material;
 import org.bukkit.World;
 import org.bukkit.block.Block;
 import org.bukkit.plugin.java.JavaPlugin;
+import org.bukkit.scheduler.BukkitTask;
 import org.flintstqne.entrenched.ConfigManager;
 import org.flintstqne.entrenched.DivisionLogic.DivisionMember;
 import org.flintstqne.entrenched.DivisionLogic.DivisionRole;
@@ -31,6 +32,7 @@ public class SqlObjectiveService implements ObjectiveService {
     private final RoundService roundService;
     private final RegionService regionService;
     private final ConfigManager config;
+    private final BuildingDetector buildingDetector;
     private DivisionService divisionService;
     private TeamService teamService;
 
@@ -72,6 +74,14 @@ public class SqlObjectiveService implements ObjectiveService {
     // Track completed objective types per region to prevent repeats until all types exhausted
     // "regionId:category" -> Set of completed ObjectiveTypes
     private final Map<String, Set<ObjectiveType>> completedObjectiveTypes = new ConcurrentHashMap<>();
+
+    // Organic building tracking by objective
+    private final Map<Integer, BukkitTask> pendingStructureRescans = new ConcurrentHashMap<>();
+    private final Map<Integer, UUID> pendingStructureActors = new ConcurrentHashMap<>();
+    private final Map<Integer, String> pendingStructureTeams = new ConcurrentHashMap<>();
+    private final Map<Integer, Long> firstValidStructureSeenAt = new ConcurrentHashMap<>();
+    private final Map<Integer, Long> lastStructureIntegrityCheck = new ConcurrentHashMap<>();
+    private final Map<Integer, BuildingDetectionResult> lastStructureDetections = new ConcurrentHashMap<>();
 
     // Internal data class for tracking planted explosives
     private record PlantedExplosiveData(
@@ -148,6 +158,7 @@ public class SqlObjectiveService implements ObjectiveService {
         this.roundService = roundService;
         this.regionService = regionService;
         this.config = config;
+        this.buildingDetector = new BuildingDetector(config);
 
         // Pre-calculate region centers
         calculateRegionCenters();
@@ -529,8 +540,9 @@ public class SqlObjectiveService implements ObjectiveService {
         return switch (type) {
             // Raid objectives
             case RAID_DESTROY_CACHE, RAID_PLANT_EXPLOSIVE, RAID_CAPTURE_INTEL, RAID_HOLD_GROUND,
-            // Settlement objectives - need location for particles and distance display
-                 SETTLEMENT_ESTABLISH_OUTPOST, SETTLEMENT_RESOURCE_DEPOT, SETTLEMENT_SECURE_PERIMETER -> true;
+            // Settlement objectives - need location for particles, distance display, and building detection
+                 SETTLEMENT_ESTABLISH_OUTPOST, SETTLEMENT_WATCHTOWER, SETTLEMENT_RESOURCE_DEPOT,
+                 SETTLEMENT_GARRISON_QUARTERS, SETTLEMENT_SECURE_PERIMETER -> true;
             default -> false;
         };
     }
@@ -581,12 +593,18 @@ public class SqlObjectiveService implements ObjectiveService {
     @Override
     public void expireObjectivesInRegion(String regionId) {
         getCurrentRoundId().ifPresent(roundId -> {
+            List<RegionObjective> activeObjectives = db.getActiveObjectives(regionId, roundId);
             db.expireAllInRegion(regionId, roundId);
+            db.invalidateRegisteredBuildingsInRegion(regionId, roundId, System.currentTimeMillis());
 
             // Clear block tracking for this region's objectives
             objectiveBlocksTracking.remove(regionId + ":SECURE_PERIMETER");
             objectiveBlocksTracking.remove(regionId + ":SUPPLY_ROUTE");
             objectiveBlocksTracking.remove(regionId + ":SABOTAGE_DEFENSES");
+
+            for (RegionObjective objective : activeObjectives) {
+                clearStructureTracking(objective.id());
+            }
 
             // Clear completed objective types tracking for this region (fresh slate for new owner)
             completedObjectiveTypes.remove(regionId + ":" + ObjectiveCategory.SETTLEMENT.name());
@@ -740,10 +758,146 @@ public class SqlObjectiveService implements ObjectiveService {
 
     // ==================== OBJECTIVE DETECTION ====================
 
+    private void scheduleNearbyStructureRescans(UUID playerUuid, String team, String regionId, int x, int y, int z) {
+        for (RegionObjective objective : getActiveObjectives(regionId, ObjectiveCategory.SETTLEMENT)) {
+            if (!BuildingType.fromObjectiveType(objective.type()).isPresent()) {
+                continue;
+            }
+            if (!objective.hasLocation() || !isWithinStructureDetectionRange(objective, x, y, z)) {
+                continue;
+            }
+            scheduleStructureRescan(objective.id(), playerUuid, team, config.getBuildingDetectionDebounceTicks());
+        }
+    }
+
+    private boolean isWithinStructureDetectionRange(RegionObjective objective, int x, int y, int z) {
+        int radius = config.getBuildingDetectionRadius();
+        int vertical = config.getBuildingDetectionVerticalRange();
+        int dx = x - objective.locationX();
+        int dz = z - objective.locationZ();
+        return (dx * dx) + (dz * dz) <= radius * radius
+                && Math.abs(y - objective.locationY()) <= vertical;
+    }
+
+    private void scheduleStructureRescan(int objectiveId, UUID playerUuid, String team, long delayTicks) {
+        if (playerUuid != null) {
+            pendingStructureActors.put(objectiveId, playerUuid);
+        }
+        if (team != null && !team.isBlank()) {
+            pendingStructureTeams.put(objectiveId, team);
+        }
+
+        BukkitTask existing = pendingStructureRescans.remove(objectiveId);
+        if (existing != null) {
+            existing.cancel();
+        }
+
+        BukkitTask task = org.bukkit.Bukkit.getScheduler().runTaskLater(plugin, () -> {
+            pendingStructureRescans.remove(objectiveId);
+            runStructureRescan(objectiveId);
+        }, Math.max(1L, delayTicks));
+        pendingStructureRescans.put(objectiveId, task);
+    }
+
+    private void runStructureRescan(int objectiveId) {
+        Optional<RegionObjective> objectiveOpt = db.getObjective(objectiveId);
+        if (objectiveOpt.isEmpty()) {
+            clearStructureTracking(objectiveId);
+            return;
+        }
+
+        RegionObjective objective = objectiveOpt.get();
+        Optional<BuildingType> buildingTypeOpt = BuildingType.fromObjectiveType(objective.type());
+        if (buildingTypeOpt.isEmpty() || !objective.hasLocation()) {
+            clearStructureTracking(objectiveId);
+            return;
+        }
+
+        World world = roundService.getGameWorld().orElse(null);
+        if (world == null) {
+            return;
+        }
+
+        String detectionTeam = db.getRegisteredBuilding(objectiveId)
+                .map(RegisteredBuilding::team)
+                .orElse(pendingStructureTeams.getOrDefault(objectiveId, ""));
+
+        BuildingDetectionResult result = buildingDetector.scan(world, objective, buildingTypeOpt.get(), detectionTeam);
+        lastStructureDetections.put(objectiveId, result);
+
+        if (objective.isActive()) {
+            handleActiveStructureObjective(objective, result);
+            return;
+        }
+
+        db.getRegisteredBuilding(objectiveId).ifPresent(building -> handleRegisteredBuildingIntegrity(objective, building, result));
+    }
+
+    private void handleActiveStructureObjective(RegionObjective objective, BuildingDetectionResult result) {
+        if (!result.valid()) {
+            firstValidStructureSeenAt.remove(objective.id());
+            updateProgress(objective.id(), result.progressRatio());
+            return;
+        }
+
+        updateProgress(objective.id(), Math.min(0.99, result.progressRatio()));
+
+        long now = System.currentTimeMillis();
+        long validationMs = config.getBuildingValidationSeconds() * 1000L;
+        long firstValidAt = firstValidStructureSeenAt.computeIfAbsent(objective.id(), key -> now);
+
+        UUID actor = pendingStructureActors.get(objective.id());
+        String team = pendingStructureTeams.get(objective.id());
+        if (actor == null || team == null || team.isBlank()) {
+            scheduleStructureRescan(objective.id(), null, null, 20L);
+            return;
+        }
+
+        if ((now - firstValidAt) < validationMs) {
+            scheduleStructureRescan(objective.id(), actor, team, 20L);
+            return;
+        }
+
+        CompleteResult completion = completeObjective(objective.id(), actor, team);
+        if (completion == CompleteResult.SUCCESS || completion == CompleteResult.ALREADY_COMPLETED) {
+            db.upsertRegisteredBuilding(objective, result, team, RegisteredBuildingStatus.ACTIVE, now);
+        }
+        firstValidStructureSeenAt.remove(objective.id());
+    }
+
+    private void handleRegisteredBuildingIntegrity(RegionObjective objective, RegisteredBuilding building, BuildingDetectionResult result) {
+        long now = System.currentTimeMillis();
+        if (result.valid()) {
+            db.upsertRegisteredBuilding(objective, result, building.team(), RegisteredBuildingStatus.ACTIVE, now);
+            return;
+        }
+
+        long invalidationMs = config.getBuildingInvalidationSeconds() * 1000L;
+        if ((now - building.lastValidatedAt()) >= invalidationMs) {
+            db.invalidateRegisteredBuilding(building.objectiveId(), now);
+            plugin.getLogger().info("[Objectives] Registered " + building.type().getDisplayName()
+                    + " in " + building.regionId() + " invalidated after losing structure integrity.");
+        }
+    }
+
+    private void clearStructureTracking(int objectiveId) {
+        BukkitTask task = pendingStructureRescans.remove(objectiveId);
+        if (task != null) {
+            task.cancel();
+        }
+        pendingStructureActors.remove(objectiveId);
+        pendingStructureTeams.remove(objectiveId);
+        firstValidStructureSeenAt.remove(objectiveId);
+        lastStructureIntegrityCheck.remove(objectiveId);
+        lastStructureDetections.remove(objectiveId);
+    }
+
     @Override
     public void onBlockDestroyed(UUID playerUuid, String team, String regionId,
                                   int x, int y, int z, String blockType) {
         String blockKey = x + "," + y + "," + z;
+
+        scheduleNearbyStructureRescans(playerUuid, team, regionId, x, y, z);
 
         // Check for raid objectives (sabotage)
         for (RegionObjective obj : getActiveObjectives(regionId, ObjectiveCategory.RAID)) {
@@ -833,6 +987,8 @@ public class SqlObjectiveService implements ObjectiveService {
     public void onBlockPlaced(UUID playerUuid, String team, String regionId,
                                int x, int y, int z, String blockType) {
         String blockKey = x + "," + y + "," + z;
+
+        scheduleNearbyStructureRescans(playerUuid, team, regionId, x, y, z);
 
         // Check for settlement objectives
         for (RegionObjective obj : getActiveObjectives(regionId, ObjectiveCategory.SETTLEMENT)) {
@@ -1459,10 +1615,53 @@ public class SqlObjectiveService implements ObjectiveService {
     }
 
     @Override
+    public void tickStructureObjectives() {
+        Optional<Integer> roundIdOpt = getCurrentRoundId();
+        if (roundIdOpt.isEmpty()) {
+            return;
+        }
+
+        long now = System.currentTimeMillis();
+        long integrityIntervalMs = config.getBuildingIntegrityCheckSeconds() * 1000L;
+
+        for (RegisteredBuilding building : db.getRegisteredBuildingsByStatus(roundIdOpt.get(), RegisteredBuildingStatus.ACTIVE)) {
+            long lastChecked = lastStructureIntegrityCheck.getOrDefault(building.objectiveId(), 0L);
+            if ((now - lastChecked) < integrityIntervalMs || pendingStructureRescans.containsKey(building.objectiveId())) {
+                continue;
+            }
+
+            lastStructureIntegrityCheck.put(building.objectiveId(), now);
+            scheduleStructureRescan(building.objectiveId(), null, building.team(), 1L);
+        }
+    }
+
+    @Override
+    public Optional<RegisteredBuilding> getRegisteredBuilding(int objectiveId) {
+        return db.getRegisteredBuilding(objectiveId);
+    }
+
+    @Override
+    public Optional<BuildingDetectionResult> getBuildingDetectionResult(int objectiveId) {
+        return Optional.ofNullable(lastStructureDetections.get(objectiveId));
+    }
+
+    @Override
     public void clearTrackedData() {
         objectiveBlocksTracking.clear();
         enemyChestTracking.clear();
         plantedExplosives.clear();
+        resourceDepotLastCounts.clear();
+        resourceDepotLastUpdate.clear();
+        containerPlacementCooldowns.clear();
+        firstValidStructureSeenAt.clear();
+        lastStructureIntegrityCheck.clear();
+        lastStructureDetections.clear();
+        pendingStructureActors.clear();
+        pendingStructureTeams.clear();
+        for (BukkitTask task : pendingStructureRescans.values()) {
+            task.cancel();
+        }
+        pendingStructureRescans.clear();
 
         // Remove glowing from any active intel carriers before clearing
         for (IntelCarrierData data : intelCarriers.values()) {

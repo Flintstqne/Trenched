@@ -536,7 +536,7 @@ chat:
 4. Scoreboard integration
 
 ### Phase 5: Advanced Features
-1. Division waypoints
+1. Division waypoints - shipped via `/division waypoint set|remove|list`
 2. Division region assignments
 3. BlueMap integration (party markers, division territories)
 

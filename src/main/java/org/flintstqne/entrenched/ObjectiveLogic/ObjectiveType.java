@@ -53,11 +53,11 @@ public enum ObjectiveType {
     // ==================== SETTLEMENT OBJECTIVES (Neutral Regions) ====================
 
     /**
-     * Build a structure with bed, chest, and crafting table.
+     * Build a believable field outpost around the objective anchor.
      * 200 IP reward.
      */
     SETTLEMENT_ESTABLISH_OUTPOST("Establish Outpost", 200, ObjectiveCategory.SETTLEMENT,
-            "Build a structure with bed, chest, and crafting table"),
+            "Build a field outpost with shelter, storage, and crafting"),
 
     /**
      * Build 100+ blocks of walls.
@@ -74,11 +74,11 @@ public enum ObjectiveType {
             "Build road near friendly territory border (0/64 blocks)"),
 
     /**
-     * Build a structure 15+ blocks tall with line of sight.
+     * Build a believable observation tower.
      * 100 IP reward.
      */
     SETTLEMENT_WATCHTOWER("Build Watchtower", 100, ObjectiveCategory.SETTLEMENT,
-            "Build a watchtower (15+ blocks tall)"),
+            "Build a watchtower with height, access, and a lookout platform"),
 
     /**
      * Place 4+ storage containers with 100+ items total.
@@ -92,7 +92,7 @@ public enum ObjectiveType {
      * 175 IP reward.
      */
     SETTLEMENT_GARRISON_QUARTERS("Build Garrison Quarters", 175, ObjectiveCategory.SETTLEMENT,
-            "Build barracks with 3+ beds");
+            "Build enclosed barracks with 3+ team beds");
 
     private final String displayName;
     private final int influenceReward;

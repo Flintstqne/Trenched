@@ -297,8 +297,8 @@ If B1-C1 is destroyed, C1 still supplied via B1→B2→C2→C1
 
 ### Home Region Protection
 - Home regions have permanent protection status
-- Can only be attacked when team owns **≤2 regions** (configurable)
 - Home is always at 100% supply
+- Home regions are never capturable and remain a permanent anchor for each team
 
 ---
 
@@ -383,14 +383,10 @@ At the end of Phase 3:
 - Team with most regions wins
 - Tie-breaker: Total IP earned during round
 
-### Alternative: Total Domination
-- Capture ALL enemy regions including home
-- Instant win at any phase
-
 ### Home Region Rules
-- Home can only be attacked when team owns ≤2 regions
+- Home regions remain permanently protected and cannot change hands
 - Home has permanent 100% defense bonus
-- Losing home = team eliminated
+- Victory must be decided by control of non-home territory and round scoring
 
 ---
 
@@ -557,12 +553,10 @@ regions:
   home:
     red: "A1"
     blue: "D4"
-    min-regions-to-attack: 2     # Enemy must have ≤2 regions
 
 # Win conditions
 win:
-  type: "territory"              # territory, domination
-  domination-instant-win: true
+  type: "territory"
   
 # Notifications
 notifications:
