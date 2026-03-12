@@ -89,6 +89,10 @@ public final class Trenched extends JavaPlugin {
     private org.flintstqne.entrenched.StatLogic.StatListener statListener;
     private org.flintstqne.entrenched.StatLogic.StatApiServer statApiServer;
 
+    // Player-Placed Block Tracking
+    private org.flintstqne.entrenched.ObjectiveLogic.PlacedBlockDb placedBlockDb;
+    private org.flintstqne.entrenched.ObjectiveLogic.PlacedBlockTracker placedBlockTracker;
+
     @Override
     public void onEnable() {
         // Initialize configuration first
@@ -160,6 +164,34 @@ public final class Trenched extends JavaPlugin {
         objectiveDb = new ObjectiveDb(this);
         objectiveService = new SqlObjectiveService(this, objectiveDb, roundService, regionService, configManager);
 
+        // Initialize player-placed block tracking for structure detection
+        if (configManager.isPlayerPlacedTrackingEnabled()) {
+            placedBlockDb = new org.flintstqne.entrenched.ObjectiveLogic.PlacedBlockDb(this);
+            placedBlockTracker = new org.flintstqne.entrenched.ObjectiveLogic.PlacedBlockTracker(
+                    this, placedBlockDb,
+                    configManager.getPlayerPlacedFlushIntervalSeconds(),
+                    configManager.getPlayerPlacedCleanupIntervalMinutes());
+            placedBlockTracker.setRegionActiveChecker(regionId -> {
+                // A region is "active" if it has building objectives or registered buildings
+                var settlements = objectiveService.getActiveObjectives(regionId, org.flintstqne.entrenched.ObjectiveLogic.ObjectiveCategory.SETTLEMENT);
+                boolean hasBuildingObj = settlements.stream().anyMatch(o ->
+                        o.type() == org.flintstqne.entrenched.ObjectiveLogic.ObjectiveType.SETTLEMENT_OUTPOST
+                        || o.type() == org.flintstqne.entrenched.ObjectiveLogic.ObjectiveType.SETTLEMENT_WATCHTOWER
+                        || o.type() == org.flintstqne.entrenched.ObjectiveLogic.ObjectiveType.SETTLEMENT_GARRISON);
+                if (hasBuildingObj) return true;
+                // Also check if there are registered buildings
+                return objectiveService.getAllActiveBuildings().stream()
+                        .anyMatch(b -> b.regionId().equals(regionId));
+            });
+            placedBlockTracker.start();
+            ((SqlObjectiveService) objectiveService).setPlacedBlockTracker(placedBlockTracker);
+
+            // Load tracked blocks for regions that already have active building objectives
+            loadTrackedBlocksForActiveObjectives();
+
+            getLogger().info("[Trenched] Player-placed block tracking enabled");
+        }
+
         // Wire up division and team services for assassination objective (avoids circular dependency)
         ((SqlObjectiveService) objectiveService).setDivisionService(divisionService);
         ((SqlObjectiveService) objectiveService).setTeamService(teamService);
@@ -168,6 +200,11 @@ public final class Trenched extends JavaPlugin {
         objectiveUIManager = new ObjectiveUIManager(this, objectiveService, regionService, roundService, teamService, configManager);
         objectiveListener = new ObjectiveListener(this, objectiveService, objectiveUIManager, regionService, teamService, configManager);
         ((SqlObjectiveService) objectiveService).setObjectiveListener(objectiveListener);
+
+        // Wire placed block tracker to objective listener if enabled
+        if (placedBlockTracker != null) {
+            objectiveListener.setPlacedBlockTracker(placedBlockTracker);
+        }
 
         // Initialize Building Benefit Manager for outpost buffs, watchtower detection, etc.
         buildingBenefitManager = new BuildingBenefitManager(this, objectiveService, regionService, teamService, roundService, configManager);
@@ -721,6 +758,19 @@ public final class Trenched extends JavaPlugin {
         }
     }
 
+    /**
+     * Loads placed block caches for regions that already have active building objectives.
+     * Called on startup to restore tracking state after a restart.
+     */
+    private void loadTrackedBlocksForActiveObjectives() {
+        if (placedBlockTracker == null || objectiveService == null) return;
+
+        // Load for all regions that have tracked data in the DB
+        for (String regionId : placedBlockDb.getTrackedRegions()) {
+            placedBlockTracker.loadRegion(regionId);
+        }
+    }
+
     @Override
     public void onDisable() {
         if (scoreboardUtil != null) scoreboardUtil.stopUpdateTask();
@@ -744,7 +794,11 @@ public final class Trenched extends JavaPlugin {
         // Stop depot particle manager
         if (depotParticleManager != null) depotParticleManager.stop();
 
+        // Stop placed block tracker (flushes pending writes)
+        if (placedBlockTracker != null) placedBlockTracker.stop();
+
         // Close databases
+        if (placedBlockDb != null) placedBlockDb.close();
         if (endgameDb != null) endgameDb.close();
         if (objectiveDb != null) objectiveDb.close();
         if (roadDb != null) roadDb.close();

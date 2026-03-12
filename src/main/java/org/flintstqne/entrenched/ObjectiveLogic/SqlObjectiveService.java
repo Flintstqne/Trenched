@@ -193,6 +193,13 @@ public class SqlObjectiveService implements ObjectiveService {
         this.regionRenderer = regionRenderer;
     }
 
+    /**
+     * Sets the player-placed block tracker for structure detection filtering.
+     */
+    public void setPlacedBlockTracker(PlacedBlockTracker tracker) {
+        this.buildingDetector.setPlacedBlockTracker(tracker);
+    }
+
     private void calculateRegionCenters() {
         int regionSize = config.getRegionSize();
         int gridSize = 4; // 4x4 grid

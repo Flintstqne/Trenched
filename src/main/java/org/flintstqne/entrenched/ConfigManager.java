@@ -523,6 +523,20 @@ public final class ConfigManager {
         return config.getInt("regions.objectives.building-integrity-check-seconds", 5);
     }
 
+    // ==================== PLAYER-PLACED BLOCK TRACKING ====================
+
+    public boolean isPlayerPlacedTrackingEnabled() {
+        return config.getBoolean("regions.objectives.player-placed-tracking", true);
+    }
+
+    public long getPlayerPlacedFlushIntervalSeconds() {
+        return config.getLong("regions.objectives.player-placed-flush-interval", 10);
+    }
+
+    public long getPlayerPlacedCleanupIntervalMinutes() {
+        return config.getLong("regions.objectives.player-placed-cleanup-interval", 5);
+    }
+
     /**
      * Gets the minimum total items required for Resource Depot completion.
      * @deprecated Use getResourceDepotMinItemsPerContainer() instead - we now check per container

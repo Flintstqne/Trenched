@@ -315,6 +315,14 @@ regions:
     building-invalidation-seconds: 10
     building-integrity-check-seconds: 5
 
+    # Player-placed block tracking for structure detection
+    # When enabled, only blocks placed by players count toward buildings
+    player-placed-tracking: true
+    # How often to flush tracked blocks to database (seconds)
+    player-placed-flush-interval: 10
+    # How often to clean up orphaned tracking data (minutes)
+    player-placed-cleanup-interval: 5
+
 # Debug Settings
 debug:
   # Enable verbose logging

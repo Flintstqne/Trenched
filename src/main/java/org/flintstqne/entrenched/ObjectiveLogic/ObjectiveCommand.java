@@ -109,6 +109,9 @@ public class ObjectiveCommand implements CommandExecutor, TabCompleter {
 
         RegionStatus status = statusOpt.get();
 
+        // Always show registered buildings regardless of region state or adjacency
+        showRegisteredBuildings(player, regionId, team);
+
         // Check if region is valid for capturing (adjacent to team territory)
         if (!isRegionValidForCapture(regionId, team, status)) {
             player.sendMessage(Component.text("═══ ")
@@ -222,46 +225,6 @@ public class ObjectiveCommand implements CommandExecutor, TabCompleter {
         // Footer with tip
         player.sendMessage(Component.text("─────────────────────────────")
                 .color(NamedTextColor.DARK_GRAY));
-
-        // Show registered buildings in this region (with variant upgrade info)
-        List<RegisteredBuilding> buildings = objectiveService.getAllActiveBuildings().stream()
-                .filter(b -> b.regionId().equals(regionId) && b.team().equalsIgnoreCase(team)
-                        && b.status() == RegisteredBuildingStatus.ACTIVE)
-                .toList();
-
-        if (!buildings.isEmpty()) {
-            player.sendMessage(Component.text("🏗 YOUR BUILDINGS")
-                    .color(NamedTextColor.AQUA).decorate(TextDecoration.BOLD));
-
-            for (RegisteredBuilding building : buildings) {
-                String variant = building.variant();
-                Component line = Component.text("  ✓ ")
-                        .color(NamedTextColor.GREEN)
-                        .append(Component.text(building.type().getDisplayName())
-                                .color(NamedTextColor.WHITE));
-
-                if (variant != null && !variant.equals("Standard") && !variant.equals("None") && !variant.isEmpty()) {
-                    if (variant.contains("(needs")) {
-                        // Incomplete variant - show upgrade hint
-                        String baseName = variant.substring(0, variant.indexOf(" (needs")).trim();
-                        String needs = variant.substring(variant.indexOf("(needs ") + 7, variant.length() - 1);
-                        line = line.append(Component.text(" — " + baseName + " ")
-                                        .color(NamedTextColor.YELLOW))
-                                .append(Component.text("(upgrade: add " + needs + ")")
-                                        .color(NamedTextColor.GRAY));
-                    } else {
-                        // Complete variant
-                        line = line.append(Component.text(" — " + variant + " ✓")
-                                .color(NamedTextColor.AQUA));
-                    }
-                }
-
-                player.sendMessage(line);
-            }
-
-            player.sendMessage(Component.text("─────────────────────────────")
-                    .color(NamedTextColor.DARK_GRAY));
-        }
 
         player.sendMessage(Component.text("Tip: Complete objectives to earn Influence Points!")
                 .color(NamedTextColor.AQUA));
@@ -510,6 +473,49 @@ public class ObjectiveCommand implements CommandExecutor, TabCompleter {
             }
         }
         return null;
+    }
+
+    /**
+     * Shows registered buildings belonging to the player's team in the given region.
+     * This is called before any early returns so buildings always display.
+     */
+    private void showRegisteredBuildings(Player player, String regionId, String team) {
+        List<RegisteredBuilding> buildings = objectiveService.getAllActiveBuildings().stream()
+                .filter(b -> b.regionId().equals(regionId) && b.team().equalsIgnoreCase(team)
+                        && b.status() == RegisteredBuildingStatus.ACTIVE)
+                .toList();
+
+        if (buildings.isEmpty()) return;
+
+        player.sendMessage(Component.text("🏗 YOUR BUILDINGS")
+                .color(NamedTextColor.AQUA).decorate(TextDecoration.BOLD));
+
+        for (RegisteredBuilding building : buildings) {
+            String variant = building.variant();
+            Component line = Component.text("  ✓ ")
+                    .color(NamedTextColor.GREEN)
+                    .append(Component.text(building.type().getDisplayName())
+                            .color(NamedTextColor.WHITE));
+
+            if (variant != null && !variant.equals("Standard") && !variant.equals("None") && !variant.isEmpty()) {
+                if (variant.contains("(needs")) {
+                    String baseName = variant.substring(0, variant.indexOf(" (needs")).trim();
+                    String needs = variant.substring(variant.indexOf("(needs ") + 7, variant.length() - 1);
+                    line = line.append(Component.text(" — " + baseName + " ")
+                                    .color(NamedTextColor.YELLOW))
+                            .append(Component.text("(upgrade: add " + needs + ")")
+                                    .color(NamedTextColor.GRAY));
+                } else {
+                    line = line.append(Component.text(" — " + variant + " ✓")
+                            .color(NamedTextColor.AQUA));
+                }
+            }
+
+            player.sendMessage(line);
+        }
+
+        player.sendMessage(Component.text("─────────────────────────────")
+                .color(NamedTextColor.DARK_GRAY));
     }
 
     /**

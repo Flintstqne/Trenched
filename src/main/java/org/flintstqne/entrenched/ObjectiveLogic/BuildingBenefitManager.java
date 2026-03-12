@@ -267,20 +267,26 @@ public class BuildingBenefitManager {
      */
     private void applyOutpostVariantBuff(Player player, RegisteredBuilding building) {
         String variant = building.variant();
-        if (variant == null || variant.equals("Standard")) {
+        if (variant == null || variant.equals("Standard") || variant.isEmpty()) {
             return; // No buff for standard outposts
         }
 
         PotionEffectType effectType = null;
         int durationTicks = 5 * 60 * 20; // 5 minutes
 
-        switch (variant) {
-            case "Mining Outpost" -> effectType = PotionEffectType.LUCK; // Fortune equivalent
-            case "Fishing Outpost" -> effectType = PotionEffectType.LUCK; // Luck of the Sea equivalent
-            case "Farm Outpost" -> effectType = PotionEffectType.SATURATION;
-            case "Forest Outpost" -> effectType = PotionEffectType.HASTE;
-            case "Mountain Outpost" -> effectType = PotionEffectType.SLOW_FALLING;
-            case "Desert Outpost" -> effectType = PotionEffectType.FIRE_RESISTANCE;
+        // Use startsWith to handle variants that may still have "(needs ...)" suffix
+        if (variant.startsWith("Mining Outpost")) {
+            effectType = PotionEffectType.LUCK; // Fortune equivalent
+        } else if (variant.startsWith("Fishing Outpost")) {
+            effectType = PotionEffectType.LUCK; // Luck of the Sea equivalent
+        } else if (variant.startsWith("Farm Outpost")) {
+            effectType = PotionEffectType.SATURATION;
+        } else if (variant.startsWith("Forest Outpost")) {
+            effectType = PotionEffectType.HASTE;
+        } else if (variant.startsWith("Mountain Outpost")) {
+            effectType = PotionEffectType.SLOW_FALLING;
+        } else if (variant.startsWith("Desert Outpost")) {
+            effectType = PotionEffectType.FIRE_RESISTANCE;
         }
 
         if (effectType != null) {
@@ -437,6 +443,8 @@ public class BuildingBenefitManager {
                     player.getLocation().getBlockY(),
                     player.getLocation().getBlockZ(),
                     building)) {
+                // Fire exit callback BEFORE removing so buffs (like outpost variant effects) get applied
+                onPlayerExitBuilding(player, building);
                 staleTrackedPlayers.add(entry.getKey());
             }
         }

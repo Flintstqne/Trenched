@@ -32,10 +32,18 @@ public final class BuildingDetector {
 
     private final ConfigManager config;
     private final boolean debugEnabled;
+    private PlacedBlockTracker placedBlockTracker;
 
     public BuildingDetector(ConfigManager config) {
         this.config = config;
         this.debugEnabled = config.isBuildingDetectionDebugEnabled();
+    }
+
+    /**
+     * Sets the player-placed block tracker for filtering natural terrain.
+     */
+    public void setPlacedBlockTracker(PlacedBlockTracker tracker) {
+        this.placedBlockTracker = tracker;
     }
 
     private void debug(String message) {
@@ -72,6 +80,20 @@ public final class BuildingDetector {
 
         debug("Scanning at %d,%d,%d (radius=%d, vertical=%d)", centerX, centerY, centerZ, radius, verticalRange);
 
+        // Determine if we should use player-placed block filtering
+        boolean useTracking = config.isPlayerPlacedTrackingEnabled()
+                && placedBlockTracker != null
+                && placedBlockTracker.isRegionLoaded(objective.regionId());
+        Set<Long> placedSet = useTracking ? placedBlockTracker.getRegionSet(objective.regionId()) : null;
+
+        if (useTracking) {
+            debug("Using player-placed block filtering (tracked blocks: %d)", placedSet != null ? placedSet.size() : 0);
+        } else {
+            debug("Using material-based filtering (tracking %s)",
+                    placedBlockTracker == null ? "not available" :
+                    !config.isPlayerPlacedTrackingEnabled() ? "disabled" : "region not loaded");
+        }
+
         Map<BlockPos, Material> relevantBlocks = new HashMap<>();
         int minY = Math.max(world.getMinHeight(), centerY - verticalRange);
         int maxY = Math.min(world.getMaxHeight() - 1, centerY + verticalRange);
@@ -87,7 +109,16 @@ public final class BuildingDetector {
                 for (int y = minY; y <= maxY; y++) {
                     Material material = world.getBlockAt(x, y, z).getType();
                     if (isRelevantMaterial(material, type)) {
-                        relevantBlocks.put(new BlockPos(x, y, z), material);
+                        if (useTracking) {
+                            // Only count blocks that are inherently player-placed OR tracked as placed
+                            if (isInherentlyPlayerPlaced(material)
+                                    || (placedSet != null && placedSet.contains(PlacedBlockTracker.packCoord(x, y, z)))) {
+                                relevantBlocks.put(new BlockPos(x, y, z), material);
+                            }
+                        } else {
+                            // Fallback: material-based filtering (current behavior with LOG exclusion)
+                            relevantBlocks.put(new BlockPos(x, y, z), material);
+                        }
                     }
                 }
             }
@@ -968,6 +999,36 @@ public final class BuildingDetector {
                 || (type == BuildingType.WATCHTOWER && material == Material.CAMPFIRE);
     }
 
+    /**
+     * Returns true for materials that never generate naturally in the world.
+     * These blocks don't need player-placed tracking because their mere existence
+     * at a location proves a player placed them.
+     */
+    private boolean isInherentlyPlayerPlaced(Material material) {
+        if (material == null) return false;
+        // Storage blocks
+        if (isStorageMaterial(material)) return true;
+        // Utility blocks
+        if (isGeneralUtility(material)) return true;
+        // Entrance blocks (doors, trapdoors, fence gates)
+        if (isEntranceMaterial(material)) return true;
+        // Other inherently player-placed blocks
+        return switch (material) {
+            case CRAFTING_TABLE, CAMPFIRE, SOUL_CAMPFIRE,
+                    LADDER, SCAFFOLDING,
+                    LECTERN, ENCHANTING_TABLE,
+                    SMITHING_TABLE, GRINDSTONE, FLETCHING_TABLE,
+                    BOOKSHELF, LANTERN, SOUL_LANTERN,
+                    TORCH, WALL_TORCH, SOUL_TORCH, SOUL_WALL_TORCH,
+                    REDSTONE_TORCH, REDSTONE_WALL_TORCH -> true;
+            default -> {
+                String name = material.name();
+                // Beds and banners are always player-placed
+                yield name.contains("_BED") || name.contains("_BANNER");
+            }
+        };
+    }
+
     private boolean isConstructionMaterial(Material material) {
         if (material == null || material.isAir() || !material.isBlock()) {
             return false;
@@ -978,6 +1039,11 @@ public final class BuildingDetector {
 
         String name = material.name();
         if (name.contains("LEAVES") || name.contains("ORE")) {
+            return false;
+        }
+        // Exclude unstripped logs/wood — these are natural tree blocks.
+        // Stripped variants (STRIPPED_OAK_LOG, etc.) still count since stripping requires player action.
+        if ((name.contains("LOG") || name.contains("WOOD")) && !name.contains("STRIPPED")) {
             return false;
         }
 

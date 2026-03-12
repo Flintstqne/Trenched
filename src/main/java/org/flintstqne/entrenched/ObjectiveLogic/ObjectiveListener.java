@@ -67,6 +67,7 @@ public class ObjectiveListener implements Listener {
     private BukkitTask cleanupTask;
     private RoundService roundService;
     private StatListener statListener;
+    private PlacedBlockTracker placedBlockTracker;
 
     // Building damage tracking - tracks who damaged a building (block break or TNT)
     // objectiveId -> Set of damagers (all get credit)
@@ -121,6 +122,13 @@ public class ObjectiveListener implements Listener {
      */
     public void setStatListener(org.flintstqne.entrenched.StatLogic.StatListener statListener) {
         this.statListener = statListener;
+    }
+
+    /**
+     * Sets the placed block tracker for structure detection.
+     */
+    public void setPlacedBlockTracker(PlacedBlockTracker tracker) {
+        this.placedBlockTracker = tracker;
     }
 
     /**
@@ -244,6 +252,11 @@ public class ObjectiveListener implements Listener {
         if (regionId == null) return;
 
         String blockType = event.getBlock().getType().name();
+
+        // Untrack broken block from placed block tracking
+        if (placedBlockTracker != null) {
+            placedBlockTracker.untrackBlock(x, y, z);
+        }
 
         // Notify objective service
         objectiveService.onBlockDestroyed(player.getUniqueId(), team, regionId, x, y, z, blockType);
@@ -478,6 +491,11 @@ public class ObjectiveListener implements Listener {
 
         String blockType = event.getBlock().getType().name();
 
+        // Track player-placed block for structure detection
+        if (placedBlockTracker != null && isNearBuildingObjective(regionId, x, y, z)) {
+            placedBlockTracker.trackBlock(x, y, z, player.getUniqueId(), team, regionId);
+        }
+
         // Notify objective service
         objectiveService.onBlockPlaced(player.getUniqueId(), team, regionId, x, y, z, blockType);
 
@@ -545,6 +563,12 @@ public class ObjectiveListener implements Listener {
             int x = block.getX();
             int y = block.getY();
             int z = block.getZ();
+
+            // Untrack exploded blocks from placed block tracking
+            if (placedBlockTracker != null) {
+                placedBlockTracker.untrackBlock(x, y, z);
+            }
+
 
             Optional<RegisteredBuilding> buildingOpt = objectiveService.getRegisteredBuildingAtLocation(x, y, z);
             if (buildingOpt.isPresent()) {
@@ -867,5 +891,45 @@ public class ObjectiveListener implements Listener {
 
         plugin.getLogger().fine("[Stats] Cleaned up old tracking entries - building: " +
                 buildingDamageTracking.size() + ", tnt: " + tntPlacerTracking.size());
+    }
+
+    /**
+     * Checks if a block is within the detection radius of any building objective
+     * or registered building in the given region. Used to scope player-placed block
+     * tracking so we only track blocks relevant to structure detection.
+     */
+    private boolean isNearBuildingObjective(String regionId, int x, int y, int z) {
+        int radius = config.getBuildingDetectionRadius() + 2; // small buffer
+        int radiusSq = radius * radius;
+
+        // Check active building objectives
+        var settlements = objectiveService.getActiveObjectives(regionId, ObjectiveCategory.SETTLEMENT);
+        for (var obj : settlements) {
+            if ((obj.type() == ObjectiveType.SETTLEMENT_OUTPOST
+                    || obj.type() == ObjectiveType.SETTLEMENT_WATCHTOWER
+                    || obj.type() == ObjectiveType.SETTLEMENT_GARRISON)
+                    && obj.hasLocation()) {
+                int dx = x - obj.locationX();
+                int dz = z - obj.locationZ();
+                if (dx * dx + dz * dz <= radiusSq) {
+                    placedBlockTracker.loadRegion(regionId); // ensure cache loaded
+                    return true;
+                }
+            }
+        }
+
+        // Check registered buildings
+        for (var building : objectiveService.getAllActiveBuildings()) {
+            if (building.regionId().equals(regionId)) {
+                int dx = x - building.anchorX();
+                int dz = z - building.anchorZ();
+                if (dx * dx + dz * dz <= radiusSq) {
+                    placedBlockTracker.loadRegion(regionId);
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 }
