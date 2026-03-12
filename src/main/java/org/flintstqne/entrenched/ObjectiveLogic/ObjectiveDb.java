@@ -133,6 +133,25 @@ public final class ObjectiveDb implements AutoCloseable {
                 ON registered_buildings(round_id, status)
                 """);
         }
+
+        migrateRegisteredBuildingColumns();
+    }
+
+    private void migrateRegisteredBuildingColumns() throws SQLException {
+        Set<String> columns = new HashSet<>();
+
+        try (Statement st = connection.createStatement();
+             ResultSet rs = st.executeQuery("PRAGMA table_info(registered_buildings)")) {
+            while (rs.next()) {
+                columns.add(rs.getString("name"));
+            }
+        }
+
+        if (columns.contains("type") && !columns.contains("building_type")) {
+            try (Statement st = connection.createStatement()) {
+                st.executeUpdate("ALTER TABLE registered_buildings RENAME COLUMN type TO building_type");
+            }
+        }
     }
 
     @Override
@@ -239,6 +258,33 @@ public final class ObjectiveDb implements AutoCloseable {
         return getActiveObjectives(regionId, roundId).stream()
                 .filter(o -> o.type().getCategory() == category)
                 .toList();
+    }
+
+   /**
+     * Gets all active objectives for a round across all regions.
+     */
+    public List<RegionObjective> getActiveObjectivesByRound(int roundId) {
+        String sql = """
+            SELECT * FROM region_objectives 
+            WHERE round_id = ? AND status = 'ACTIVE'
+            ORDER BY created_at ASC
+            """;
+
+        List<RegionObjective> objectives = new ArrayList<>();
+
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setInt(1, roundId);
+
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    objectives.add(mapObjective(rs));
+                }
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to get active objectives by round", e);
+        }
+
+        return objectives;
     }
 
     /**
@@ -637,6 +683,59 @@ public final class ObjectiveDb implements AutoCloseable {
             throw new RuntimeException("Failed to get registered buildings by status", e);
         }
         return buildings;
+    }
+
+    /**
+     * Gets all active registered buildings in a region for a specific team.
+     */
+    public List<RegisteredBuilding> getActiveRegisteredBuildingsInRegion(String regionId, int roundId, String team) {
+        String sql = """
+            SELECT * FROM registered_buildings
+            WHERE region_id = ? AND round_id = ? AND team = ? AND status = ?
+            ORDER BY building_type ASC
+            """;
+
+        List<RegisteredBuilding> buildings = new ArrayList<>();
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setString(1, regionId);
+            ps.setInt(2, roundId);
+            ps.setString(3, team);
+            ps.setString(4, RegisteredBuildingStatus.ACTIVE.name());
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    buildings.add(mapRegisteredBuilding(rs));
+                }
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to get active buildings in region for team", e);
+        }
+        return buildings;
+    }
+
+    /**
+     * Counts active registered buildings of a specific type in a region for a team.
+     */
+    public int countActiveRegisteredBuildingsByType(String regionId, int roundId, String team, BuildingType type) {
+        String sql = """
+            SELECT COUNT(*) FROM registered_buildings
+            WHERE region_id = ? AND round_id = ? AND team = ? AND building_type = ? AND status = ?
+            """;
+
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setString(1, regionId);
+            ps.setInt(2, roundId);
+            ps.setString(3, team);
+            ps.setString(4, type.name());
+            ps.setString(5, RegisteredBuildingStatus.ACTIVE.name());
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    return rs.getInt(1);
+                }
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to count active buildings by type", e);
+        }
+        return 0;
     }
 
     public void invalidateRegisteredBuilding(int objectiveId, long now) {

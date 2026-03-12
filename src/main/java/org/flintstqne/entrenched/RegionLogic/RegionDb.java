@@ -281,6 +281,26 @@ public final class RegionDb implements AutoCloseable {
         }
     }
 
+    /**
+     * Gets the UUID of the player who earned the most influence in a region this round.
+     */
+    public java.util.Optional<String> getTopContributor(String regionId, int roundId) {
+        try (PreparedStatement ps = connection.prepareStatement("""
+            SELECT player_uuid FROM player_region_stats 
+            WHERE region_id = ? AND round_id = ?
+            ORDER BY influence_earned DESC
+            LIMIT 1
+            """)) {
+            ps.setString(1, regionId);
+            ps.setInt(2, roundId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? java.util.Optional.of(rs.getString("player_uuid")) : java.util.Optional.empty();
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to get top contributor", e);
+        }
+    }
+
     // ==================== KILL TRACKING METHODS ====================
 
     public int getKillCount(String killerUuid, String victimUuid, String regionId, int roundId) {

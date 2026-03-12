@@ -1,8 +1,66 @@
 # Building System Design
 
-**Last Updated:** February 24, 2026
+**Last Updated:** March 11, 2026
 
 This document outlines the purposes and mechanics for settlement buildings in Entrenched.
+
+---
+
+## ✅ Implementation Status
+
+All three core building types are **fully implemented** with score-based detection:
+
+| Building | Status | Required Score | Detection File |
+|----------|--------|----------------|----------------|
+| **Outpost** | ✅ Complete | 70/100 | `BuildingDetector.java` |
+| **Watchtower** | ✅ Complete | 65/100 | `BuildingDetector.java` |
+| **Garrison** | ✅ Complete | 75/100 | `BuildingDetector.java` |
+
+### How Detection Works
+
+1. **Periodic Scanning**: `tickStructureObjectives()` runs every 1 second
+2. **Component Detection**: Flood-fill algorithm finds connected building blocks
+3. **Score Calculation**: 5 categories (structure, interior, access, signature, context)
+4. **Progress Feedback**: Boss bar shows plain-language checklist and variant upgrade hints
+5. **Integrity Checks**: Registered buildings are re-scanned periodically
+
+### Terrain-Aware Outpost Spawning ✅
+
+Outpost objectives spawn at locations matching the **dominant terrain** in the region:
+
+1. **Region Analysis**: Samples 25 points in a 5×5 grid across the region
+2. **Terrain Classification**: Each point classified as WATER, FARM, DESERT, MOUNTAIN, UNDERGROUND, FOREST, or GENERIC
+3. **Smart Placement**: Picks spawn location matching the most common terrain type
+   - Water regions → shoreline spot (solid ground within 10 blocks of water) → Fishing Outpost
+   - Plains/meadow → flat grassland → Farm Outpost
+   - Desert/badlands → sand/terracotta → Desert Outpost
+   - High elevation → mountain peak → Mountain Outpost
+   - Ore-rich/deep → near exposed ore → Mining Outpost
+   - Forest/taiga/jungle → among trees → Forest Outpost
+4. **Logging**: Console shows terrain analysis per region
+
+### Variant Additional Requirements ✅
+
+Outpost variants require **both** the correct environment **and** specific blocks/items inside the building:
+- Building detector scans building bounds for furnaces, ladders, wool, cactus, etc.
+- Chest contents scanned for pickaxes, fishing rods, hoes, axes, water buckets, logs
+- Missing requirements shown in boss bar and `/obj` checklist
+- Buffs only apply when all variant requirements are met
+
+### Ambient Building Sounds ✅
+
+Registered buildings play subtle ambient sounds every ~3 seconds for team members within 16 blocks:
+
+| Building | Sound | Volume |
+|----------|-------|--------|
+| Outpost | Amethyst chime (`BLOCK_AMETHYST_BLOCK_CHIME`) | 0.15 |
+| Watchtower | Amethyst shimmer (`BLOCK_AMETHYST_CLUSTER_STEP`) | 0.15 |
+| Garrison | Campfire crackle (`BLOCK_CAMPFIRE_CRACKLE`) | 0.15 |
+
+### Debug Commands
+- `/admin objective list <region>` - View objective status with building detection results
+- `/admin buildings <red|blue|all>` - List all registered buildings per team
+- Building detection logs to console with `[Buildings]` prefix when debug mode is enabled
 
 ---
 
@@ -44,32 +102,107 @@ Buildings are structures players construct to complete settlement objectives and
 - **Foundation for region control** - First step in settlement
 - **No respawn benefits** - Must travel to outpost manually
 
-### Outpost Variants (Based on Spawn Location)
+### Outpost Variants (Terrain-Aware Spawning + Requirements)
 
-The objective system spawns outpost objectives at specific locations. The variant depends on WHERE the objective spawns:
+The objective system **analyzes the region's terrain** and spawns the outpost at a location matching the dominant terrain type. The variant is then confirmed by checking both the environment AND additional items inside the building:
 
-| Variant | Spawn Location | Additional Requirements | Bonus Effect |
-|---------|----------------|------------------------|--------------|
-| **Mining Outpost** | Near ore veins (Y < 50) | Furnace, Stone Pickaxe in chest | Fortune I buff for 5 min when leaving |
-| **Fishing Outpost** | Near water (ocean/river) | Fishing Rod in chest, within 10 blocks of water | Luck of the Sea buff for 5 min |
-| **Farm Outpost** | Plains/flat terrain | 16+ crops planted nearby, Hoe in chest | Saturation buff for 5 min |
-| **Forest Outpost** | Forest biome | 10+ logs in chest, Axe in chest | Haste I buff for 5 min (wood cutting) |
-| **Mountain Outpost** | High elevation (Y > 100) | Ladder access, 3+ wool blocks | Slow Falling buff for 5 min |
-| **Desert Outpost** | Desert biome | 3+ cactus, Water bucket in chest | Fire Resistance buff for 5 min |
+| Variant | Spawn Terrain | Additional Requirements | Bonus Effect |
+|---------|---------------|------------------------|--------------|
+| **Mining Outpost** | Near ore veins / underground | Furnace block + Pickaxe in chest | Fortune I buff for 5 min when leaving |
+| **Fishing Outpost** | Near water (ocean/river/shoreline) | Fishing Rod in chest | Luck of the Sea buff for 5 min |
+| **Farm Outpost** | Plains/flat terrain | Hoe in chest (16+ crops nearby auto-detected) | Saturation buff for 5 min |
+| **Forest Outpost** | Forest/taiga/jungle biome | 10+ logs in chest + Axe in chest | Haste I buff for 5 min (wood cutting) |
+| **Mountain Outpost** | High elevation (Y > sea+22) | Ladder/vine block + 3+ wool blocks | Slow Falling buff for 5 min |
+| **Desert Outpost** | Desert/badlands biome | 3+ cactus blocks + Water bucket in chest | Fire Resistance buff for 5 min |
 
-### Detection Mechanics
+**How Variant Detection Works (Two Phases):**
+
+1. **Environment Check** — The region terrain determines which variant is *possible* at the spawn location
+2. **Requirement Check** — The building detector scans the structure's bounds for specific blocks and chest contents
+
+**Scoring:**
+- **Full requirements met** → 5.0 context score + variant buff on leaving
+- **Environment only, missing items** → 3.0 context score + NO buff (displayed as e.g., "Mining Outpost (needs Furnace, Pickaxe in chest)")
+- **No environment match** → 2.0 context score, "Standard" variant, no buff
+
+### Boss Bar Variant Guidance ✅
+
+The boss bar guides players through **both** base building requirements and variant-specific upgrades:
+
+| Build Phase | Boss Bar Display |
+|-------------|-----------------|
+| Early building | `Need: Build bigger walls/floor & Add a roof` |
+| Almost done + variant available | `Need: Add a roof | Mining Outpost: Furnace, Pickaxe in chest` |
+| Structure complete, variant incomplete | `✓ Structure done! For Mining Outpost: add Furnace, Pickaxe in chest` |
+| Fully complete with variant | `✓ Mining Outpost registered!` |
+| Fully complete, standard | `✓ Complete! Building registered.` |
+
+The `/obj` checklist also shows variant upgrade requirements:
 ```
-Scan 10x10x10 area for:
-- At least 1 crafting table
-- At least 1 chest (single or double)
-- Enclosed by walls (2+ blocks high on all sides)
-- Roof coverage above interior
-- Variant-specific requirements based on spawn location
+✓ Walls & Structure (24+ blocks)
+✓ Floor Size (14+ blocks)
+✓ Enclosed Interior Space
+✓ Roof Coverage
+✓ Storage Chest
+✓ Crafting Table
+✓ Door/Entrance
+
+⬆ Mining Outpost Upgrade:
+  ✗ Furnace
+  ✗ Pickaxe in chest
 ```
 
-### Visual Indicators
-- **Particle Effect:** White sparkles rising from crafting table
-- **Sound:** Subtle ambient hum when near registered outpost
+### Detection Mechanics (Score-Based System)
+
+The building detector scans around the objective marker and scores structures on 5 categories:
+
+**Required Score: 70/100**
+
+| Category | Max Points | Requirements |
+|----------|------------|--------------|
+| Structure | 30 | 24+ structural blocks, 14+ footprint, roof coverage |
+| Interior | 25 | 5+ interior cells, floor area, enclosure quality |
+| Access | 20 | Door/entrance, entrance blocks |
+| Signature | 20 | 1+ chest (9 pts), 1+ crafting table (9 pts), utility blocks |
+| Context | 5 | Variant bonuses (fishing, mining, farm, etc.) |
+
+**Debug Output Example:**
+```
+[Buildings] === SCAN START: OUTPOST in region B1 ===
+[Buildings] Scanning at -315,72,-220 (radius=16, vertical=12)
+[Buildings] Found 48 relevant blocks in scan area
+[Buildings] Split into 2 connected components (anchor radius=8)
+[Buildings] Component #1 (42 blocks): Anchored - evaluating...
+[Buildings]   [OUTPOST] Stats: structural=38 (need 24), footprint=16 (need 14), interior=8 (need 6)
+[Buildings]   [OUTPOST] Features: roof=75% (need 60%), chests=2, crafting=1, entrances=1
+[Buildings]   [OUTPOST] Scores: structure=28.5/30, interior=22.0/25, access=18.0/20, signature=20.0/20, context=5.0/5
+[Buildings]   [OUTPOST] TOTAL: 93.5/70.0 (134%)
+[Buildings] Component #1 score: 93.5/70.0 (VALID)
+[Buildings] RESULT: 1 anchored components, best score=93.5, valid=true
+```
+
+**Terrain-Aware Spawn Log Example:**
+```
+[Objectives] Terrain analysis for B1: FOREST=12 MOUNTAIN=5 WATER=3 FARM=2 DESERT=0 UNDERGROUND=0
+[Objectives] Spawning FOREST outpost in B1 (-715,82,-201)
+```
+
+**Variant Requirement Check (when items are missing):**
+```
+[Buildings]   [VARIANT] Forest environment detected but missing: logsInChest=0/10, axe=false
+```
+
+**Enable Debug Logging:**
+```yaml
+# config.yml
+regions:
+  objectives:
+    building-detection-debug: true
+```
+
+### Visual Indicators ✅
+- **Particle Effect:** White sparkles (END_ROD) rising from building center, visible to team within 32 blocks
+- **Sound:** Subtle amethyst chime every ~3 seconds when within 16 blocks (team only)
 - **Map Marker:** Small tent icon on BlueMap
 
 ---
@@ -108,14 +241,25 @@ Scan 10x10x10 area for:
 - **Defensive structure** - Provides overwatch for defenders
 - **Requires presence** - Must have player stationed to be effective
 
-### Detection Mechanics
+### Detection Mechanics (Score-Based System)
+
+**Required Score: 65/100**
+
+| Category | Max Points | Requirements |
+|----------|------------|--------------|
+| Structure | 35 | Height (14+ blocks), structural blocks (45+), base footprint (3+) |
+| Interior | 15 | Support strength (65%+ structural support under tower) |
+| Access | 25 | Access coverage (55%+ climbable route via ladders/stairs) |
+| Signature | 25 | Platform size (4+ blocks at top), openness (35%+ clear visibility) |
+| Context | 15 | Sky exposure, exposed terrain bonus |
+
+**Debug Output Example:**
 ```
-Scan for:
-- Solid blocks forming vertical structure
-- Minimum 15 blocks from ground to top platform
-- Platform at top (3x3 solid blocks)
-- Clear sky access (no blocks above platform)
-- Climbable access (ladder, stairs, or scaffolding)
+[Buildings] === SCAN START: WATCHTOWER in region A2 ===
+[Buildings]   [WATCHTOWER] Tower analysis: height=18 (need 14), platform=6 (need 4), base=4 (need 3)
+[Buildings]   [WATCHTOWER] Tower ratios: access=72% (need 55%), support=80% (need 65%), openness=55% (need 35%)
+[Buildings]   [WATCHTOWER] Scores: structure=32.0/35, interior=12.0/15, access=19.4/25, signature=22.5/25, context=11.0/15
+[Buildings]   [WATCHTOWER] TOTAL: 96.9/65.0 (149%)
 ```
 
 ### Height Bonuses
@@ -126,8 +270,9 @@ Scan for:
 | 25-29 blocks | 128 blocks | +100% |
 | 30+ blocks | 160 blocks | +150% |
 
-### Visual Indicators
-- **Particle Effect:** Blue beacon-like particles at platform level
+### Visual Indicators ✅
+- **Particle Effect:** Blue soul fire flame particles at platform level, visible to team within 32 blocks
+- **Sound:** Subtle amethyst shimmer every ~3 seconds when within 16 blocks (team only)
 - **Glowing Outline:** Enemies within detection range get glowing effect (only visible to watchtower occupant)
 - **Map Marker:** Tower icon on BlueMap with detection radius circle
 
@@ -187,22 +332,33 @@ The garrison provides additional bonuses based on what is built INSIDE:
 | 6-8 | 5 | 10 |
 | 9+ | 6 | 12 |
 
-### Detection Mechanics
+### Detection Mechanics (Score-Based System)
+
+**Required Score: 75/100**
+
+| Category | Max Points | Requirements |
+|----------|------------|--------------|
+| Structure | 30 | 34+ structural blocks, 18+ footprint, 65%+ roof coverage |
+| Interior | 25 | 10+ interior cells, 12+ floor area, enclosure quality |
+| Access | 15 | Door/entrance (8 pts), additional entrance blocks |
+| Signature | 20 | 3+ team-colored beds (4 pts each), storage, military utility |
+| Context | 10 | Variant bonuses (medical, armory, command, etc.) |
+
+**Important:** Beds must match team color! RED team needs RED_BED, BLUE team needs BLUE_BED.
+
+**Debug Output Example:**
 ```
-Scan for:
-- Minimum 3 beds within enclosed structure
-- All beds must be team color (RED_BED or BLUE_BED)
-- Roof blocks above all beds (within 5 blocks)
-- Wall blocks on all 4 sides (at least 2 high)
-- At least 1 door for entry
-- Minimum 5x5 floor space
-- Check for variant requirements
+[Buildings] === SCAN START: GARRISON in region C1 ===
+[Buildings]   [GARRISON] Stats: structural=52 (need 34), floor=18 (need 12), interior=14 (need 10)
+[Buildings]   [GARRISON] Features: roof=85% (need 65%), beds=4/4 (need 3 team), entrances=2
+[Buildings]   [GARRISON] Team='RED', teamBeds=4, allBeds=4
+[Buildings]   [GARRISON] Scores: structure=28.0/30, interior=23.0/25, access=15.0/15, signature=20.0/20, context=8.0/10
+[Buildings]   [GARRISON] TOTAL: 94.0/75.0 (125%)
 ```
 
-### Visual Indicators
-- **Particle Effect:** Team-colored flames rising from beds (red/blue)
-- **Beacon Beam:** Short colored beam visible from distance (toggleable)
-- **Sound:** Military drum beat when garrison is registered
+### Visual Indicators ✅
+- **Particle Effect:** Team-colored flames (FLAME for red, SOUL_FIRE_FLAME for blue) rising from center, visible to team within 32 blocks
+- **Sound:** Campfire crackle every ~3 seconds when within 16 blocks (team only)
 - **Map Marker:** Garrison icon on BlueMap with capacity indicator
 
 ---
@@ -245,10 +401,14 @@ Buildings are **NOT** inherently protected. Protection comes from **region owner
 | Watchtower | Platform broken OR height reduced below 15 | Detection lost immediately |
 | Garrison | 2+ beds broken OR walls breached | Removed from spawn map, team notified |
 
-### Destruction Notifications
-- **Outpost:** "[Region] Outpost destroyed!" (local team message)
-- **Watchtower:** "⚠ Watchtower in [Region] has fallen!" (team-wide)
-- **Garrison:** "🚨 GARRISON DESTROYED in [Region]! Spawn point lost!" (team-wide, with sound)
+### Destruction Notifications ✅
+When a building is destroyed, a message is broadcast to all players in the region:
+- **Construction:** `"<Variant> <Building Type> has been constructed! (<x>, <y>, <z>)"`
+- **Outpost:** `"Outpost destroyed! (x: <x>, z: <z>) Repair it to regain its benefits!"`
+- **Watchtower:** `"⚠ Watchtower in [Region] has fallen!"` (team-wide)
+- **Garrison:** `"🚨 GARRISON DESTROYED in [Region]! Spawn point lost!"` (team-wide, with sound)
+
+Buildings inside structures are also excluded from road damage notifications.
 
 ---
 
@@ -280,39 +440,50 @@ Buildings are **NOT** inherently protected. Protection comes from **region owner
 
 | Building | Particle Effect | Map Marker | Sound |
 |----------|-----------------|------------|-------|
-| Outpost | White sparkles (crafting table) | Tent icon | Ambient hum |
-| Watchtower | Blue beacon particles | Tower + radius | Wind whistle |
-| Garrison | Team-colored flames | Garrison + capacity | Military drums |
+| Outpost | White sparkles (END_ROD) at center | Tent icon | Amethyst chime (~3s) |
+| Watchtower | Blue soul fire at platform | Tower + radius | Amethyst shimmer (~3s) |
+| Garrison | Team-colored flames at center | Garrison + capacity | Campfire crackle (~3s) |
 
 ### Particle Visibility
 - Particles visible from **32 blocks** away
 - Particles only visible to **team members** (enemies don't see them)
+- Ambient sounds play at **0.15 volume** within **16 blocks** (team only)
 - Can be toggled off per-player with `/settings particles`
 
 ---
 
 ## ❓ Questions to Resolve
 
-1. **How are buildings "registered" as complete?**
-   - Automatic detection when requirements met?
-   - Player must use command/item to register?
+1. **How are buildings "registered" as complete?** ✅ RESOLVED
+   - **Automatic detection** - `tickStructureObjectives()` runs every 1 second
+   - Building must maintain valid score for `building-validation-seconds` (default: 3s)
+   - Once registered, integrity checks run every `building-integrity-check-seconds` (default: 5s)
 
 2. **Should watchtower detection work when unoccupied?**
    - Currently requires player presence
    - Could add "automated" upgrade with redstone?
 
-3. **What happens to buildings when region changes hands?**
-   - Destroyed automatically?
-   - Become "neutral" and can be claimed?
-   - Stay as enemy buildings until destroyed?
+3. **What happens to buildings when region changes hands?** ✅ RESOLVED
+   - Buildings remain physically but lose gameplay benefits
+   - Enemy buildings become valid raid targets
+   - Original team can reclaim by reconquering region
+   - Building destruction is broadcast to players in the region
 
-4. **How often should building detection run?**
-   - Every X seconds per region?
-   - Only when player places relevant block?
+4. **How often should building detection run?** ✅ RESOLVED
+   - Detection runs every **1 second** (`structureTask` at 20 ticks)
+   - Uses debouncing (`building-detection-debounce-ticks`: 20) to prevent spam
+   - Integrity checks run every `building-integrity-check-seconds` (default: 5s)
 
 5. **Should garrison teleport have a cooldown?**
    - Per-player cooldown after teleporting?
    - Prevent rapid repositioning?
+
+6. **How are outpost variants determined?** ✅ RESOLVED
+   - **Terrain-aware spawning** analyzes region terrain (25-point grid sample)
+   - Objective spawns at location matching dominant terrain type
+   - Variant confirmed by scanning building for **both** environment AND specific blocks/items
+   - Boss bar and `/obj` checklist guide players through variant requirements
+   - Buffs only granted when ALL variant requirements are met
 
 ---
 

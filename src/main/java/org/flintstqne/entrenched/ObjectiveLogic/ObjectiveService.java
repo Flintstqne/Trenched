@@ -272,6 +272,23 @@ public interface ObjectiveService {
     Optional<BuildingDetectionResult> getBuildingDetectionResult(int objectiveId);
 
     /**
+     * Checks if a block is within any active registered building.
+     * Used to exclude building blocks from road damage notifications.
+     * @return Optional containing the building if block is inside one, empty otherwise
+     */
+    Optional<RegisteredBuilding> getRegisteredBuildingAtLocation(int x, int y, int z);
+
+    /**
+     * Gets all active registered buildings in the current round.
+     */
+    List<RegisteredBuilding> getAllActiveBuildings();
+
+    /**
+     * Sets a callback for when a registered building is destroyed/invalidated.
+     */
+    void setBuildingDestroyedCallback(BuildingDestroyedCallback callback);
+
+    /**
      * Clears all tracked data (block tracking, etc.). Called on new round.
      */
     void clearTrackedData();
@@ -358,6 +375,11 @@ public interface ObjectiveService {
     @FunctionalInterface
     interface ObjectiveSpawnCallback {
         void onObjectiveSpawned(RegionObjective objective);
+    }
+
+    @FunctionalInterface
+    interface BuildingDestroyedCallback {
+        void onBuildingDestroyed(RegisteredBuilding building, String regionName);
     }
 }
 

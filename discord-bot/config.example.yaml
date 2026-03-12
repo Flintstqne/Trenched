@@ -1,0 +1,19 @@
+# Entrenched Discord Bot Configuration
+# Copy this file to config.yaml and fill in your values
+
+discord:
+  # Your Discord bot token from https://discord.com/developers/applications
+  token: "YOUR_DISCORD_BOT_TOKEN"
+
+  # Optional: Guild ID for faster command sync during development
+  # Leave empty or remove for global commands
+  guild_id: null
+
+api:
+  # URL to your Minecraft server's stats API
+  # Default port is 8080 unless changed in the plugin config
+  url: "http://localhost:8080"
+
+  # API key from your server's config.yml (stats-api.key)
+  key: "change-this-secret-key"
+

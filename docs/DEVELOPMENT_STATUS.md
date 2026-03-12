@@ -1,6 +1,6 @@
 # Entrenched (BlockHole) Development Status
 
-**Last Updated:** February 24, 2026
+**Last Updated:** March 10, 2026
 
 ---
 
@@ -145,6 +145,29 @@ Entrenched is a Minecraft PvP plugin featuring team-based warfare with:
 | **One-time Rewards** | ✅ Complete | Token rewards for each achievement |
 | **Achievement Notifications** | ✅ Complete | Sound + message when unlocked |
 
+### Statistics System
+
+> **📄 Full Documentation:** [STATS_SYSTEM.md](./STATS_SYSTEM.md)
+
+| Feature | Status | Description |
+|---------|--------|-------------|
+| **Stat Categories** | ✅ Complete | 35 stats across 5 groups (Combat, Territory, Objective, Building, Participation) |
+| **Async Batched Writes** | ✅ Complete | 10-second flush intervals for performance |
+| **Lifetime Stats** | ✅ Complete | Permanent stats across all rounds |
+| **Per-Round Stats** | ✅ Complete | Stats tracked per individual round |
+| **Assist Tracking** | ✅ Complete | 10-second damage window for assists |
+| **Revenge Kills** | ✅ Complete | Track kills against players who recently killed you |
+| **Login Streaks** | ✅ Complete | 36-hour offline resets streak |
+| **MVP Calculation** | ✅ Complete | Weighted formula: (kills×10)+(obj×25)+(captures×50)+(ip×0.1) |
+| **Player Stats Command** | ✅ Complete | `/stats [player]` - View personal or other player stats |
+| **Leaderboards** | ✅ Complete | `/stats leaderboard <category>` - Top 10 for any stat |
+| **Round Stats** | ✅ Complete | `/stats round [id]` - View round summary |
+| **Team Stats** | ✅ Complete | `/stats team <red\|blue>` - Team aggregate stats |
+| **REST API** | ✅ Complete | Rate-limited API for external access (Discord bot) |
+| **API Rate Limiting** | ✅ Complete | 60 req/min per API key (configurable) |
+| **Admin Purge** | ✅ Complete | `/admin stats purge <roundId>` with confirmation |
+| **Discord Bot** | ✅ Complete | Scaffolded Discord.py bot in `discord-bot/` |
+
 ### Admin Commands
 
 | Feature | Status | Description |
@@ -155,6 +178,7 @@ Entrenched is a Minecraft PvP plugin featuring team-based warfare with:
 | **Supply Debug** | ✅ Complete | Full suite of debug commands |
 | **New Round** | ✅ Complete | `/round new` - Full world reset |
 | **Merit Admin** | ✅ Complete | `/admin merit <give\|givetokens\|set\|reset\|info\|leaderboard>` |
+| **Stats Admin** | ✅ Complete | `/admin stats <purge\|list>` |
 
 ---
 
@@ -189,12 +213,12 @@ The objectives system provides SETTLEMENT objectives (for neutral regions) and R
 | **Plant Explosive** | Raid | ✅ Complete | Place TNT at target, defend 30s (defenders can defuse) |
 | **Capture Intel** | Raid | ✅ Complete | Pick up intel item, return to friendly territory (10 min lifetime) |
 | **Hold Ground** | Raid | ✅ Complete | Hold region center 60s (both teams see alerts) |
-| **Establish Outpost** | Settlement | ❌ Not Started | Build structure with bed/chest/crafting table |
+| **Establish Outpost** | Settlement | ✅ Complete | Build structure with shelter, storage, crafting (score-based detection) |
 | **Secure Perimeter** | Settlement | ✅ Complete | Build 100 defensive wall blocks (anti-cheese tracking) |
 | **Build Supply Route** | Settlement | ✅ Complete | Build 64 road blocks near friendly territory border |
-| **Build Watchtower** | Settlement | ❌ Not Started | Build 15+ block tall structure |
+| **Build Watchtower** | Settlement | ✅ Complete | Build 15+ block tall structure with platform (score-based detection) |
 | **Establish Resource Depot** | Settlement | ✅ Complete | 4+ containers with 500+ items each (anti-cheese tracking) |
-| **Build Garrison Quarters** | Settlement | ❌ Not Started | Build barracks with 3+ beds (enables quick travel spawn point) |
+| **Build Garrison Quarters** | Settlement | ✅ Complete | Build enclosed barracks with 3+ team beds (score-based detection) |
 
 #### Objectives UI & Features
 
@@ -219,9 +243,6 @@ The objectives system provides SETTLEMENT objectives (for neutral regions) and R
 
 | Feature | Status | Description |
 |---------|--------|-------------|
-| **Establish Outpost** | ❌ Not Started | Settlement objective - Build structure with bed/chest/crafting table |
-| **Build Watchtower** | ❌ Not Started | Settlement objective - Build 15+ block tall structure |
-| **Build Garrison Quarters** | ❌ Not Started | Settlement objective - Build barracks with 3+ beds, enables quick travel spawn point |
 | **Win Condition Detection** | ❌ Not Started | Auto-detect when team wins |
 | **Round Statistics** | ❌ Not Started | Post-round stats summary |
 
@@ -321,35 +342,93 @@ A spawn-based travel system tied to the "Build Garrison Quarters" objective.
 
 | Feature | Status | Description |
 |---------|--------|-------------|
-| **Spawn Map Item** | 📋 Planned | Players receive a map item when spawning in home region |
-| **Region Grid GUI** | 📋 Planned | Map opens inventory grid showing current server state |
-| **Garrison Teleport** | 📋 Planned | Can teleport to any garrison in friendly regions |
-| **Distance Limit** | 📋 Planned | Map disappears after moving X blocks from spawn point |
-| **One-Time Use** | 📋 Planned | Cannot use map again after it disappears |
+| **Spawn Map Item** | ✅ Complete | Players receive a map item after respawning at team spawn |
+| **Garrison Selection GUI** | ✅ Complete | Right-click map to open inventory GUI showing all friendly garrisons |
+| **Teleport to Garrison** | ✅ Complete | Click a garrison in GUI to teleport there |
+| **Teleport Cooldown** | ✅ Complete | 60-second cooldown between garrison teleports |
+| **Spawn Map Distance Limit** | ✅ Complete | Map disappears if player moves 50+ blocks from spawn |
+| **Garrison Capacity** | ✅ Complete | Limited teleports per minute based on bed count (3-6/min) |
+| **Garrison Variants** | ✅ Complete | Different garrison types provide buffs on arrival |
+| **GarrisonSpawnService** | ✅ Complete | Core service managing spawn maps, teleportation, capacity |
+| **GarrisonSpawnListener** | ✅ Complete | Handles map interactions and GUI clicks |
+| **Respawn Callback** | ✅ Complete | DeathListener triggers spawn map on respawn |
 
-#### Garrison Mechanics
+#### Garrison Variants & Buffs
 
-1. **On Spawn (Home Region)**
-   - Player receives a special map item in their inventory
-   - Map item has custom NBT data tracking spawn location
+| Variant | Detection | Buff on Arrival |
+|---------|-----------|-----------------|
+| **Basic Garrison** | Default (3+ team beds) | Teleport only |
+| **Medical Garrison** | Brewing stands + utility blocks | Regeneration I (30s) |
+| **Armory Garrison** | Anvils + storage | Resistance I (30s) |
+| **Command Garrison** | Lecterns, banners | Strength I (30s) |
+| **Supply Garrison** | 4+ storage blocks | Saturation (60s) |
+| **Fortified Garrison** | 20+ defensive blocks | Resistance II (15s) |
 
-2. **Map Usage**
-   - Right-click map to open region grid GUI
-   - GUI shows all 16 regions with current ownership status
-   - Regions with friendly garrisons are highlighted/clickable
-   - Click a garrison region to teleport there
+#### Spawn Map Mechanics
 
-3. **Map Expiration**
-   - System tracks player's distance from spawn point
-   - Once player moves X blocks away (configurable), map is removed
-   - Prevents abuse of quick travel mid-game
-   - Encourages immediate decision-making on spawn
+1. **On Death/Respawn**
+   - Player dies and goes through spectator-like respawn experience
+   - After respawn timer, player teleports to team spawn
+   - If team has garrisons, player receives a Garrison Map in off-hand
 
-4. **Strategic Implications**
-   - Garrisons provide forward spawn options for team
-   - "Build Garrison Quarters" objective now has major gameplay value
-   - Teams can create spawn networks across the map
-   - Losing a garrison region = losing a spawn point
+2. **Using the Map**
+   - Right-click to open garrison selection GUI
+   - GUI shows all team garrisons with:
+     - Region name and coordinates
+     - Current capacity usage (X/Y this minute)
+     - Variant bonuses
+
+3. **Teleportation**
+   - Click garrison to teleport
+   - Capacity usage incremented
+   - Variant buff applied on arrival
+   - 60-second cooldown applied
+
+4. **Map Expiry**
+   - Map disappears if player moves 50+ blocks from spawn location
+   - Prevents using map as general fast-travel item
+
+### Building Benefit System
+
+Active gameplay effects for registered buildings.
+
+| Feature | Status | Description |
+|---------|--------|-------------|
+| **BuildingBenefitManager** | ✅ Complete | Core service managing building gameplay effects |
+| **Building Limits** | ✅ Complete | 2 outposts, 1 watchtower, 1 garrison per region per team |
+| **Limit Enforcement (Spawning)** | ✅ Complete | Skip building objectives if all teams at limit |
+| **Limit Enforcement (Registration)** | ✅ Complete | Don't register building if team at limit, notify player |
+| **Building Particles** | ✅ Complete | Team-visible particles at building locations |
+| **Building Destruction Callback** | ✅ Complete | Notify team when building is destroyed |
+| **Building Block Exclusion** | ✅ Complete | Building blocks excluded from road damage notifications |
+
+#### Outpost Benefits
+
+| Variant | Detection | Buff on Exit |
+|---------|-----------|--------------|
+| **Mining Outpost** | Near ores, low Y | Luck (5 min) |
+| **Fishing Outpost** | Near water | Luck (5 min) |
+| **Farm Outpost** | Near crops | Saturation (5 min) |
+| **Forest Outpost** | Forest biome, logs/leaves | Haste I (5 min) |
+| **Mountain Outpost** | High elevation (Y > sea+22) | Slow Falling (5 min) |
+| **Desert Outpost** | Desert biome, sand | Fire Resistance (5 min) |
+
+#### Watchtower Benefits
+
+| Feature | Description |
+|---------|-------------|
+| **Enemy Detection** | Players on watchtower platform detect enemies within range |
+| **Glowing Effect** | Detected enemies get brief glowing effect (visible to watchtower user) |
+| **Enemy Alerts** | "⚠ Enemy spotted in [Region]!" sent to team (30s cooldown) |
+| **Height-Based Range** | Detection range scales with tower height (64-160 blocks) |
+
+| Tower Height | Detection Range |
+|--------------|-----------------|
+| 15-19 blocks | 64 blocks |
+| 20-24 blocks | 96 blocks |
+| 25-29 blocks | 128 blocks |
+| 30+ blocks | 160 blocks |
+
 
 ---
 
@@ -441,28 +520,26 @@ src/main/java/org/flintstqne/entrenched/
 
 ## 🎯 Recommended Next Steps
 
-### Priority 1: Complete Remaining Objectives
-1. **Establish Outpost** - Build structure with bed/chest/crafting table
-2. **Build Watchtower** - Build 15+ block tall structure with line of sight
-3. **Build Garrison Quarters** - Build barracks with 3+ beds
+### Priority 1: Win Conditions
+1. Define win condition criteria (e.g., control X regions for Y minutes)
+2. Implement automatic win detection
+3. Add round-end summary with stats
+4. Handle round transitions gracefully
 
-### Priority 2: Container & Depot System
-1. **Team Chest Protection** - ✅ Complete
-2. **Division Depot Block** - Custom craftable block for shared division storage (see [DIVISION_DEPOT_DESIGN.md](./DIVISION_DEPOT_DESIGN.md))
-3. **Depot Storage System** - Database tables, save/load inventory
-4. **Depot Vulnerability** - Make depots raidable when sector is captured
-5. **Raid Tool** - Special tool to raid enemy depots and loot contents
-
-### Priority 3: Win Conditions
-1. Finalize automatic territory-control winner logic
-2. Implement win detection
-3. Add round-end summary
-
-
-### Priority 4: Quality of Life
-1. Player statistics tracking
+### Priority 2: Quality of Life
+1. Player statistics tracking (per-round and lifetime)
 2. Post-round statistics display
 3. Tutorial/onboarding for new players
+4. Improved BlueMap building markers
+
+### Priority 3: Future Building Types
+1. Forge - Equipment production buffs
+2. Field Hospital - Healing and respawn benefits
+3. Supply Depot - Supply level boost
+4. Signal Tower - Communication range
+5. Dock - Naval/water operations
+6. Shrine - Team morale buffs
+7. Workshop - Special crafting recipes
 
 ---
 

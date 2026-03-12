@@ -49,6 +49,13 @@ public class ObjectiveUIManager {
     private BukkitTask particleTask;
     private BukkitTask assassinationUpdateTask;
 
+    // Track which region each player was last in (for enemy-enter-region detection)
+    private final Map<UUID, String> playerLastRegion = new ConcurrentHashMap<>();
+
+    // Cooldown for threat alerts per region (regionId -> last alert timestamp)
+    private final Map<String, Long> threatAlertCooldowns = new ConcurrentHashMap<>();
+    private static final long THREAT_ALERT_COOLDOWN_MS = 60_000; // 1 minute between alerts per region
+
     public ObjectiveUIManager(JavaPlugin plugin, ObjectiveService objectiveService,
                                RegionService regionService, RoundService roundService,
                                TeamService teamService, ConfigManager config) {
@@ -119,10 +126,90 @@ public class ObjectiveUIManager {
         for (Player player : Bukkit.getOnlinePlayers()) {
             if (!player.getWorld().equals(gameWorld)) {
                 clearBossBars(player.getUniqueId());
+                playerLastRegion.remove(player.getUniqueId());
                 continue;
             }
 
+            // Check if an enemy just entered a defended region — alert defenders
+            checkEnemyRegionEntry(player, gameWorld);
+
             updatePlayerUI(player);
+        }
+    }
+
+    /**
+     * Checks if a player just entered a region they can attack.
+     * If so, alerts all defenders in that region about the threat.
+     * Only fires when:
+     * 1. The enemy's team owns an adjacent region (can actually capture)
+     * 2. The region has active raid objectives
+     * 3. The alert cooldown for that region has expired
+     */
+    private void checkEnemyRegionEntry(Player player, World gameWorld) {
+        String currentRegion = regionService.getRegionIdForLocation(
+                player.getLocation().getBlockX(),
+                player.getLocation().getBlockZ()
+        );
+
+        String previousRegion = playerLastRegion.put(player.getUniqueId(), currentRegion);
+
+        // Only trigger on region change
+        if (currentRegion == null || currentRegion.equals(previousRegion)) return;
+
+        // Get player's team
+        Optional<String> teamOpt = teamService.getPlayerTeam(player.getUniqueId());
+        if (teamOpt.isEmpty()) return;
+        String enemyTeam = teamOpt.get();
+
+        // Get region status
+        Optional<RegionStatus> statusOpt = regionService.getRegionStatus(currentRegion);
+        if (statusOpt.isEmpty()) return;
+        RegionStatus status = statusOpt.get();
+
+        // Region must be owned by the OTHER team (this player is an enemy entering)
+        if (status.ownerTeam() == null || status.ownerTeam().equalsIgnoreCase(enemyTeam)) return;
+        if (status.state() != RegionState.OWNED && status.state() != RegionState.CONTESTED) return;
+
+        // Enemy's team must own an adjacent region (can actually capture this region)
+        if (!regionService.isAdjacentToTeam(currentRegion, enemyTeam)) return;
+
+        // Must have active raid objectives
+        List<RegionObjective> raidObjectives = objectiveService.getActiveObjectives(currentRegion, ObjectiveCategory.RAID);
+        if (raidObjectives.isEmpty()) return;
+
+        // Check cooldown for this region
+        long now = System.currentTimeMillis();
+        Long lastAlert = threatAlertCooldowns.get(currentRegion);
+        if (lastAlert != null && (now - lastAlert) < THREAT_ALERT_COOLDOWN_MS) return;
+        threatAlertCooldowns.put(currentRegion, now);
+
+        // Alert all defenders in this region
+        String defenderTeam = status.ownerTeam();
+        for (Player defender : gameWorld.getPlayers()) {
+            Optional<String> defTeamOpt = teamService.getPlayerTeam(defender.getUniqueId());
+            if (defTeamOpt.isEmpty() || !defTeamOpt.get().equalsIgnoreCase(defenderTeam)) continue;
+
+            String defenderRegion = regionService.getRegionIdForLocation(
+                    defender.getLocation().getBlockX(),
+                    defender.getLocation().getBlockZ()
+            );
+
+            if (!currentRegion.equals(defenderRegion)) continue;
+
+            // Send threat alert for the most dangerous objective
+            RegionObjective highestThreat = raidObjectives.stream()
+                    .max(Comparator.comparingInt(RegionObjective::getInfluenceReward))
+                    .orElse(raidObjectives.get(0));
+
+            Component message = Component.text("⚠ ")
+                    .color(NamedTextColor.RED)
+                    .append(Component.text("THREAT DETECTED: ")
+                            .color(NamedTextColor.RED))
+                    .append(Component.text(getDefenderThreatDescription(highestThreat.type()))
+                            .color(NamedTextColor.YELLOW));
+
+            defender.sendMessage(message);
+            defender.playSound(defender.getLocation(), Sound.BLOCK_NOTE_BLOCK_BASS, 0.5f, 0.5f);
         }
     }
 
@@ -199,6 +286,39 @@ public class ObjectiveUIManager {
     }
 
     /**
+     * Checks if any enemy player is currently inside the hold ground zone for a region,
+     * AND their team owns an adjacent region (meaning they can actually capture this region).
+     */
+    private boolean isEnemyInHoldZone(Player viewer, String regionId, RegionStatus status) {
+        Optional<int[]> holdZoneOpt = objectiveService.getHoldZoneInfo(regionId);
+        if (holdZoneOpt.isEmpty()) return false;
+
+        int[] holdZone = holdZoneOpt.get();
+        int holdRadius = config.getRegionSize() / 8;
+        String defenderTeam = status.ownerTeam();
+        if (defenderTeam == null) return false;
+
+        for (Player otherPlayer : viewer.getWorld().getPlayers()) {
+            if (otherPlayer.getUniqueId().equals(viewer.getUniqueId())) continue;
+            Optional<String> otherTeamOpt = teamService.getPlayerTeam(otherPlayer.getUniqueId());
+            if (otherTeamOpt.isEmpty()) continue;
+            String enemyTeam = otherTeamOpt.get();
+            if (enemyTeam.equalsIgnoreCase(defenderTeam)) continue;
+
+            // Enemy must own an adjacent region to actually be a threat
+            if (!regionService.isAdjacentToTeam(regionId, enemyTeam)) continue;
+
+            double dist = Math.sqrt(
+                    Math.pow(otherPlayer.getLocation().getX() - holdZone[0], 2) +
+                    Math.pow(otherPlayer.getLocation().getZ() - holdZone[1], 2));
+            if (dist <= holdRadius) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * Updates defender alerts - shows warnings when attackers are completing objectives.
      */
     private void updateDefenderAlerts(Player player, String regionId, RegionStatus status) {
@@ -206,13 +326,29 @@ public class ObjectiveUIManager {
         Map<Integer, BossBar> bars = playerBossBars.computeIfAbsent(playerId, k -> new HashMap<>());
         Set<Integer> activeObjectiveIds = new HashSet<>();
 
+        // Check if any enemy team actually owns an adjacent region — if not, no real threat
+        String defenderTeam = status.ownerTeam();
+        if (defenderTeam != null) {
+            String enemyTeam = defenderTeam.equalsIgnoreCase("red") ? "blue" : "red";
+            if (!regionService.isAdjacentToTeam(regionId, enemyTeam)) {
+                // No enemy adjacent — clear any existing alert bars and return
+                clearDefenderBars(player, bars);
+                return;
+            }
+        }
+
         // Get raid objectives in this region (these are what attackers are doing)
         List<RegionObjective> raidObjectives = objectiveService.getActiveObjectives(regionId, ObjectiveCategory.RAID);
 
         for (RegionObjective objective : raidObjectives) {
             // Only show alerts for objectives with progress (attackers actively working on them)
-            // or Hold Ground objectives (always show so defenders know the zone)
-            boolean shouldAlert = objective.progress() > 0 || objective.type() == ObjectiveType.RAID_HOLD_GROUND;
+            // For Hold Ground: only show when enemies are CURRENTLY in the hold zone
+            boolean shouldAlert;
+            if (objective.type() == ObjectiveType.RAID_HOLD_GROUND) {
+                shouldAlert = isEnemyInHoldZone(player, regionId, status);
+            } else {
+                shouldAlert = objective.progress() > 0;
+            }
 
             if (!shouldAlert) continue;
 
@@ -261,20 +397,23 @@ public class ObjectiveUIManager {
         // Show action bar warning if Hold Ground or Plant Explosive is in progress
         for (RegionObjective objective : raidObjectives) {
             if (objective.type() == ObjectiveType.RAID_HOLD_GROUND && objective.progress() > 0) {
+                // Only show if enemies are CURRENTLY in the hold zone
+                if (!isEnemyInHoldZone(player, regionId, status)) break;
+
+                Optional<int[]> holdZoneOpt = objectiveService.getHoldZoneInfo(regionId);
+                if (holdZoneOpt.isEmpty()) break;
+                int[] holdZone = holdZoneOpt.get();
+
                 int seconds = (int) (objective.progress() * 60);
 
                 // Get hold zone location for direction
                 String directionText = "";
-                Optional<int[]> holdZoneOpt = objectiveService.getHoldZoneInfo(regionId);
-                if (holdZoneOpt.isPresent()) {
-                    int[] holdZone = holdZoneOpt.get();
-                    int y = player.getWorld().getHighestBlockYAt(holdZone[0], holdZone[1]) + 1;
-                    Location targetLoc = new Location(player.getWorld(), holdZone[0] + 0.5, y, holdZone[1] + 0.5);
-                    int distance = (int) Math.sqrt(
-                            Math.pow(player.getLocation().getX() - holdZone[0], 2) +
-                            Math.pow(player.getLocation().getZ() - holdZone[1], 2));
-                    directionText = " " + getDirectionIndicator(player, targetLoc) + " " + distance + "m";
-                }
+                int y = player.getWorld().getHighestBlockYAt(holdZone[0], holdZone[1]) + 1;
+                Location targetLoc = new Location(player.getWorld(), holdZone[0] + 0.5, y, holdZone[1] + 0.5);
+                int distance = (int) Math.sqrt(
+                        Math.pow(player.getLocation().getX() - holdZone[0], 2) +
+                        Math.pow(player.getLocation().getZ() - holdZone[1], 2));
+                directionText = " " + getDirectionIndicator(player, targetLoc) + " " + distance + "m";
 
                 Component warning = Component.text("⚠ ALERT: ")
                         .color(NamedTextColor.RED)
@@ -372,6 +511,18 @@ public class ObjectiveUIManager {
                 player.hideBossBar(entry.getValue());
                 iterator.remove();
             }
+        }
+    }
+
+    /**
+     * Clears all defender alert boss bars for a player (used when no real threat exists).
+     */
+    private void clearDefenderBars(Player player, Map<Integer, BossBar> bars) {
+        Iterator<Map.Entry<Integer, BossBar>> iterator = bars.entrySet().iterator();
+        while (iterator.hasNext()) {
+            Map.Entry<Integer, BossBar> entry = iterator.next();
+            player.hideBossBar(entry.getValue());
+            iterator.remove();
         }
     }
 
@@ -609,6 +760,19 @@ public class ObjectiveUIManager {
                 progressText = counts[0] + "/" + counts[2] + " containers stocked (" + counts[3] + "+ items each)";
             } else {
                 progressText = objective.getProgressDescription();
+            }
+        } else if (objective.type() == ObjectiveType.SETTLEMENT_ESTABLISH_OUTPOST
+                || objective.type() == ObjectiveType.SETTLEMENT_WATCHTOWER
+                || objective.type() == ObjectiveType.SETTLEMENT_GARRISON_QUARTERS) {
+            // For building objectives, show user-friendly progress with checklist
+            Optional<BuildingDetectionResult> detectionOpt = objectiveService.getBuildingDetectionResult(objective.id());
+            if (detectionOpt.isPresent()) {
+                BuildingDetectionResult detection = detectionOpt.get();
+                // getFriendlyProgress handles both valid and in-progress states,
+                // including variant names and variant upgrade hints
+                progressText = detection.getFriendlyProgress();
+            } else {
+                progressText = "Build near the objective marker";
             }
         } else {
             progressText = objective.getProgressDescription();
@@ -1136,18 +1300,9 @@ public class ObjectiveUIManager {
 
                     player.sendMessage(message);
                     player.playSound(player.getLocation(), Sound.BLOCK_NOTE_BLOCK_PLING, 0.5f, 1.5f);
-                } else if (isDefender && objective.type().isRaid()) {
-                    // Show defender warning notification
-                    Component message = Component.text("⚠ ")
-                            .color(NamedTextColor.RED)
-                            .append(Component.text("THREAT DETECTED: ")
-                                    .color(NamedTextColor.RED))
-                            .append(Component.text(getDefenderThreatDescription(objective.type()))
-                                    .color(NamedTextColor.YELLOW));
-
-                    player.sendMessage(message);
-                    player.playSound(player.getLocation(), Sound.BLOCK_NOTE_BLOCK_BASS, 0.5f, 0.5f);
                 }
+                // Defenders are NOT alerted on objective spawn — they are alerted
+                // when an enemy actually enters the region (see checkEnemyRegionEntry)
             }
         }
     }
@@ -1180,6 +1335,7 @@ public class ObjectiveUIManager {
     public void onPlayerQuit(Player player) {
         clearBossBars(player.getUniqueId());
         playerActionBarObjective.remove(player.getUniqueId());
+        playerLastRegion.remove(player.getUniqueId());
 
         // Remove glowing if they were a target
         if (glowingTargets.remove(player.getUniqueId())) {

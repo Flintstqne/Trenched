@@ -222,6 +222,47 @@ public class ObjectiveCommand implements CommandExecutor, TabCompleter {
         // Footer with tip
         player.sendMessage(Component.text("─────────────────────────────")
                 .color(NamedTextColor.DARK_GRAY));
+
+        // Show registered buildings in this region (with variant upgrade info)
+        List<RegisteredBuilding> buildings = objectiveService.getAllActiveBuildings().stream()
+                .filter(b -> b.regionId().equals(regionId) && b.team().equalsIgnoreCase(team)
+                        && b.status() == RegisteredBuildingStatus.ACTIVE)
+                .toList();
+
+        if (!buildings.isEmpty()) {
+            player.sendMessage(Component.text("🏗 YOUR BUILDINGS")
+                    .color(NamedTextColor.AQUA).decorate(TextDecoration.BOLD));
+
+            for (RegisteredBuilding building : buildings) {
+                String variant = building.variant();
+                Component line = Component.text("  ✓ ")
+                        .color(NamedTextColor.GREEN)
+                        .append(Component.text(building.type().getDisplayName())
+                                .color(NamedTextColor.WHITE));
+
+                if (variant != null && !variant.equals("Standard") && !variant.equals("None") && !variant.isEmpty()) {
+                    if (variant.contains("(needs")) {
+                        // Incomplete variant - show upgrade hint
+                        String baseName = variant.substring(0, variant.indexOf(" (needs")).trim();
+                        String needs = variant.substring(variant.indexOf("(needs ") + 7, variant.length() - 1);
+                        line = line.append(Component.text(" — " + baseName + " ")
+                                        .color(NamedTextColor.YELLOW))
+                                .append(Component.text("(upgrade: add " + needs + ")")
+                                        .color(NamedTextColor.GRAY));
+                    } else {
+                        // Complete variant
+                        line = line.append(Component.text(" — " + variant + " ✓")
+                                .color(NamedTextColor.AQUA));
+                    }
+                }
+
+                player.sendMessage(line);
+            }
+
+            player.sendMessage(Component.text("─────────────────────────────")
+                    .color(NamedTextColor.DARK_GRAY));
+        }
+
         player.sendMessage(Component.text("Tip: Complete objectives to earn Influence Points!")
                 .color(NamedTextColor.AQUA));
 
@@ -360,13 +401,49 @@ public class ObjectiveCommand implements CommandExecutor, TabCompleter {
                     .color(detection.valid() ? NamedTextColor.GREEN : NamedTextColor.GRAY));
         });
 
-        objectiveService.getRegisteredBuilding(obj.id()).ifPresent(building ->
+        objectiveService.getRegisteredBuilding(obj.id()).ifPresent(building -> {
+            String variantDisplay = "";
+            if (building.variant() != null && !building.variant().equals("Standard") && !building.variant().equals("None")) {
+                if (building.variant().contains("(needs")) {
+                    // Incomplete variant - show upgrade hint
+                    String baseName = building.variant().substring(0, building.variant().indexOf(" (needs")).trim();
+                    String needs = building.variant().substring(building.variant().indexOf("(needs ") + 7, building.variant().length() - 1);
+                    variantDisplay = " — " + baseName + " (incomplete)";
+
+                    player.sendMessage(Component.text("Registered Building: ")
+                            .color(NamedTextColor.WHITE)
+                            .append(Component.text(building.type().getDisplayName() + " [" + building.status() + "]")
+                                    .color(building.status() == RegisteredBuildingStatus.ACTIVE
+                                            ? NamedTextColor.GREEN
+                                            : NamedTextColor.RED))
+                            .append(Component.text(variantDisplay)
+                                    .color(NamedTextColor.YELLOW)));
+
+                    player.sendMessage(Component.text("  ⬆ Upgrade to " + baseName + ": ")
+                            .color(NamedTextColor.YELLOW)
+                            .append(Component.text("add " + needs)
+                                    .color(NamedTextColor.GRAY)));
+                } else {
+                    // Complete variant
+                    variantDisplay = " — " + building.variant();
+                    player.sendMessage(Component.text("Registered Building: ")
+                            .color(NamedTextColor.WHITE)
+                            .append(Component.text(building.type().getDisplayName() + " [" + building.status() + "]")
+                                    .color(building.status() == RegisteredBuildingStatus.ACTIVE
+                                            ? NamedTextColor.GREEN
+                                            : NamedTextColor.RED))
+                            .append(Component.text(variantDisplay)
+                                    .color(NamedTextColor.AQUA)));
+                }
+            } else {
                 player.sendMessage(Component.text("Registered Building: ")
                         .color(NamedTextColor.WHITE)
                         .append(Component.text(building.type().getDisplayName() + " [" + building.status() + "]")
                                 .color(building.status() == RegisteredBuildingStatus.ACTIVE
                                         ? NamedTextColor.GREEN
-                                        : NamedTextColor.RED))));
+                                        : NamedTextColor.RED)));
+            }
+        });
 
         if (obj.hasLocation()) {
             int dist = (int) Math.sqrt(

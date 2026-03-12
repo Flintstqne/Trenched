@@ -78,6 +78,10 @@ commands:
     description: View and track objectives in your region
     usage: /objective [list|stats|track <id>]
     aliases: [obj, objectives]
+  stats:
+    description: View player statistics, leaderboards, and round data
+    usage: /stats [player|leaderboard|round|team]
+    aliases: [stat, statistics]
 
 permissions:
   entrenched.admin:

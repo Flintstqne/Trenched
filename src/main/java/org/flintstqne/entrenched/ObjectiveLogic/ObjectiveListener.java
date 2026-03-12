@@ -13,6 +13,7 @@ import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.BlockBreakEvent;
 import org.bukkit.event.block.BlockPlaceEvent;
+import org.bukkit.event.entity.EntityExplodeEvent;
 import org.bukkit.event.entity.EntityPickupItemEvent;
 import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.inventory.InventoryCloseEvent;
@@ -31,6 +32,7 @@ import org.bukkit.scheduler.BukkitTask;
 import org.flintstqne.entrenched.ConfigManager;
 import org.flintstqne.entrenched.RegionLogic.RegionService;
 import org.flintstqne.entrenched.RoundLogic.RoundService;
+import org.flintstqne.entrenched.StatLogic.StatListener;
 import org.flintstqne.entrenched.TeamLogic.TeamService;
 
 import net.kyori.adventure.text.Component;
@@ -42,6 +44,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Listener for objective-related events.
@@ -61,7 +64,29 @@ public class ObjectiveListener implements Listener {
     private BukkitTask plantedExplosivesTask;
     private BukkitTask intelTask;
     private BukkitTask structureTask;
+    private BukkitTask cleanupTask;
     private RoundService roundService;
+    private StatListener statListener;
+
+    // Building damage tracking - tracks who damaged a building (block break or TNT)
+    // objectiveId -> Set of damagers (all get credit)
+    public record BuildingDamageRecord(UUID damagerUuid, String damagerName, String damagerTeam, long timestamp) {}
+    private final Map<Integer, Set<BuildingDamageRecord>> buildingDamageTracking = new ConcurrentHashMap<>();
+    private static final long BUILDING_DAMAGE_ATTRIBUTION_WINDOW_MS = 60000; // 60 seconds
+
+    // TNT placer tracking - attribute explosions to the player who placed TNT
+    // "x,y,z" -> {placerUuid, placerName, placerTeam, timestamp}
+    private final Map<String, BuildingDamageRecord> tntPlacerTracking = new ConcurrentHashMap<>();
+    private static final long TNT_CHAIN_ATTRIBUTION_WINDOW_MS = 10000; // 10 seconds for chain reactions
+
+    // Container item count tracking for stocking stat - "x,y,z" -> {playerUuid, itemCount}
+    private record ContainerStockRecord(UUID playerUuid, String playerName, int itemCount) {}
+    private final Map<String, ContainerStockRecord> containerStockTracking = new ConcurrentHashMap<>();
+    private static final int CONTAINER_STOCKING_THRESHOLD = 500; // Items needed to qualify
+
+    // Track players who have been credited for stocking a container (to handle unstocking)
+    // "x,y,z" -> Set of player UUIDs who got credit
+    private final Map<String, Set<UUID>> containerStockCredits = new ConcurrentHashMap<>();
 
     public ObjectiveListener(JavaPlugin plugin, ObjectiveService objectiveService,
                               ObjectiveUIManager uiManager, RegionService regionService,
@@ -89,6 +114,13 @@ public class ObjectiveListener implements Listener {
      */
     public void setRoundService(RoundService roundService) {
         this.roundService = roundService;
+    }
+
+    /**
+     * Sets the stat listener for tracking objective-related stats.
+     */
+    public void setStatListener(org.flintstqne.entrenched.StatLogic.StatListener statListener) {
+        this.statListener = statListener;
     }
 
     /**
@@ -127,6 +159,11 @@ public class ObjectiveListener implements Listener {
                 objectiveService::tickStructureObjectives,
                 20L, 20L);
 
+        // Start cleanup task for memory management (every 30 seconds = 600 ticks)
+        cleanupTask = Bukkit.getScheduler().runTaskTimer(plugin,
+                this::cleanupOldTracking,
+                600L, 600L);
+
         plugin.getLogger().info("[Objectives] Listener started, refresh every " + refreshMinutes + " minutes");
     }
 
@@ -148,6 +185,9 @@ public class ObjectiveListener implements Listener {
         }
         if (structureTask != null) {
             structureTask.cancel();
+        }
+        if (cleanupTask != null) {
+            cleanupTask.cancel();
         }
     }
 
@@ -222,6 +262,11 @@ public class ObjectiveListener implements Listener {
                         player.sendMessage(config.getPrefix() + org.bukkit.ChatColor.GREEN +
                                 "💣 Explosive defused! Attack thwarted!");
                         player.playSound(player.getLocation(), org.bukkit.Sound.ENTITY_ITEM_BREAK, 1.0f, 1.0f);
+
+                        // Record stat for TNT defusal
+                        if (statListener != null) {
+                            statListener.recordTntDefused(player.getUniqueId(), player.getName());
+                        }
                     } else {
                         // Attacker broke their own TNT
                         objectiveService.onTntBroken(player.getUniqueId(), team, regionId, x, y, z);
@@ -245,6 +290,18 @@ public class ObjectiveListener implements Listener {
                 Bukkit.getScheduler().runTaskLater(plugin, () -> {
                     updateResourceDepotProgressAtLocation(player, team, regionId, world);
                 }, 1L); // 1 tick delay to ensure block is removed
+            }
+        }
+
+        // Track building damage for destruction attribution
+        Optional<RegisteredBuilding> buildingOpt = objectiveService.getRegisteredBuildingAtLocation(x, y, z);
+        if (buildingOpt.isPresent()) {
+            RegisteredBuilding building = buildingOpt.get();
+            // Only track if enemy is breaking the building
+            if (!building.team().equalsIgnoreCase(team)) {
+                recordBuildingDamage(building.objectiveId(), player.getUniqueId(), player.getName(), team);
+                plugin.getLogger().fine("[Stats] Tracked block break damage by " + player.getName() +
+                        " on " + building.type().getDisplayName() + " (obj " + building.objectiveId() + ")");
             }
         }
     }
@@ -424,8 +481,14 @@ public class ObjectiveListener implements Listener {
         // Notify objective service
         objectiveService.onBlockPlaced(player.getUniqueId(), team, regionId, x, y, z, blockType);
 
-        // Check for TNT placement (Plant Explosive objective)
+        // Check for TNT placement - track for building damage attribution
         if (event.getBlock().getType() == Material.TNT) {
+            // Track TNT placement for building damage attribution
+            String locKey = getLocationKey(x, y, z);
+            tntPlacerTracking.put(locKey, new BuildingDamageRecord(
+                    player.getUniqueId(), player.getName(), team, System.currentTimeMillis()));
+            plugin.getLogger().fine("[Stats] Tracked TNT placement by " + player.getName() + " at " + locKey);
+
             boolean startedObjective = objectiveService.onTntPlaced(player.getUniqueId(), team, regionId, x, y, z);
             if (startedObjective) {
                 player.sendMessage(config.getPrefix() + org.bukkit.ChatColor.GREEN +
@@ -449,6 +512,50 @@ public class ObjectiveListener implements Listener {
                 Bukkit.getScheduler().runTaskLater(plugin, () -> {
                     updateResourceDepotProgressAtLocation(player, team, regionId, world);
                 }, 1L); // 1 tick delay to ensure block is placed
+            }
+        }
+    }
+
+    // ==================== EXPLOSION EVENTS ====================
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onEntityExplode(EntityExplodeEvent event) {
+        Location explosionLoc = event.getLocation();
+        String locKey = getLocationKey(explosionLoc.getBlockX(), explosionLoc.getBlockY(), explosionLoc.getBlockZ());
+
+        // Find who placed the TNT (or caused the chain reaction)
+        BuildingDamageRecord placer = tntPlacerTracking.remove(locKey);
+
+        // If no direct placer, check for chain reaction (another TNT that exploded recently)
+        if (placer == null) {
+            long now = System.currentTimeMillis();
+            // Look for any TNT placer within chain reaction window
+            for (Map.Entry<String, BuildingDamageRecord> entry : tntPlacerTracking.entrySet()) {
+                if ((now - entry.getValue().timestamp()) <= TNT_CHAIN_ATTRIBUTION_WINDOW_MS) {
+                    placer = entry.getValue();
+                    break;
+                }
+            }
+        }
+
+        if (placer == null) return;
+
+        // Check each destroyed block for building membership
+        for (Block block : event.blockList()) {
+            int x = block.getX();
+            int y = block.getY();
+            int z = block.getZ();
+
+            Optional<RegisteredBuilding> buildingOpt = objectiveService.getRegisteredBuildingAtLocation(x, y, z);
+            if (buildingOpt.isPresent()) {
+                RegisteredBuilding building = buildingOpt.get();
+                // Only track if enemy TNT damaged the building
+                if (!building.team().equalsIgnoreCase(placer.damagerTeam())) {
+                    recordBuildingDamage(building.objectiveId(), placer.damagerUuid(),
+                            placer.damagerName(), placer.damagerTeam());
+                    plugin.getLogger().info("[Stats] Tracked TNT damage by " + placer.damagerName() +
+                            " on " + building.type().getDisplayName() + " (obj " + building.objectiveId() + ")");
+                }
             }
         }
     }
@@ -538,6 +645,11 @@ public class ObjectiveListener implements Listener {
                 player.sendMessage(config.getPrefix() + org.bukkit.ChatColor.GREEN +
                         "⚡ Intel recovered! The enemy's objective has been reset.");
                 player.playSound(player.getLocation(), org.bukkit.Sound.BLOCK_NOTE_BLOCK_CHIME, 1.0f, 1.0f);
+
+                // Record stat for intel recovery
+                if (statListener != null) {
+                    statListener.recordIntelRecovered(player.getUniqueId(), player.getName());
+                }
             }
         }
     }
@@ -599,6 +711,9 @@ public class ObjectiveListener implements Listener {
         String regionId = regionService.getRegionIdForLocation(loc.getBlockX(), loc.getBlockZ());
         if (regionId == null) return;
 
+        // Track container stocking for stat
+        trackContainerStocking(player, container, loc);
+
         // Check if there's an active resource depot objective in this region
         boolean hasResourceDepotObjective = objectiveService.getActiveObjectives(regionId, ObjectiveCategory.SETTLEMENT)
                 .stream()
@@ -608,6 +723,63 @@ public class ObjectiveListener implements Listener {
 
         // Update progress using the objective's location
         updateResourceDepotProgressAtLocation(player, team, regionId, loc.getWorld());
+    }
+
+    /**
+     * Tracks container stocking for the recordContainerStocked stat.
+     * Awards credit when a player stocks a container to 500+ items,
+     * revokes credit if items are removed below threshold.
+     */
+    private void trackContainerStocking(Player player, Container container, Location loc) {
+        if (statListener == null) return;
+
+        String locKey = getLocationKey(loc.getBlockX(), loc.getBlockY(), loc.getBlockZ());
+
+        // Count items in the container
+        int itemCount = 0;
+        org.bukkit.inventory.Inventory inv = container.getInventory();
+
+        // Handle double chests
+        if (inv instanceof org.bukkit.inventory.DoubleChestInventory doubleChestInv) {
+            for (ItemStack item : doubleChestInv.getContents()) {
+                if (item != null && item.getType() != Material.AIR) {
+                    itemCount += item.getAmount();
+                }
+            }
+        } else {
+            for (ItemStack item : inv.getContents()) {
+                if (item != null && item.getType() != Material.AIR) {
+                    itemCount += item.getAmount();
+                }
+            }
+        }
+
+        // Get previous state for this container
+        ContainerStockRecord prevRecord = containerStockTracking.get(locKey);
+        Set<UUID> creditedPlayers = containerStockCredits.computeIfAbsent(locKey, k -> ConcurrentHashMap.newKeySet());
+
+        boolean wasStocked = prevRecord != null && prevRecord.itemCount() >= CONTAINER_STOCKING_THRESHOLD;
+        boolean isStocked = itemCount >= CONTAINER_STOCKING_THRESHOLD;
+
+        // Update tracking
+        containerStockTracking.put(locKey, new ContainerStockRecord(player.getUniqueId(), player.getName(), itemCount));
+
+        // Award stat if newly stocked (and player hasn't been credited for this container yet)
+        if (!wasStocked && isStocked && !creditedPlayers.contains(player.getUniqueId())) {
+            creditedPlayers.add(player.getUniqueId());
+            statListener.recordContainerStocked(player.getUniqueId(), player.getName());
+            plugin.getLogger().fine("[Stats] Credited " + player.getName() + " for stocking container at " + locKey + " to " + itemCount + " items");
+        }
+
+        // Revoke stat if container becomes unstocked
+        if (wasStocked && !isStocked) {
+            // Revoke credit from all players who were credited for this container
+            for (UUID creditedPlayer : creditedPlayers) {
+                statListener.revokeContainerStocked(creditedPlayer);
+                plugin.getLogger().fine("[Stats] Revoked container stocked stat from " + creditedPlayer + " at " + locKey);
+            }
+            creditedPlayers.clear();
+        }
     }
 
     /**
@@ -625,5 +797,75 @@ public class ObjectiveListener implements Listener {
             default -> false;
         };
     }
-}
 
+    // ==================== BUILDING DAMAGE TRACKING ====================
+
+    /**
+     * Records that a player damaged a building block.
+     * Called from onBlockBreak and onEntityExplode.
+     */
+    public void recordBuildingDamage(int objectiveId, UUID damagerUuid, String damagerName, String damagerTeam) {
+        long now = System.currentTimeMillis();
+        BuildingDamageRecord record = new BuildingDamageRecord(damagerUuid, damagerName, damagerTeam, now);
+
+        buildingDamageTracking.computeIfAbsent(objectiveId, k -> ConcurrentHashMap.newKeySet())
+                .add(record);
+
+        plugin.getLogger().fine("[Stats] Tracked building damage by " + damagerName + " on objective " + objectiveId);
+    }
+
+    /**
+     * Gets all recent damagers for a building (within attribution window).
+     * Called when a building is destroyed to credit all attackers.
+     */
+    public Set<BuildingDamageRecord> getBuildingDamagers(int objectiveId) {
+        long now = System.currentTimeMillis();
+        Set<BuildingDamageRecord> records = buildingDamageTracking.get(objectiveId);
+        if (records == null) return Set.of();
+
+        // Filter to only recent damagers and return a copy
+        Set<BuildingDamageRecord> recent = new HashSet<>();
+        for (BuildingDamageRecord record : records) {
+            if ((now - record.timestamp()) <= BUILDING_DAMAGE_ATTRIBUTION_WINDOW_MS) {
+                recent.add(record);
+            }
+        }
+        return recent;
+    }
+
+    /**
+     * Clears building damage tracking for an objective.
+     * Called when building is destroyed or rebuilt.
+     */
+    public void clearBuildingDamageTracking(int objectiveId) {
+        buildingDamageTracking.remove(objectiveId);
+    }
+
+    /**
+     * Gets a location key string for tracking.
+     */
+    private String getLocationKey(int x, int y, int z) {
+        return x + "," + y + "," + z;
+    }
+
+    /**
+     * Cleans up old tracking entries to prevent memory leaks.
+     * Called periodically by the cleanup task.
+     */
+    private void cleanupOldTracking() {
+        long now = System.currentTimeMillis();
+
+        // Clean up old building damage records
+        for (Map.Entry<Integer, Set<BuildingDamageRecord>> entry : buildingDamageTracking.entrySet()) {
+            entry.getValue().removeIf(r -> (now - r.timestamp()) > BUILDING_DAMAGE_ATTRIBUTION_WINDOW_MS);
+        }
+        // Remove empty sets
+        buildingDamageTracking.entrySet().removeIf(e -> e.getValue().isEmpty());
+
+        // Clean up old TNT placer tracking
+        tntPlacerTracking.entrySet().removeIf(e -> (now - e.getValue().timestamp()) > TNT_CHAIN_ATTRIBUTION_WINDOW_MS);
+
+        plugin.getLogger().fine("[Stats] Cleaned up old tracking entries - building: " +
+                buildingDamageTracking.size() + ", tnt: " + tntPlacerTracking.size());
+    }
+}

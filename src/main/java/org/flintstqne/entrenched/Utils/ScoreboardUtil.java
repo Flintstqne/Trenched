@@ -23,6 +23,9 @@ import org.flintstqne.entrenched.RegionLogic.RegionStatus;
 import org.flintstqne.entrenched.RoadLogic.RoadService;
 import org.flintstqne.entrenched.RoadLogic.SupplyLevel;
 import org.flintstqne.entrenched.RoundLogic.Round;
+import org.flintstqne.entrenched.RoundLogic.RoundEndgameManager;
+import org.flintstqne.entrenched.RoundLogic.RoundEndgameState;
+import org.flintstqne.entrenched.RoundLogic.EndgameStage;
 import org.flintstqne.entrenched.RoundLogic.RoundService;
 import org.flintstqne.entrenched.TeamLogic.TeamService;
 
@@ -45,6 +48,7 @@ public class ScoreboardUtil {
     private RoadService roadService; // May be set after construction
     private MeritService meritService; // May be set after construction
     private ObjectiveService objectiveService; // May be set after construction
+    private RoundEndgameManager endgameManager; // May be set after construction
 
     private BukkitTask updateTask;
     private int updateFrame = 0; // Frame counter for animation
@@ -90,6 +94,14 @@ public class ScoreboardUtil {
      */
     public void setObjectiveService(ObjectiveService objectiveService) {
         this.objectiveService = objectiveService;
+    }
+
+    /**
+     * Sets the RoundEndgameManager for endgame state display.
+     * Called after endgame system is initialized.
+     */
+    public void setEndgameManager(RoundEndgameManager endgameManager) {
+        this.endgameManager = endgameManager;
     }
 
     /**
@@ -201,6 +213,13 @@ public class ScoreboardUtil {
         // Line: War and Phase info
         Score warLine = objective.getScore(warInfo);
         warLine.setScore(scoreIndex--);
+
+        // === Endgame Status (if active) ===
+        String endgameLine = getEndgameStatusLine();
+        if (endgameLine != null) {
+            Score endgameScore = objective.getScore(endgameLine);
+            endgameScore.setScore(scoreIndex--);
+        }
 
         // Separator
         Score separator1 = objective.getScore(ChatColor.YELLOW + "" + ChatColor.BOLD + "-----------------");
@@ -385,9 +404,15 @@ public class ScoreboardUtil {
         if (regionStatus.ownerTeam() != null && regionStatus.ownerTeam().equalsIgnoreCase(playerTeam)) {
             isDefender = true;
             // For defenders: show RAID objectives that have progress (enemies actively working on them)
+            // For Hold Ground: only show when enemies are CURRENTLY in the hold zone
             List<RegionObjective> raidObjectives = getCachedObjectives(regionId, ObjectiveCategory.RAID);
             objectives = raidObjectives.stream()
-                    .filter(obj -> obj.progress() > 0 || obj.type() == ObjectiveType.RAID_HOLD_GROUND)
+                    .filter(obj -> {
+                        if (obj.type() == ObjectiveType.RAID_HOLD_GROUND) {
+                            return isEnemyInHoldZone(player, regionId, regionStatus);
+                        }
+                        return obj.progress() > 0;
+                    })
                     .toList();
         } else {
             // For attackers: check if region is valid for capturing
@@ -605,6 +630,41 @@ public class ScoreboardUtil {
         return false;
     }
 
+    /**
+     * Checks if any enemy player is currently inside the hold ground zone for a region,
+     * AND their team owns an adjacent region (meaning they can actually capture this region).
+     */
+    private boolean isEnemyInHoldZone(Player viewer, String regionId, RegionStatus status) {
+        if (objectiveService == null || teamService == null) return false;
+
+        Optional<int[]> holdZoneOpt = objectiveService.getHoldZoneInfo(regionId);
+        if (holdZoneOpt.isEmpty()) return false;
+
+        int[] holdZone = holdZoneOpt.get();
+        int holdRadius = configManager.getRegionSize() / 8;
+        String defenderTeam = status.ownerTeam();
+        if (defenderTeam == null) return false;
+
+        for (Player otherPlayer : viewer.getWorld().getPlayers()) {
+            if (otherPlayer.getUniqueId().equals(viewer.getUniqueId())) continue;
+            Optional<String> otherTeamOpt = teamService.getPlayerTeam(otherPlayer.getUniqueId());
+            if (otherTeamOpt.isEmpty()) continue;
+            String enemyTeam = otherTeamOpt.get();
+            if (enemyTeam.equalsIgnoreCase(defenderTeam)) continue;
+
+            // Enemy must own an adjacent region to actually be a threat
+            if (!regionService.isAdjacentToTeam(regionId, enemyTeam)) continue;
+
+            double dist = Math.sqrt(
+                    Math.pow(otherPlayer.getLocation().getX() - holdZone[0], 2) +
+                    Math.pow(otherPlayer.getLocation().getZ() - holdZone[1], 2));
+            if (dist <= holdRadius) {
+                return true;
+            }
+        }
+        return false;
+    }
+
 
     /**
      * Truncates a name to fit on the scoreboard.
@@ -612,5 +672,61 @@ public class ScoreboardUtil {
     private String truncateName(String name, int maxLength) {
         if (name.length() <= maxLength) return name;
         return name.substring(0, maxLength - 2) + "..";
+    }
+
+    /**
+     * Gets the endgame status line for display on scoreboard.
+     * Returns null if no special endgame state is active.
+     */
+    private String getEndgameStatusLine() {
+        if (endgameManager == null) return null;
+
+        Optional<RoundEndgameState> stateOpt = endgameManager.getState();
+        if (stateOpt.isEmpty()) return null;
+
+        RoundEndgameState state = stateOpt.get();
+        if (state.stage() == EndgameStage.NORMAL) {
+            return null; // No special display during normal play
+        }
+
+        switch (state.stage()) {
+            case EARLY_WIN_HOLD -> {
+                String team = state.earlyWinTeam();
+                ChatColor teamColor = "RED".equalsIgnoreCase(team) ? ChatColor.RED : ChatColor.BLUE;
+                long remaining = state.getEarlyWinHoldRemainingSeconds(30 * 60 * 1000L);
+                String timeStr = formatSeconds(remaining);
+                return ChatColor.GOLD + "⚔ BREAKTHROUGH: " + teamColor + team + " " + ChatColor.GRAY + timeStr;
+            }
+            case OVERTIME -> {
+                String targetRegion = state.overtimeRegionId();
+                String regionName = endgameManager.getRegionDisplayName(targetRegion);
+                if (regionName.length() > 10) {
+                    regionName = regionName.substring(0, 8) + "..";
+                }
+                long remaining = state.getOvertimeRemainingSeconds();
+                String timeStr = formatSeconds(remaining);
+
+                if (state.overtimeHoldTeam() != null) {
+                    ChatColor holdColor = "RED".equalsIgnoreCase(state.overtimeHoldTeam()) ? ChatColor.RED : ChatColor.BLUE;
+                    long holdTime = state.getOvertimeHoldSeconds();
+                    return ChatColor.GOLD + "⏱ OT: " + ChatColor.YELLOW + regionName +
+                            " " + holdColor + "●" + ChatColor.GRAY + " " + holdTime + "s/" + timeStr;
+                }
+                return ChatColor.GOLD + "⏱ OT: " + ChatColor.YELLOW + regionName + ChatColor.GRAY + " " + timeStr;
+            }
+            default -> {
+                return null;
+            }
+        }
+    }
+
+    /**
+     * Formats seconds into MM:SS format.
+     */
+    private String formatSeconds(long seconds) {
+        if (seconds < 0) return "0:00";
+        long mins = seconds / 60;
+        long secs = seconds % 60;
+        return String.format("%d:%02d", mins, secs);
     }
 }

@@ -310,6 +310,7 @@ regions:
     building-detection-radius: 16
     building-detection-vertical-range: 12
     building-detection-debounce-ticks: 20
+    building-detection-debug: false  # Enable verbose building detection logging
     building-validation-seconds: 3
     building-invalidation-seconds: 10
     building-integrity-check-seconds: 5
@@ -509,4 +510,36 @@ merit:
 #   - No division but has team: uses merit.chat.without-division
 #   - No team: uses merit.chat.no-team
 # The format includes {message} which should be replaced with the actual chat message
+
+# ===========================================
+# Statistics System Settings
+# ===========================================
+stats:
+  # Async write settings - how often to flush stat events to database
+  flush-interval-seconds: 10
+
+  # Login streak resets after this many hours offline
+  streak-reset-hours: 36
+
+  # MVP formula weights: (kills * k) + (objectives * o) + (captures * c) + (ip * i)
+  mvp-weights:
+    kills: 10
+    objectives: 25
+    captures: 50
+    ip-multiplier: 0.1
+
+# Stats REST API for Discord bot and external access
+stats-api:
+  # Enable/disable the REST API server
+  enabled: true
+
+  # Port for the API server (default: 8080)
+  port: 8080
+
+  # API key for authentication (change this!)
+  # Clients must include "X-API-Key: <key>" header
+  key: "change-this-secret-key"
+
+  # Rate limit: requests per minute per API key
+  rate-limit: 60
 

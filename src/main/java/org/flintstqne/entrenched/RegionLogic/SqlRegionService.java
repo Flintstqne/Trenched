@@ -6,6 +6,7 @@ import org.flintstqne.entrenched.RoadLogic.RoadService;
 import org.flintstqne.entrenched.RoadLogic.SupplyLevel;
 import org.flintstqne.entrenched.RoundLogic.Round;
 import org.flintstqne.entrenched.RoundLogic.RoundService;
+import org.flintstqne.entrenched.StatLogic.StatListener;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -36,6 +37,12 @@ public final class SqlRegionService implements RegionService {
     // Capture callback for notifications
     private CaptureCallback captureCallback;
 
+    // Heat callback for endgame overtime target selection
+    private HeatCallback heatCallback;
+
+    // Stat listener for tracking IP earned
+    private StatListener statListener;
+
     // Track defensive blocks that earned IP: "regionId" -> Map of "x,y,z" -> [team, pointsEarned]
     // When broken by same team, subtract the points to prevent place/break farming
     private final Map<String, Map<String, PlacedBlockRecord>> defensiveBlockTracking = new HashMap<>();
@@ -57,6 +64,14 @@ public final class SqlRegionService implements RegionService {
         void onRegionCaptured(String regionId, String newOwner, String previousOwner);
     }
 
+    /**
+     * Callback interface for heat events (used for endgame overtime target selection).
+     */
+    @FunctionalInterface
+    public interface HeatCallback {
+        void onHeatGenerated(String regionId, double heat);
+    }
+
     public SqlRegionService(RegionDb db, RoundService roundService, ConfigManager configManager) {
         this.db = db;
         this.roundService = roundService;
@@ -72,11 +87,25 @@ public final class SqlRegionService implements RegionService {
     }
 
     /**
+     * Sets the heat callback for endgame overtime target selection.
+     */
+    public void setHeatCallback(HeatCallback callback) {
+        this.heatCallback = callback;
+    }
+
+    /**
      * Sets the road service for supply calculations.
      * Called after construction to avoid circular dependency.
      */
     public void setRoadService(RoadService roadService) {
         this.roadService = roadService;
+    }
+
+    /**
+     * Sets the stat listener for tracking IP earned.
+     */
+    public void setStatListener(org.flintstqne.entrenched.StatLogic.StatListener listener) {
+        this.statListener = listener;
     }
 
     private Optional<Round> getCurrentRound() {
@@ -233,6 +262,13 @@ public final class SqlRegionService implements RegionService {
         // Track player stats
         db.addInfluenceEarned(playerUuid.toString(), regionId, roundId, points);
 
+        // Record stat for IP earned
+        if (statListener != null && points > 0) {
+            org.bukkit.entity.Player player = Bukkit.getPlayer(playerUuid);
+            String playerName = player != null ? player.getName() : playerUuid.toString();
+            statListener.recordIPEarned(playerUuid, playerName, points);
+        }
+
         // Update rate limit tracking
         updateRateLimit(playerUuid, regionId, roundId, action);
 
@@ -244,6 +280,11 @@ public final class SqlRegionService implements RegionService {
 
         // Invalidate cache
         invalidateCache(regionId);
+
+        // Notify heat callback for endgame overtime target selection
+        if (heatCallback != null && points > 0) {
+            heatCallback.onHeatGenerated(regionId, points);
+        }
 
         return InfluenceResult.SUCCESS;
     }
@@ -348,6 +389,18 @@ public final class SqlRegionService implements RegionService {
             double attackerInfluence = status.getInfluence(attackingTeam);
             if (attackerInfluence > 0) {
                 db.updateRegionState(regionId, roundId, RegionState.CONTESTED);
+
+                // Record stat for region contested (top contributor gets credit)
+                if (statListener != null) {
+                    db.getTopContributor(regionId, roundId).ifPresent(topContributorUuid -> {
+                        try {
+                            java.util.UUID uuid = java.util.UUID.fromString(topContributorUuid);
+                            org.bukkit.entity.Player player = Bukkit.getPlayer(uuid);
+                            String playerName = player != null ? player.getName() : topContributorUuid;
+                            statListener.recordRegionContested(uuid, playerName);
+                        } catch (IllegalArgumentException ignored) {}
+                    });
+                }
             }
         }
     }
@@ -429,6 +482,18 @@ public final class SqlRegionService implements RegionService {
         defensiveBlockTracking.remove(regionId);
         torchTracking.remove(regionId);
         workstationTracking.remove(regionId);
+
+        // Record stat for region capture (award to top IP contributor)
+        if (statListener != null) {
+            db.getTopContributor(regionId, roundId).ifPresent(topContributorUuid -> {
+                try {
+                    java.util.UUID uuid = java.util.UUID.fromString(topContributorUuid);
+                    org.bukkit.entity.Player player = Bukkit.getPlayer(uuid);
+                    String playerName = player != null ? player.getName() : topContributorUuid;
+                    statListener.recordRegionCaptured(uuid, playerName);
+                } catch (IllegalArgumentException ignored) {}
+            });
+        }
 
         // Notify via callback
         if (captureCallback != null) {
@@ -583,7 +648,7 @@ public final class SqlRegionService implements RegionService {
 
     @Override
     public void reduceInfluence(String regionId, String team, double amount) {
-        reduceEnemyInfluence(regionId, team, amount);
+        reduceEnemyInfluence(regionId, team, amount, null);
     }
 
     @Override
@@ -815,7 +880,19 @@ public final class SqlRegionService implements RegionService {
         // DEFENDER KILL: If killer owns this region (CONTESTED), reduce enemy influence
         if (status.isOwnedBy(killerTeam) && status.state() == RegionState.CONTESTED) {
             double killPoints = configManager.getRegionKillPoints() * multiplier;
-            reduceEnemyInfluence(regionId, victimTeam, killPoints);
+            boolean regionDefended = reduceEnemyInfluence(regionId, victimTeam, killPoints, killerUuid);
+
+            // Record stat for IP denied (defensive action)
+            if (statListener != null) {
+                org.bukkit.entity.Player defenderPlayer = org.bukkit.Bukkit.getPlayer(killerUuid);
+                String defenderName = defenderPlayer != null ? defenderPlayer.getName() : killerUuid.toString();
+                statListener.recordIPDenied(killerUuid, defenderName, killPoints);
+
+                // If this kill cleared enemy influence and returned region to OWNED, credit the defender
+                if (regionDefended) {
+                    statListener.recordRegionDefended(killerUuid, defenderName);
+                }
+            }
 
             // Notify defender
             org.bukkit.entity.Player killer = org.bukkit.Bukkit.getPlayer(killerUuid);
@@ -838,13 +915,14 @@ public final class SqlRegionService implements RegionService {
     /**
      * Reduces enemy influence in a contested region.
      * Used when defenders kill attackers.
+     * @return true if this reduction cleared enemy influence and returned region to OWNED
      */
-    private void reduceEnemyInfluence(String regionId, String enemyTeam, double amount) {
+    private boolean reduceEnemyInfluence(String regionId, String enemyTeam, double amount, UUID defenderUuid) {
         int roundId = getCurrentRoundId();
-        if (roundId < 0) return;
+        if (roundId < 0) return false;
 
         Optional<RegionStatus> statusOpt = getRegionStatus(regionId);
-        if (statusOpt.isEmpty()) return;
+        if (statusOpt.isEmpty()) return false;
 
         RegionStatus status = statusOpt.get();
         double newRed = status.redInfluence();
@@ -871,7 +949,11 @@ public final class SqlRegionService implements RegionService {
                     org.bukkit.ChatColor.GREEN + "Region " + regionId + " has been successfully defended by " +
                     (status.ownerTeam().equalsIgnoreCase("red") ? org.bukkit.ChatColor.RED : org.bukkit.ChatColor.BLUE) +
                     status.ownerTeam().toUpperCase() + org.bukkit.ChatColor.GREEN + "!");
+
+            return true; // Region was defended
         }
+
+        return false;
     }
 
     @Override
@@ -1000,6 +1082,13 @@ public final class SqlRegionService implements RegionService {
 
         // Track stats
         db.incrementPlayerStat(playerUuid.toString(), regionId, roundId, "banners_placed");
+
+        // Record stat for banner placed
+        if (statListener != null) {
+            org.bukkit.entity.Player player = Bukkit.getPlayer(playerUuid);
+            String playerName = player != null ? player.getName() : playerUuid.toString();
+            statListener.recordBannerPlaced(playerUuid, playerName);
+        }
 
         addInfluence(playerUuid, regionId, team, InfluenceAction.PLACE_BANNER);
     }

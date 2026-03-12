@@ -22,6 +22,8 @@ import org.flintstqne.entrenched.RoundLogic.RoundService;
 import org.flintstqne.entrenched.RoundLogic.SqlRoundService;
 import org.flintstqne.entrenched.RoundLogic.NewRoundInitializer;
 import org.flintstqne.entrenched.RoundLogic.PhaseScheduler;
+import org.flintstqne.entrenched.RoundLogic.EndgameDb;
+import org.flintstqne.entrenched.RoundLogic.RoundEndgameManager;
 import org.flintstqne.entrenched.TeamLogic.*;
 import org.flintstqne.entrenched.Utils.ChatUtil;
 import org.flintstqne.entrenched.Utils.PlaceholderExpansion;
@@ -65,7 +67,14 @@ public final class Trenched extends JavaPlugin {
     private ObjectiveService objectiveService;
     private ObjectiveUIManager objectiveUIManager;
     private ObjectiveListener objectiveListener;
+    private BuildingBenefitManager buildingBenefitManager;
+    private GarrisonSpawnService garrisonSpawnService;
+    private GarrisonSpawnListener garrisonSpawnListener;
     private ContainerProtectionListener containerProtectionListener;
+
+    // Endgame System
+    private EndgameDb endgameDb;
+    private RoundEndgameManager endgameManager;
 
     // Division Depot System
     private DepotService depotService;
@@ -73,6 +82,12 @@ public final class Trenched extends JavaPlugin {
     private DepotRecipes depotRecipes;
     private DepotListener depotListener;
     private DepotParticleManager depotParticleManager;
+
+    // Statistics System
+    private org.flintstqne.entrenched.StatLogic.StatDb statDb;
+    private org.flintstqne.entrenched.StatLogic.StatService statService;
+    private org.flintstqne.entrenched.StatLogic.StatListener statListener;
+    private org.flintstqne.entrenched.StatLogic.StatApiServer statApiServer;
 
     @Override
     public void onEnable() {
@@ -148,9 +163,24 @@ public final class Trenched extends JavaPlugin {
         // Wire up division and team services for assassination objective (avoids circular dependency)
         ((SqlObjectiveService) objectiveService).setDivisionService(divisionService);
         ((SqlObjectiveService) objectiveService).setTeamService(teamService);
+        ((SqlObjectiveService) objectiveService).setRegionRenderer(regionRenderer);
 
         objectiveUIManager = new ObjectiveUIManager(this, objectiveService, regionService, roundService, teamService, configManager);
         objectiveListener = new ObjectiveListener(this, objectiveService, objectiveUIManager, regionService, teamService, configManager);
+        ((SqlObjectiveService) objectiveService).setObjectiveListener(objectiveListener);
+
+        // Initialize Building Benefit Manager for outpost buffs, watchtower detection, etc.
+        buildingBenefitManager = new BuildingBenefitManager(this, objectiveService, regionService, teamService, roundService, configManager);
+        buildingBenefitManager.setRegionRenderer(regionRenderer);
+        buildingBenefitManager.start();
+
+        // Initialize Garrison Spawn Service for quick-travel system
+        garrisonSpawnService = new GarrisonSpawnService(this, objectiveService, regionService, teamService, roundService, configManager);
+        garrisonSpawnService.setRegionRenderer(regionRenderer);
+        garrisonSpawnService.start();
+        garrisonSpawnListener = new GarrisonSpawnListener(garrisonSpawnService);
+        getServer().getPluginManager().registerEvents(garrisonSpawnListener, this);
+
         getLogger().info("[TerrainGen] Objective system initialized");
 
         // Check if a round is already active, if not start a new one (if enabled in config)
@@ -165,6 +195,23 @@ public final class Trenched extends JavaPlugin {
 
         // Create and start the PhaseScheduler for auto phase advancement
         phaseScheduler = new PhaseScheduler(this, roundService, configManager, scoreboardUtil);
+
+        // Initialize Endgame System for automatic win detection
+        endgameDb = new EndgameDb(this);
+        endgameManager = new RoundEndgameManager(this, endgameDb, roundService, regionService, configManager);
+        endgameManager.setRegionRenderer(regionRenderer);
+        endgameManager.setRoundEndCallback(this::handleRoundEnd);
+        phaseScheduler.setEndgameManager(endgameManager);
+
+        // Wire up heat callback for endgame overtime target selection
+        sqlRegionService.setHeatCallback((regionId, heat) -> {
+            if (endgameManager != null) {
+                endgameManager.recordHeat(regionId, heat);
+            }
+        });
+
+        endgameManager.start();
+
         phaseScheduler.start();
 
         // Create the NewRoundInitializer for /round new command (needs phaseScheduler)
@@ -175,9 +222,16 @@ public final class Trenched extends JavaPlugin {
         // Initialize Road/Supply Line system
         roadDb = new RoadDb(this);
         roadService = new SqlRoadService(roadDb, roundService, regionService, configManager);
-        roadListener = new RoadListener(this, roadService, teamService, configManager, regionRenderer);
+        roadListener = new RoadListener(this, roadService, teamService, regionService, configManager, regionRenderer);
         deathListener = new DeathListener(this, roadService, teamService, configManager);
         supplyPenaltyListener = new SupplyPenaltyListener(roadService, teamService, deathListener);
+
+        // Connect death listener to garrison spawn service for spawn map
+        deathListener.setRespawnCallback((player, spawnLocation) -> {
+            if (garrisonSpawnService != null) {
+                garrisonSpawnService.giveSpawnMap(player, spawnLocation);
+            }
+        });
 
         // Connect scoreboard to road service for accurate supply display
         scoreboardUtil.setRoadService(roadService);
@@ -185,10 +239,32 @@ public final class Trenched extends JavaPlugin {
         // Connect road service to region service for accurate supply calculations
         sqlRegionService.setRoadService(roadService);
 
+        // NOTE: Stat listener is wired to region service later after stat system initialization
+
+        // Connect road listener to objective service for building exclusion
+        roadListener.setObjectiveService(objectiveService);
+
         // Connect road disruption callback to notification manager
         roadListener.setDisruptionCallback((team, affectedRegions, destroyedBlock) -> {
             String sourceRegion = destroyedBlock != null ? destroyedBlock.regionId() : null;
             regionNotificationManager.broadcastSupplyDisrupted(team, affectedRegions, sourceRegion);
+        });
+
+        // Connect building destroyed callback to notify players
+        objectiveService.setBuildingDestroyedCallback((building, regionName) -> {
+            // Notify all team members that a building was destroyed
+            for (Player player : Bukkit.getOnlinePlayers()) {
+                Optional<String> playerTeam = teamService.getPlayerTeam(player.getUniqueId());
+                if (playerTeam.isPresent() && playerTeam.get().equalsIgnoreCase(building.team())) {
+                    player.sendMessage(configManager.getPrefix() + org.bukkit.ChatColor.RED + "[Alert] " +
+                            building.type().getDisplayName() + " destroyed!");
+                    player.sendMessage(org.bukkit.ChatColor.GRAY + "  Location: " + org.bukkit.ChatColor.AQUA +
+                            "(x: " + building.anchorX() + ", z: " + building.anchorZ() + ")");
+                    player.sendMessage(org.bukkit.ChatColor.GRAY + "  Region: " + org.bukkit.ChatColor.WHITE + regionName);
+                    player.sendMessage(org.bukkit.ChatColor.GRAY + "  Repair it to regain its benefits!");
+                    player.playSound(player.getLocation(), org.bukkit.Sound.BLOCK_ANVIL_DESTROY, 1.0f, 0.5f);
+                }
+            }
         });
 
         // Connect capture callback to notification manager AND auto-scan for roads
@@ -199,6 +275,11 @@ public final class Trenched extends JavaPlugin {
 
             // Expire any active objectives in the captured region
             objectiveService.expireObjectivesInRegion(regionId);
+
+            // Record capture heat for endgame overtime target selection
+            if (endgameManager != null) {
+                endgameManager.recordCapture(regionId);
+            }
 
             // Auto-scan for existing road blocks in the captured region
             // This allows pre-existing roads to be automatically recognized
@@ -230,11 +311,14 @@ public final class Trenched extends JavaPlugin {
         scoreboardUtil.setMeritService(meritService);
         // Connect scoreboard to objective service for compass display
         scoreboardUtil.setObjectiveService(objectiveService);
+        // Connect scoreboard to endgame manager for endgame state display
+        scoreboardUtil.setEndgameManager(endgameManager);
         getLogger().info("[TerrainGen] Merit system initialized");
 
         // Start objective UI and listeners (initialized earlier in startup)
         objectiveUIManager.start();
         objectiveListener.setRoundService(roundService);
+        // NOTE: statListener is wired to objectiveListener later after stat system initialization
         objectiveListener.start();
         getServer().getPluginManager().registerEvents(objectiveListener, this);
 
@@ -273,6 +357,41 @@ public final class Trenched extends JavaPlugin {
             getLogger().info("[TerrainGen] PlaceholderAPI not found - placeholders not available");
         }
 
+        // Initialize Statistics System
+        statDb = new org.flintstqne.entrenched.StatLogic.StatDb(this);
+        statService = new org.flintstqne.entrenched.StatLogic.SqlStatService(this, statDb, roundService, configManager);
+        statListener = new org.flintstqne.entrenched.StatLogic.StatListener(this, statService, teamService, regionService, roundService, configManager);
+        statListener.setDivisionService(divisionService);
+        getServer().getPluginManager().registerEvents(statListener, this);
+        ((org.flintstqne.entrenched.StatLogic.SqlStatService) statService).start();
+        statListener.startTimeTracking();
+
+        // Wire stat listener to objective service for objective completion tracking
+        ((org.flintstqne.entrenched.ObjectiveLogic.SqlObjectiveService) objectiveService).setStatListener(statListener);
+
+        // Wire stat listener to objective listener for defensive objective tracking (TNT defusal, etc.)
+        objectiveListener.setStatListener(statListener);
+
+        // Wire stat listener to depot listener for depot placement/raid tracking
+        if (depotListener != null) {
+            depotListener.setStatListener(statListener);
+        }
+
+        // Wire stat listener to region service for IP earned tracking
+        ((org.flintstqne.entrenched.RegionLogic.SqlRegionService) regionService).setStatListener(statListener);
+
+        // Wire stat listener to road listener for road build/damage tracking
+        roadListener.setStatListener(statListener);
+
+        getLogger().info("[Trenched] Statistics system initialized");
+
+        // Start Stats API server if enabled
+        if (configManager.isStatApiEnabled()) {
+            statApiServer = new org.flintstqne.entrenched.StatLogic.StatApiServer(this, statService, configManager);
+            statApiServer.start();
+            getLogger().info("[Trenched] Stats API server started on port " + configManager.getStatApiPort());
+        }
+
         // Recalculate supply for both teams on startup to ensure correct values
         // This is especially important after server restarts when road data persists
         Bukkit.getScheduler().runTaskLaterAsynchronously(this, () -> {
@@ -293,6 +412,7 @@ public final class Trenched extends JavaPlugin {
         // Commands registration
         RoundCommand roundCommand = new RoundCommand(roundService, teamService, regionRenderer, scoreboardUtil, phaseScheduler, configManager);
         roundCommand.setNewRoundInitializer(newRoundInitializer);
+        roundCommand.setEndgameManager(endgameManager);
         var roundCmd = Objects.requireNonNull(getCommand("round"), "Command `round` missing from plugin.yml");
         roundCmd.setExecutor(roundCommand);
         roundCmd.setTabCompleter(roundCommand);
@@ -355,8 +475,10 @@ public final class Trenched extends JavaPlugin {
                 this, roundService, teamService, regionService, roadService, deathListener, phaseScheduler, configManager, regionRenderer, meritService
         );
         adminCommand.setNewRoundInitializer(newRoundInitializer);
+        adminCommand.setEndgameManager(endgameManager);
         adminCommand.setObjectiveService(objectiveService);
         adminCommand.setDivisionService(divisionService);
+        adminCommand.setStatService(statService);
         if (depotService != null && depotItem != null) {
             adminCommand.setDepotService(depotService, depotItem);
         }
@@ -389,6 +511,13 @@ public final class Trenched extends JavaPlugin {
         var objectiveCmd = Objects.requireNonNull(getCommand("objective"), "Command `objective` missing from plugin.yml");
         objectiveCmd.setExecutor(objectiveCommand);
         objectiveCmd.setTabCompleter(objectiveCommand);
+
+        // Stats commands
+        org.flintstqne.entrenched.StatLogic.StatCommand statCommand =
+                new org.flintstqne.entrenched.StatLogic.StatCommand(statService, teamService, roundService, configManager);
+        var statsCmd = Objects.requireNonNull(getCommand("stats"), "Command `stats` missing from plugin.yml");
+        statsCmd.setExecutor(statCommand);
+        statsCmd.setTabCompleter(statCommand);
 
         // Events registration
         getServer().getPluginManager().registerEvents(new TeamListener(teamService, scoreboardUtil, this), this);
@@ -597,8 +726,17 @@ public final class Trenched extends JavaPlugin {
         if (scoreboardUtil != null) scoreboardUtil.stopUpdateTask();
         if (objectiveUIManager != null) objectiveUIManager.stop();
         if (objectiveListener != null) objectiveListener.stop();
+        if (buildingBenefitManager != null) buildingBenefitManager.stop();
+        if (garrisonSpawnService != null) garrisonSpawnService.stop();
+        if (endgameManager != null) endgameManager.stop();
         if (regionNotificationManager != null) regionNotificationManager.stop();
         if (phaseScheduler != null) phaseScheduler.stop();
+
+        // Stop stat system
+        if (statListener != null) statListener.stopTimeTracking();
+        if (statService != null) statService.stop();
+        if (statApiServer != null) statApiServer.stop();
+        if (statDb != null) statDb.close();
 
         // Unregister depot recipes
         if (depotRecipes != null) depotRecipes.unregisterRecipes();
@@ -607,6 +745,7 @@ public final class Trenched extends JavaPlugin {
         if (depotParticleManager != null) depotParticleManager.stop();
 
         // Close databases
+        if (endgameDb != null) endgameDb.close();
         if (objectiveDb != null) objectiveDb.close();
         if (roadDb != null) roadDb.close();
         if (regionDb != null) regionDb.close();
@@ -680,5 +819,42 @@ public final class Trenched extends JavaPlugin {
         }, 1200L, 1200L); // Initial delay: 1 minute, repeat every 1 minute
 
         getLogger().info("[TerrainGen] Influence decay scheduler started (rate: " + decayRate + " IP/minute)");
+    }
+
+    /**
+     * Handles round end callback from the endgame manager.
+     * @param winner "RED", "BLUE", or "DRAW"
+     */
+    private void handleRoundEnd(String winner) {
+        getLogger().info("[Endgame] Round ended - winner: " + winner);
+
+        // Stop the phase scheduler
+        if (phaseScheduler != null) {
+            phaseScheduler.stop();
+        }
+
+        // Stop the endgame manager
+        if (endgameManager != null) {
+            endgameManager.stop();
+        }
+
+        // End the round in the round service
+        roundService.endRound(winner);
+
+        // Log the result
+        if ("DRAW".equalsIgnoreCase(winner)) {
+            getLogger().info("[Endgame] Round ended in a DRAW");
+        } else {
+            getLogger().info("[Endgame] Round won by " + winner.toUpperCase());
+        }
+
+        // TODO: Future - store round stats, display summary, etc.
+    }
+
+    /**
+     * Gets the RoundEndgameManager instance.
+     */
+    public RoundEndgameManager getEndgameManager() {
+        return endgameManager;
     }
 }

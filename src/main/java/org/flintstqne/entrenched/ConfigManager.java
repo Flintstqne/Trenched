@@ -507,6 +507,10 @@ public final class ConfigManager {
         return config.getLong("regions.objectives.building-detection-debounce-ticks", 20L);
     }
 
+    public boolean isBuildingDetectionDebugEnabled() {
+        return config.getBoolean("regions.objectives.building-detection-debug", false);
+    }
+
     public int getBuildingValidationSeconds() {
         return config.getInt("regions.objectives.building-validation-seconds", 3);
     }
@@ -727,6 +731,50 @@ public final class ConfigManager {
 
     public boolean allowSelfMerit() {
         return config.getBoolean("merit.debug.allow-self-merit", false);
+    }
+
+    // ==================== Stats API Settings ====================
+
+    public boolean isStatApiEnabled() {
+        return config.getBoolean("stats-api.enabled", true);
+    }
+
+    public int getStatApiPort() {
+        return config.getInt("stats-api.port", 8080);
+    }
+
+    public String getStatApiKey() {
+        return config.getString("stats-api.key", "change-this-secret-key");
+    }
+
+    public int getStatApiRateLimit() {
+        return config.getInt("stats-api.rate-limit", 60);
+    }
+
+    // ==================== Stats Settings ====================
+
+    public int getStatFlushIntervalSeconds() {
+        return config.getInt("stats.flush-interval-seconds", 10);
+    }
+
+    public int getLoginStreakResetHours() {
+        return config.getInt("stats.streak-reset-hours", 36);
+    }
+
+    public double getMvpKillsWeight() {
+        return config.getDouble("stats.mvp-weights.kills", 10.0);
+    }
+
+    public double getMvpObjectivesWeight() {
+        return config.getDouble("stats.mvp-weights.objectives", 25.0);
+    }
+
+    public double getMvpCapturesWeight() {
+        return config.getDouble("stats.mvp-weights.captures", 50.0);
+    }
+
+    public double getMvpIpMultiplier() {
+        return config.getDouble("stats.mvp-weights.ip-multiplier", 0.1);
     }
 
     // ==================== Utility Methods ====================

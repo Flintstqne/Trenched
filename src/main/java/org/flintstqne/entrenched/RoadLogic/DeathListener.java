@@ -50,12 +50,30 @@ public final class DeathListener implements Listener {
     // Track players without a team (hidden until they select one)
     private final java.util.Set<UUID> teamlessPlayers = ConcurrentHashMap.newKeySet();
 
+    // Callback for when a player respawns (used by garrison spawn system)
+    private RespawnCallback respawnCallback;
+
     public DeathListener(JavaPlugin plugin, RoadService roadService,
                          TeamService teamService, ConfigManager configManager) {
         this.plugin = plugin;
         this.roadService = roadService;
         this.teamService = teamService;
         this.configManager = configManager;
+    }
+
+    /**
+     * Sets a callback to be invoked when a player respawns.
+     */
+    public void setRespawnCallback(RespawnCallback callback) {
+        this.respawnCallback = callback;
+    }
+
+    /**
+     * Callback interface for respawn events.
+     */
+    @FunctionalInterface
+    public interface RespawnCallback {
+        void onPlayerRespawn(Player player, org.bukkit.Location spawnLocation);
     }
 
     // ==================== DEATH TRACKING ====================
@@ -270,10 +288,12 @@ public final class DeathListener implements Listener {
 
         // Teleport to team spawn
         Optional<String> teamOpt = teamService.getPlayerTeam(uuid);
+        org.bukkit.Location spawnLocation = null;
         if (teamOpt.isPresent()) {
             Optional<org.bukkit.Location> spawnOpt = teamService.getTeamSpawn(teamOpt.get());
             if (spawnOpt.isPresent()) {
-                player.teleport(spawnOpt.get());
+                spawnLocation = spawnOpt.get();
+                player.teleport(spawnLocation);
             }
         }
 
@@ -286,6 +306,11 @@ public final class DeathListener implements Listener {
 
         // Play sound
         player.playSound(player.getLocation(), org.bukkit.Sound.ENTITY_PLAYER_LEVELUP, 0.5f, 1.5f);
+
+        // Notify respawn callback (used by garrison spawn system)
+        if (respawnCallback != null && spawnLocation != null) {
+            respawnCallback.onPlayerRespawn(player, spawnLocation);
+        }
     }
 
     // ==================== RESPAWN STATE INTERACTION PREVENTION ====================

@@ -25,11 +25,14 @@ public class DepotRecipes {
 
     /**
      * Registers all depot-related crafting recipes.
+     * Note: You may see "unrecognized recipe" errors in the console on startup -
+     * these are harmless and occur because Minecraft tries to load player recipe
+     * unlocks before plugins register their recipes.
      */
     public void registerRecipes() {
         registerDepotBlockRecipe();
         registerRaidToolRecipe();
-        plugin.getLogger().info("[Depot] Crafting recipes registered");
+        plugin.getLogger().info("[Depot] Crafting recipes registered (ignore any 'unrecognized recipe' errors above - they are harmless)");
     }
 
     /**

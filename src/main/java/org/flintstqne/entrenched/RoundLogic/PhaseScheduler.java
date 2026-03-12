@@ -20,6 +20,7 @@ public final class PhaseScheduler {
     private final ConfigManager configManager;
     private final ScoreboardUtil scoreboardUtil;
 
+    private RoundEndgameManager endgameManager;
     private BukkitTask scheduledTask;
     private long nextPhaseTime; // Unix timestamp when next phase should occur
 
@@ -33,6 +34,13 @@ public final class PhaseScheduler {
         this.roundService = roundService;
         this.configManager = configManager;
         this.scoreboardUtil = scoreboardUtil;
+    }
+
+    /**
+     * Sets the endgame manager for regulation end handling.
+     */
+    public void setEndgameManager(RoundEndgameManager endgameManager) {
+        this.endgameManager = endgameManager;
     }
 
     /**
@@ -236,8 +244,15 @@ public final class PhaseScheduler {
     }
 
     private void broadcastMaxPhaseReached() {
-        Bukkit.broadcastMessage(configManager.getPrefix() +
-                ChatColor.YELLOW + "Final phase reached! Awaiting round conclusion...");
+        // If we have an endgame manager, delegate to it for automatic evaluation
+        if (endgameManager != null) {
+            log("Final phase elapsed - triggering endgame evaluation");
+            endgameManager.onRegulationEnd();
+        } else {
+            // Fallback to old behavior if no endgame manager
+            Bukkit.broadcastMessage(configManager.getPrefix() +
+                    ChatColor.YELLOW + "Final phase reached! Awaiting round conclusion...");
+        }
     }
 
     private void updateAllScoreboards() {

@@ -26,6 +26,7 @@ public class RoundCommand implements CommandExecutor, TabCompleter {
     private final ConfigManager configManager;
     private final SimpleDateFormat dateFormat = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
     private NewRoundInitializer newRoundInitializer;
+    private RoundEndgameManager endgameManager;
 
     public RoundCommand(RoundService roundService, TeamService teamService, RegionRenderer regionRenderer,
                         ScoreboardUtil scoreboardUtil, PhaseScheduler phaseScheduler, ConfigManager configManager) {
@@ -44,6 +45,14 @@ public class RoundCommand implements CommandExecutor, TabCompleter {
     public void setNewRoundInitializer(NewRoundInitializer initializer) {
         this.newRoundInitializer = initializer;
         log("NewRoundInitializer set");
+    }
+
+    /**
+     * Sets the RoundEndgameManager for endgame state display.
+     */
+    public void setEndgameManager(RoundEndgameManager manager) {
+        this.endgameManager = manager;
+        log("RoundEndgameManager set");
     }
 
     @Override
@@ -117,7 +126,69 @@ public class RoundCommand implements CommandExecutor, TabCompleter {
             log("Round winner: " + round.winningTeam());
         }
 
+        // Show endgame state if available
+        if (endgameManager != null && round.status() == Round.RoundStatus.ACTIVE) {
+            showEndgameInfo(sender);
+        }
+
         log("=== INFO Command Complete ===");
+    }
+
+    private void showEndgameInfo(CommandSender sender) {
+        Optional<RoundEndgameState> stateOpt = endgameManager.getState();
+        if (stateOpt.isEmpty()) return;
+
+        RoundEndgameState state = stateOpt.get();
+        int[] counts = endgameManager.getTerritoryCount();
+        int red = counts[0];
+        int blue = counts[1];
+
+        sender.sendMessage("");
+        sender.sendMessage(ChatColor.GOLD + "=== Territory Status ===");
+        sender.sendMessage(ChatColor.RED + "Red: " + red + " regions" +
+                ChatColor.GRAY + " | " +
+                ChatColor.BLUE + "Blue: " + blue + " regions");
+
+        switch (state.stage()) {
+            case NORMAL -> {
+                sender.sendMessage(ChatColor.WHITE + "Endgame: " + ChatColor.GREEN + "Normal play");
+            }
+            case EARLY_WIN_HOLD -> {
+                String team = state.earlyWinTeam();
+                long remaining = state.getEarlyWinHoldRemainingSeconds(30 * 60 * 1000L);
+                ChatColor teamColor = "RED".equalsIgnoreCase(team) ? ChatColor.RED : ChatColor.BLUE;
+
+                sender.sendMessage(ChatColor.WHITE + "Endgame: " + ChatColor.GOLD + "⚔ BREAKTHROUGH");
+                sender.sendMessage(ChatColor.WHITE + "  Team: " + teamColor + team.toUpperCase());
+                sender.sendMessage(ChatColor.WHITE + "  Time remaining: " + ChatColor.YELLOW + formatTime(remaining));
+                sender.sendMessage(ChatColor.GRAY + "  (Hold for 30 minutes to win early)");
+            }
+            case OVERTIME -> {
+                String targetRegion = state.overtimeRegionId();
+                String regionName = endgameManager.getRegionDisplayName(targetRegion);
+                long remaining = state.getOvertimeRemainingSeconds();
+
+                sender.sendMessage(ChatColor.WHITE + "Endgame: " + ChatColor.GOLD + "⚔ OVERTIME");
+                sender.sendMessage(ChatColor.WHITE + "  Target Region: " + ChatColor.YELLOW + regionName);
+                sender.sendMessage(ChatColor.WHITE + "  Time remaining: " + ChatColor.AQUA + formatTime(remaining));
+
+                if (state.overtimeHoldTeam() != null) {
+                    ChatColor holdColor = "RED".equalsIgnoreCase(state.overtimeHoldTeam()) ? ChatColor.RED : ChatColor.BLUE;
+                    long holdTime = state.getOvertimeHoldSeconds();
+                    sender.sendMessage(ChatColor.WHITE + "  Holding: " + holdColor + state.overtimeHoldTeam() +
+                            ChatColor.GRAY + " (" + holdTime + "s / 300s to win)");
+                } else {
+                    sender.sendMessage(ChatColor.WHITE + "  Holding: " + ChatColor.GRAY + "No one (region neutral)");
+                }
+            }
+        }
+    }
+
+    private String formatTime(long seconds) {
+        if (seconds < 0) return "N/A";
+        long mins = seconds / 60;
+        long secs = seconds % 60;
+        return String.format("%d:%02d", mins, secs);
     }
 
     private void handleStart(CommandSender sender) {

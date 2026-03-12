@@ -17,6 +17,12 @@ import org.bukkit.inventory.ItemStack;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.flintstqne.entrenched.BlueMapHook.RegionRenderer;
 import org.flintstqne.entrenched.ConfigManager;
+import org.flintstqne.entrenched.ObjectiveLogic.ObjectiveService;
+import org.flintstqne.entrenched.ObjectiveLogic.RegisteredBuilding;
+import org.flintstqne.entrenched.RegionLogic.RegionService;
+import org.flintstqne.entrenched.RegionLogic.RegionState;
+import org.flintstqne.entrenched.RegionLogic.RegionStatus;
+import org.flintstqne.entrenched.StatLogic.StatListener;
 import org.flintstqne.entrenched.TeamLogic.TeamService;
 
 import java.util.*;
@@ -30,12 +36,17 @@ public final class RoadListener implements Listener {
     private final JavaPlugin plugin;
     private final RoadService roadService;
     private final TeamService teamService;
+    private final RegionService regionService;
     private final ConfigManager configManager;
     private final RegionRenderer regionRenderer;
     private final Set<Material> pathBlockTypes;
+    private ObjectiveService objectiveService;
 
     // Callback for notifying disruptions
     private RoadDisruptionCallback disruptionCallback;
+
+    // Stat listener for tracking road stats
+    private StatListener statListener;
 
     // Debouncing for road damage notifications - batches multiple blocks broken together
     private final Map<String, PendingDamageNotification> pendingNotifications = new ConcurrentHashMap<>();
@@ -65,10 +76,11 @@ public final class RoadListener implements Listener {
     }
 
     public RoadListener(JavaPlugin plugin, RoadService roadService, TeamService teamService,
-                        ConfigManager configManager, RegionRenderer regionRenderer) {
+                        RegionService regionService, ConfigManager configManager, RegionRenderer regionRenderer) {
         this.plugin = plugin;
         this.roadService = roadService;
         this.teamService = teamService;
+        this.regionService = regionService;
         this.configManager = configManager;
         this.regionRenderer = regionRenderer;
         this.pathBlockTypes = loadPathBlockTypes();
@@ -79,6 +91,20 @@ public final class RoadListener implements Listener {
      */
     public void setDisruptionCallback(RoadDisruptionCallback callback) {
         this.disruptionCallback = callback;
+    }
+
+    /**
+     * Sets the objective service for building exclusion checks.
+     */
+    public void setObjectiveService(ObjectiveService objectiveService) {
+        this.objectiveService = objectiveService;
+    }
+
+    /**
+     * Sets the stat listener for tracking road statistics.
+     */
+    public void setStatListener(org.flintstqne.entrenched.StatLogic.StatListener statListener) {
+        this.statListener = statListener;
     }
 
     /**
@@ -116,6 +142,17 @@ public final class RoadListener implements Listener {
         return pathBlockTypes.contains(material);
     }
 
+    /**
+     * Forces a block state sync to all nearby players to prevent ghost blocks.
+     * This is useful after block changes that might not be properly synced to clients.
+     */
+    private void syncBlockToNearbyPlayers(Block block, int radius) {
+        org.bukkit.Location loc = block.getLocation();
+        for (Player nearby : block.getWorld().getNearbyPlayers(loc, radius)) {
+            nearby.sendBlockChange(loc, block.getBlockData());
+        }
+    }
+
     // ==================== BLOCK PLACE ====================
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
@@ -136,8 +173,21 @@ public final class RoadListener implements Listener {
         int y = block.getY();
         int z = block.getZ();
 
+        // Skip if block is within a registered building - building blocks aren't roads
+        if (objectiveService != null) {
+            Optional<RegisteredBuilding> buildingOpt = objectiveService.getRegisteredBuildingAtLocation(x, y, z);
+            if (buildingOpt.isPresent()) {
+                return;
+            }
+        }
+
         // Record the road block
         roadService.onPathBlockPlaced(x, y, z, player.getUniqueId(), team);
+
+        // Record stat for roads built
+        if (statListener != null) {
+            statListener.recordRoadsBuilt(player.getUniqueId(), player.getName(), 1);
+        }
 
         // Optional: Show feedback to player
         if (configManager.isVerbose()) {
@@ -188,11 +238,19 @@ public final class RoadListener implements Listener {
                 // Block successfully changed to DIRT_PATH - track it
                 roadService.onPathBlockPlaced(x, y, z, player.getUniqueId(), team);
 
+                // Record stat for roads built
+                if (statListener != null) {
+                    statListener.recordRoadsBuilt(player.getUniqueId(), player.getName(), 1);
+                }
+
+                // Force block state update to all nearby players to prevent ghost blocks
+                syncBlockToNearbyPlayers(checkBlock, 64);
+
                 if (configManager.isVerbose()) {
                     player.sendMessage(ChatColor.GRAY + "[Road] Path created with shovel and tracked.");
                 }
             }
-        }, 1L); // 1 tick delay
+        }, 2L); // 2 tick delay for more reliable block state
     }
 
     /**
@@ -230,6 +288,15 @@ public final class RoadListener implements Listener {
         int y = block.getY();
         int z = block.getZ();
 
+        // Skip if block is within a registered building - buildings have separate destruction handling
+        if (objectiveService != null) {
+            Optional<RegisteredBuilding> buildingOpt = objectiveService.getRegisteredBuildingAtLocation(x, y, z);
+            if (buildingOpt.isPresent()) {
+                // This block is part of a building, not a road - skip road damage notification
+                return;
+            }
+        }
+
         if (!roadService.isRoadBlock(x, y, z)) return;
 
         // Get road block info before removal
@@ -244,6 +311,14 @@ public final class RoadListener implements Listener {
         // Remove the road block (schedules recalculation)
         Optional<String> removedTeam = roadService.onPathBlockRemoved(x, y, z);
         if (removedTeam.isEmpty()) return;
+
+        // Record stat for roads damaged (only if enemy road)
+        if (statListener != null && breaker != null) {
+            Optional<String> breakerTeam = teamService.getPlayerTeam(breaker.getUniqueId());
+            if (breakerTeam.isPresent() && !breakerTeam.get().equalsIgnoreCase(affectedTeam)) {
+                statListener.recordRoadsDamaged(breaker.getUniqueId(), breaker.getName(), 1);
+            }
+        }
 
         // Add to batched notification
         addToPendingNotification(affectedTeam, sourceRegion, breaker, roadBlock.orElse(null));
@@ -334,6 +409,14 @@ public final class RoadListener implements Listener {
             int y = block.getY();
             int z = block.getZ();
 
+            // Skip if block is within a registered building - buildings have separate destruction handling
+            if (objectiveService != null) {
+                Optional<RegisteredBuilding> buildingOpt = objectiveService.getRegisteredBuildingAtLocation(x, y, z);
+                if (buildingOpt.isPresent()) {
+                    continue;
+                }
+            }
+
             if (!roadService.isRoadBlock(x, y, z)) continue;
 
             Optional<RoadBlock> roadBlock = roadService.getRoadBlock(x, y, z);
@@ -399,11 +482,22 @@ public final class RoadListener implements Listener {
             }
         }
 
+        // Check if the affected team actually owns the source region
+        Optional<RegionStatus> regionStatusOpt = regionService.getRegionStatus(sourceRegion);
+        boolean teamOwnsRegion = regionStatusOpt.isPresent()
+                && regionStatusOpt.get().state() == RegionState.OWNED
+                && affectedTeam.equalsIgnoreCase(regionStatusOpt.get().ownerTeam());
+
         // Log the damage (only if significant or causes disconnection)
         if (blocksDestroyed >= MIN_BLOCKS_FOR_LOG || !disconnectedRegions.isEmpty()) {
             plugin.getLogger().info("[RoadListener] " + blocksDestroyed + " road blocks destroyed in " + sourceRegionName +
                     " at " + coordsStr + " for " + affectedTeam + " team." +
                     (disconnectedRegions.isEmpty() ? "" : " Disconnected regions: " + String.join(", ", allAffectedRegionNames)));
+        }
+
+        // Only notify players if the team actually owns the region
+        if (!teamOwnsRegion) {
+            return; // Don't send road damaged messages for regions the team doesn't own
         }
 
         // Notify all players on the affected team

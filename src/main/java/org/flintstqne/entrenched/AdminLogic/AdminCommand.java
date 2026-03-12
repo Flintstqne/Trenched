@@ -32,6 +32,7 @@ import org.flintstqne.entrenched.RoadLogic.SupplyLevel;
 import org.flintstqne.entrenched.RoundLogic.NewRoundInitializer;
 import org.flintstqne.entrenched.RoundLogic.PhaseScheduler;
 import org.flintstqne.entrenched.RoundLogic.Round;
+import org.flintstqne.entrenched.RoundLogic.RoundEndgameManager;
 import org.flintstqne.entrenched.RoundLogic.RoundService;
 import org.flintstqne.entrenched.TeamLogic.JoinReason;
 import org.flintstqne.entrenched.TeamLogic.TeamService;
@@ -39,6 +40,7 @@ import org.flintstqne.entrenched.ObjectiveLogic.ObjectiveCategory;
 import org.flintstqne.entrenched.ObjectiveLogic.ObjectiveService;
 import org.flintstqne.entrenched.ObjectiveLogic.ObjectiveType;
 import org.flintstqne.entrenched.ObjectiveLogic.RegionObjective;
+import org.flintstqne.entrenched.ObjectiveLogic.RegisteredBuilding;
 
 import java.util.*;
 import java.util.stream.Collectors;
@@ -63,9 +65,14 @@ public final class AdminCommand implements CommandExecutor, TabCompleter {
     private final MeritService meritService;
     private ObjectiveService objectiveService;
     private NewRoundInitializer newRoundInitializer;
+    private RoundEndgameManager endgameManager;
     private DepotService depotService;
     private DepotItem depotItem;
     private DivisionService divisionService;
+    private org.flintstqne.entrenched.StatLogic.StatService statService;
+
+    // Pending purge confirmations (sender -> roundId, timestamp)
+    private final java.util.Map<String, long[]> pendingStatPurge = new java.util.HashMap<>();
 
     public AdminCommand(JavaPlugin plugin, RoundService roundService, TeamService teamService, RegionService regionService,
                         RoadService roadService, DeathListener deathListener, PhaseScheduler phaseScheduler,
@@ -86,6 +93,10 @@ public final class AdminCommand implements CommandExecutor, TabCompleter {
         this.newRoundInitializer = initializer;
     }
 
+    public void setEndgameManager(RoundEndgameManager manager) {
+        this.endgameManager = manager;
+    }
+
     public void setObjectiveService(ObjectiveService objectiveService) {
         this.objectiveService = objectiveService;
     }
@@ -97,6 +108,10 @@ public final class AdminCommand implements CommandExecutor, TabCompleter {
 
     public void setDivisionService(DivisionService divisionService) {
         this.divisionService = divisionService;
+    }
+
+    public void setStatService(org.flintstqne.entrenched.StatLogic.StatService statService) {
+        this.statService = statService;
     }
 
     @Override
@@ -139,6 +154,12 @@ public final class AdminCommand implements CommandExecutor, TabCompleter {
             // Depot commands
             case "depot" -> handleDepot(sender, args);
 
+            // Buildings commands
+            case "buildings" -> handleBuildings(sender, args);
+
+            // Stats commands
+            case "stats" -> handleStats(sender, args);
+
             // Server commands
             case "reload" -> handleReload(sender);
             case "status" -> handleStatus(sender);
@@ -176,8 +197,15 @@ public final class AdminCommand implements CommandExecutor, TabCompleter {
                     sender.sendMessage(ChatColor.RED + "Winner must be: red, blue, or draw");
                     break;
                 }
-                roundService.endRound(winner);
-                if (phaseScheduler != null) phaseScheduler.stop();
+
+                // Use endgame manager if available for proper cleanup
+                if (endgameManager != null) {
+                    endgameManager.forceEnd(winner != null ? winner.toUpperCase() : "DRAW");
+                } else {
+                    roundService.endRound(winner);
+                    if (phaseScheduler != null) phaseScheduler.stop();
+                }
+
                 sender.sendMessage(configManager.getPrefix() + ChatColor.GREEN + "Round ended" +
                         (winner != null ? " with winner: " + winner : ""));
             }
@@ -2556,6 +2584,171 @@ public final class AdminCommand implements CommandExecutor, TabCompleter {
                 depot.x() + ", " + depot.y() + ", " + depot.z());
     }
 
+    // ==================== BUILDINGS COMMANDS ====================
+
+    private boolean handleBuildings(CommandSender sender, String[] args) {
+        if (objectiveService == null) {
+            sender.sendMessage(ChatColor.RED + "Objective system is not available.");
+            return true;
+        }
+
+        if (args.length < 2) {
+            sender.sendMessage(ChatColor.YELLOW + "Usage: /admin buildings <red|blue|all>");
+            return true;
+        }
+
+        String teamArg = args[1].toLowerCase();
+
+        if (!teamArg.equals("red") && !teamArg.equals("blue") && !teamArg.equals("all")) {
+            sender.sendMessage(ChatColor.RED + "Team must be: red, blue, or all");
+            return true;
+        }
+
+        List<RegisteredBuilding> buildings = objectiveService.getAllActiveBuildings();
+
+        // Filter by team if not "all"
+        if (!teamArg.equals("all")) {
+            buildings = buildings.stream()
+                    .filter(b -> b.team().equalsIgnoreCase(teamArg))
+                    .collect(Collectors.toList());
+        }
+
+        // Group by team for display
+        Map<String, List<RegisteredBuilding>> byTeam = buildings.stream()
+                .collect(Collectors.groupingBy(b -> b.team().toUpperCase()));
+
+        String title = teamArg.equals("all") ? "All Buildings" : teamArg.toUpperCase() + " Team Buildings";
+        sender.sendMessage(ChatColor.GOLD + "=== " + title + " (" + buildings.size() + " total) ===");
+
+        if (buildings.isEmpty()) {
+            sender.sendMessage(ChatColor.GRAY + "No active buildings found.");
+            return true;
+        }
+
+        for (Map.Entry<String, List<RegisteredBuilding>> entry : byTeam.entrySet()) {
+            String team = entry.getKey();
+            List<RegisteredBuilding> teamBuildings = entry.getValue();
+
+            ChatColor teamColor = team.equalsIgnoreCase("RED") ? ChatColor.RED : ChatColor.BLUE;
+
+            if (teamArg.equals("all")) {
+                sender.sendMessage(teamColor + "--- " + team + " Team (" + teamBuildings.size() + ") ---");
+            }
+
+            // Group by region
+            Map<String, List<RegisteredBuilding>> byRegion = teamBuildings.stream()
+                    .collect(Collectors.groupingBy(RegisteredBuilding::regionId));
+
+            for (Map.Entry<String, List<RegisteredBuilding>> regionEntry : byRegion.entrySet()) {
+                String regionId = regionEntry.getKey();
+                List<RegisteredBuilding> regionBuildings = regionEntry.getValue();
+
+                String regionName = regionRenderer != null
+                        ? regionRenderer.getRegionName(regionId).orElse(regionId)
+                        : regionId;
+
+                sender.sendMessage(ChatColor.YELLOW + "  " + regionName + " (" + regionId + "):");
+
+                for (RegisteredBuilding building : regionBuildings) {
+                    String variant = building.variant();
+                    String type = building.type().getDisplayName();
+
+                    // Build display name
+                    String displayName;
+                    if (variant != null && !variant.isEmpty() && !variant.equals("Standard") && !variant.equals("None")) {
+                        displayName = variant;
+                    } else {
+                        displayName = type;
+                    }
+
+                    String coords = "(" + building.anchorX() + ", " + building.anchorY() + ", " + building.anchorZ() + ")";
+
+                    sender.sendMessage(ChatColor.GRAY + "    • " + ChatColor.WHITE + displayName +
+                            ChatColor.GRAY + " " + coords +
+                            ChatColor.DARK_GRAY + " [Score: " + String.format("%.1f", building.totalScore()) + "]");
+                }
+            }
+        }
+
+        return true;
+    }
+
+    // ==================== STATS COMMANDS ====================
+
+    private boolean handleStats(CommandSender sender, String[] args) {
+        if (statService == null) {
+            sender.sendMessage(ChatColor.RED + "Statistics system is not enabled.");
+            return true;
+        }
+
+        if (args.length < 2) {
+            sender.sendMessage(ChatColor.YELLOW + "Usage: /admin stats <purge> <roundId>");
+            return true;
+        }
+
+        String action = args[1].toLowerCase();
+        switch (action) {
+            case "purge" -> handleStatsPurge(sender, args);
+            case "list", "rounds" -> handleStatsListRounds(sender);
+            default -> sender.sendMessage(ChatColor.RED + "Unknown stats action: " + action);
+        }
+
+        return true;
+    }
+
+    private void handleStatsPurge(CommandSender sender, String[] args) {
+        if (args.length < 3) {
+            sender.sendMessage(ChatColor.YELLOW + "Usage: /admin stats purge <roundId>");
+            sender.sendMessage(ChatColor.GRAY + "Available rounds: " + statService.getAllRoundIds());
+            return;
+        }
+
+        int roundId;
+        try {
+            roundId = Integer.parseInt(args[2]);
+        } catch (NumberFormatException e) {
+            sender.sendMessage(ChatColor.RED + "Invalid round ID: " + args[2]);
+            return;
+        }
+
+        // Check if round exists
+        if (!statService.getAllRoundIds().contains(roundId)) {
+            sender.sendMessage(ChatColor.RED + "No stats found for round " + roundId);
+            return;
+        }
+
+        String senderKey = sender.getName();
+        long now = System.currentTimeMillis();
+
+        // Check for pending confirmation
+        long[] pending = pendingStatPurge.get(senderKey);
+        if (pending != null && pending[0] == roundId && (now - pending[1]) < 10000) {
+            // Confirmed - execute purge
+            statService.purgeRound(roundId);
+            pendingStatPurge.remove(senderKey);
+            sender.sendMessage(configManager.getPrefix() + ChatColor.GREEN + "Purged all stats for round " + roundId);
+            plugin.getLogger().info("[Stats] " + sender.getName() + " purged stats for round " + roundId);
+        } else {
+            // Request confirmation
+            pendingStatPurge.put(senderKey, new long[]{roundId, now});
+            sender.sendMessage(ChatColor.YELLOW + "Are you sure you want to purge all stats for round " + roundId + "?");
+            sender.sendMessage(ChatColor.YELLOW + "Run the command again within 10 seconds to confirm.");
+        }
+    }
+
+    private void handleStatsListRounds(CommandSender sender) {
+        java.util.List<Integer> roundIds = statService.getAllRoundIds();
+        if (roundIds.isEmpty()) {
+            sender.sendMessage(ChatColor.YELLOW + "No round stats found.");
+            return;
+        }
+
+        sender.sendMessage(ChatColor.GOLD + "=== Rounds with Stats ===");
+        for (int roundId : roundIds) {
+            sender.sendMessage(ChatColor.GRAY + "  Round " + ChatColor.WHITE + roundId);
+        }
+    }
+
     private boolean handleStatus(CommandSender sender) {
         sender.sendMessage(ChatColor.GOLD + "=== Server Status ===");
 
@@ -2593,6 +2786,7 @@ public final class AdminCommand implements CommandExecutor, TabCompleter {
         sender.sendMessage(ChatColor.YELLOW + "/admin supply <recalculate|info|clear>" + ChatColor.GRAY + " - Supply lines");
         sender.sendMessage(ChatColor.YELLOW + "/admin merit <give|givetokens|set|reset|info|leaderboard>" + ChatColor.GRAY + " - Merit system");
         sender.sendMessage(ChatColor.YELLOW + "/admin depot <list|info|give|givetool|clear|remove>" + ChatColor.GRAY + " - Division depots");
+        sender.sendMessage(ChatColor.YELLOW + "/admin buildings <red|blue|all>" + ChatColor.GRAY + " - List buildings by team");
         sender.sendMessage(ChatColor.YELLOW + "/admin reload" + ChatColor.GRAY + " - Reload config");
         sender.sendMessage(ChatColor.YELLOW + "/admin status" + ChatColor.GRAY + " - Server status");
     }
@@ -2609,7 +2803,7 @@ public final class AdminCommand implements CommandExecutor, TabCompleter {
 
         if (args.length == 1) {
             // Main subcommands
-            completions.addAll(Arrays.asList("round", "phase", "region", "team", "player", "supply", "merit", "depot", "reload", "status"));
+            completions.addAll(Arrays.asList("round", "phase", "region", "team", "player", "supply", "merit", "depot", "buildings", "stats", "reload", "status"));
         } else if (args.length == 2) {
             String sub = args[0].toLowerCase();
             switch (sub) {
@@ -2621,6 +2815,8 @@ public final class AdminCommand implements CommandExecutor, TabCompleter {
                 case "supply" -> completions.addAll(Arrays.asList("recalculate", "info", "debug", "diagnose", "gaptest", "borderinfo", "roadpath", "scan", "scantest", "scanborder", "worldscan", "register", "clear"));
                 case "merit" -> completions.addAll(Arrays.asList("give", "givetokens", "set", "reset", "info", "leaderboard"));
                 case "depot" -> completions.addAll(Arrays.asList("list", "info", "give", "givetool", "clear", "remove"));
+                case "buildings" -> completions.addAll(Arrays.asList("red", "blue", "all"));
+                case "stats" -> completions.addAll(Arrays.asList("purge", "list"));
             }
         } else if (args.length == 3) {
             String sub = args[0].toLowerCase();
@@ -2686,6 +2882,14 @@ public final class AdminCommand implements CommandExecutor, TabCompleter {
                         // Player names
                         for (Player p : Bukkit.getOnlinePlayers()) {
                             completions.add(p.getName());
+                        }
+                    }
+                }
+                case "stats" -> {
+                    if (action.equals("purge") && statService != null) {
+                        // List available round IDs
+                        for (Integer roundId : statService.getAllRoundIds()) {
+                            completions.add(String.valueOf(roundId));
                         }
                     }
                 }

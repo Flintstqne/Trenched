@@ -4,8 +4,10 @@ import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.World;
 import org.bukkit.block.Block;
+import org.bukkit.entity.Player;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitTask;
+import org.flintstqne.entrenched.BlueMapHook.RegionRenderer;
 import org.flintstqne.entrenched.ConfigManager;
 import org.flintstqne.entrenched.DivisionLogic.DivisionMember;
 import org.flintstqne.entrenched.DivisionLogic.DivisionRole;
@@ -35,9 +37,13 @@ public class SqlObjectiveService implements ObjectiveService {
     private final BuildingDetector buildingDetector;
     private DivisionService divisionService;
     private TeamService teamService;
+    private RegionRenderer regionRenderer;
 
     private ObjectiveCompletionCallback completionCallback;
     private ObjectiveSpawnCallback spawnCallback;
+    private BuildingDestroyedCallback buildingDestroyedCallback;
+    private org.flintstqne.entrenched.StatLogic.StatListener statListener;
+    private ObjectiveListener objectiveListener;
 
     // Cache for region centers (calculated once)
     private final Map<String, int[]> regionCenters = new HashMap<>();
@@ -82,6 +88,11 @@ public class SqlObjectiveService implements ObjectiveService {
     private final Map<Integer, Long> firstValidStructureSeenAt = new ConcurrentHashMap<>();
     private final Map<Integer, Long> lastStructureIntegrityCheck = new ConcurrentHashMap<>();
     private final Map<Integer, BuildingDetectionResult> lastStructureDetections = new ConcurrentHashMap<>();
+
+    // Building limits per region (from docs)
+    private static final int MAX_OUTPOSTS_PER_REGION = 2;
+    private static final int MAX_WATCHTOWERS_PER_REGION = 1;
+    private static final int MAX_GARRISONS_PER_REGION = 1;
 
     // Internal data class for tracking planted explosives
     private record PlantedExplosiveData(
@@ -176,6 +187,10 @@ public class SqlObjectiveService implements ObjectiveService {
      */
     public void setTeamService(TeamService teamService) {
         this.teamService = teamService;
+    }
+
+    public void setRegionRenderer(RegionRenderer regionRenderer) {
+        this.regionRenderer = regionRenderer;
     }
 
     private void calculateRegionCenters() {
@@ -331,6 +346,13 @@ public class SqlObjectiveService implements ObjectiveService {
                     continue; // Skip - no enemy chests in region
                 }
             }
+            // Special check for building objectives - skip if ALL teams have reached their limits
+            Optional<BuildingType> buildingTypeOpt = BuildingType.fromObjectiveType(type);
+            if (buildingTypeOpt.isPresent()) {
+                if (!canSpawnBuildingObjective(regionId, buildingTypeOpt.get())) {
+                    continue; // Skip - all teams have reached limit for this building type
+                }
+            }
             candidates.add(type);
         }
 
@@ -371,25 +393,34 @@ public class SqlObjectiveService implements ObjectiveService {
         if (needsLocation(type)) {
             World world = roundService.getGameWorld().orElse(null);
             if (world != null) {
-                int offsetRange = config.getRegionSize() / 4; // Within 1/4 of region from center
-
-                // Try up to 10 times to find a safe location
-                int[] safeLocation = null;
-                for (int attempt = 0; attempt < 10 && safeLocation == null; attempt++) {
-                    int tryX = center[0] + ThreadLocalRandom.current().nextInt(-offsetRange, offsetRange);
-                    int tryZ = center[1] + ThreadLocalRandom.current().nextInt(-offsetRange, offsetRange);
-                    safeLocation = findSafeSpawnLocation(world, tryX, tryZ);
+                // For outpost objectives, use terrain-aware location selection
+                if (type == ObjectiveType.SETTLEMENT_ESTABLISH_OUTPOST) {
+                    int[] terrainLocation = findTerrainAwareOutpostLocation(world, regionId, center);
+                    if (terrainLocation != null) {
+                        locX = terrainLocation[0];
+                        locY = terrainLocation[1];
+                        locZ = terrainLocation[2];
+                    }
                 }
 
-                if (safeLocation != null) {
-                    locX = safeLocation[0];
-                    locY = safeLocation[1];
-                    locZ = safeLocation[2];
-                } else {
-                    // Fallback: use highest block at center
-                    locX = center[0];
-                    locZ = center[1];
-                    locY = world.getHighestBlockYAt(locX, locZ) + 1;
+                // Fallback or non-outpost: generic safe location
+                if (locX == null) {
+                    int offsetRange = config.getRegionSize() / 4;
+                    int[] safeLocation = null;
+                    for (int attempt = 0; attempt < 10 && safeLocation == null; attempt++) {
+                        int tryX = center[0] + ThreadLocalRandom.current().nextInt(-offsetRange, offsetRange);
+                        int tryZ = center[1] + ThreadLocalRandom.current().nextInt(-offsetRange, offsetRange);
+                        safeLocation = findSafeSpawnLocation(world, tryX, tryZ);
+                    }
+                    if (safeLocation != null) {
+                        locX = safeLocation[0];
+                        locY = safeLocation[1];
+                        locZ = safeLocation[2];
+                    } else {
+                        locX = center[0];
+                        locZ = center[1];
+                        locY = world.getHighestBlockYAt(locX, locZ) + 1;
+                    }
                 }
             } else {
                 int offsetRange = config.getRegionSize() / 4;
@@ -401,6 +432,229 @@ public class SqlObjectiveService implements ObjectiveService {
 
         return spawnObjective(regionId, type, locX, locY, locZ);
     }
+
+    // ==================== TERRAIN-AWARE OUTPOST SPAWNING ====================
+
+    /**
+     * Terrain types that determine outpost variant spawning.
+     */
+    private enum TerrainType {
+        WATER,      // Fishing Outpost
+        FARM,       // Farm Outpost
+        DESERT,     // Desert Outpost
+        MOUNTAIN,   // Mountain Outpost
+        UNDERGROUND,// Mining Outpost
+        FOREST,     // Forest Outpost
+        GENERIC     // Standard Outpost
+    }
+
+    /**
+     * Analyzes a region's terrain by sampling blocks and biomes, then finds a spawn location
+     * that matches the dominant terrain type. This ensures outpost variants match the region.
+     */
+    private int[] findTerrainAwareOutpostLocation(World world, String regionId, int[] center) {
+        int regionSize = config.getRegionSize();
+        int halfRegion = regionSize / 2;
+
+        // Sample 25 points across the region in a 5x5 grid
+        int sampleSpacing = regionSize / 5;
+        Map<TerrainType, Integer> terrainWeights = new EnumMap<>(TerrainType.class);
+        for (TerrainType t : TerrainType.values()) terrainWeights.put(t, 0);
+
+        // Collect candidate locations grouped by terrain type
+        Map<TerrainType, List<int[]>> candidatesByTerrain = new EnumMap<>(TerrainType.class);
+        for (TerrainType t : TerrainType.values()) candidatesByTerrain.put(t, new ArrayList<>());
+
+        int seaLevel = world.getSeaLevel();
+
+        for (int gx = -2; gx <= 2; gx++) {
+            for (int gz = -2; gz <= 2; gz++) {
+                int sampleX = center[0] + gx * sampleSpacing;
+                int sampleZ = center[1] + gz * sampleSpacing;
+
+                // Ensure sample is within region bounds
+                int regionMinX = center[0] - halfRegion;
+                int regionMinZ = center[1] - halfRegion;
+                int regionMaxX = center[0] + halfRegion - 1;
+                int regionMaxZ = center[1] + halfRegion - 1;
+                sampleX = Math.max(regionMinX, Math.min(regionMaxX, sampleX));
+                sampleZ = Math.max(regionMinZ, Math.min(regionMaxZ, sampleZ));
+
+                TerrainType terrain = classifySamplePoint(world, sampleX, sampleZ, seaLevel);
+                terrainWeights.merge(terrain, 1, Integer::sum);
+
+                // Try to find a safe spawn location at this sample point
+                int[] safeLoc = findSafeSpawnLocation(world, sampleX, sampleZ);
+                if (safeLoc != null) {
+                    candidatesByTerrain.get(terrain).add(safeLoc);
+                }
+            }
+        }
+
+        // Sort terrain types by weight (most dominant first), excluding GENERIC
+        List<TerrainType> ranked = new ArrayList<>(terrainWeights.keySet());
+        ranked.remove(TerrainType.GENERIC);
+        ranked.sort((a, b) -> terrainWeights.get(b) - terrainWeights.get(a));
+
+        // Log the terrain analysis
+        StringBuilder analysis = new StringBuilder("[Objectives] Terrain analysis for " + regionId + ": ");
+        for (TerrainType t : ranked) {
+            int w = terrainWeights.get(t);
+            if (w > 0) analysis.append(t.name()).append("=").append(w).append(" ");
+        }
+        analysis.append("GENERIC=").append(terrainWeights.get(TerrainType.GENERIC));
+        plugin.getLogger().info(analysis.toString());
+
+        // Pick the best terrain type that has valid candidate locations
+        for (TerrainType bestTerrain : ranked) {
+            if (terrainWeights.get(bestTerrain) <= 0) continue;
+
+            List<int[]> candidates = candidatesByTerrain.get(bestTerrain);
+            if (!candidates.isEmpty()) {
+                // For water terrain, prefer shoreline locations (near but not in water)
+                if (bestTerrain == TerrainType.WATER) {
+                    int[] shoreLoc = findShorelineLocation(world, center, regionSize);
+                    if (shoreLoc != null) {
+                        plugin.getLogger().info("[Objectives] Spawning Fishing Outpost at shoreline in " + regionId +
+                                " (" + shoreLoc[0] + "," + shoreLoc[1] + "," + shoreLoc[2] + ")");
+                        return shoreLoc;
+                    }
+                }
+
+                int[] chosen = candidates.get(ThreadLocalRandom.current().nextInt(candidates.size()));
+                plugin.getLogger().info("[Objectives] Spawning " + bestTerrain + " outpost in " + regionId +
+                        " (" + chosen[0] + "," + chosen[1] + "," + chosen[2] + ")");
+                return chosen;
+            }
+        }
+
+        // No specific terrain candidates found, fallback to generic
+        List<int[]> genericCandidates = candidatesByTerrain.get(TerrainType.GENERIC);
+        if (!genericCandidates.isEmpty()) {
+            return genericCandidates.get(ThreadLocalRandom.current().nextInt(genericCandidates.size()));
+        }
+
+        return null; // No safe location found at all
+    }
+
+    /**
+     * Classifies a single sample point into a terrain type by checking the biome,
+     * surface blocks, and elevation.
+     */
+    private TerrainType classifySamplePoint(World world, int x, int z, int seaLevel) {
+        int highestY = world.getHighestBlockYAt(x, z);
+        String biomeName = world.getBiome(x, highestY, z).getKey().toString().toUpperCase();
+
+        // Check surface block
+        Material surfaceBlock = Material.AIR;
+        for (int y = highestY; y > world.getMinHeight() + 5; y--) {
+            Material mat = world.getBlockAt(x, y, z).getType();
+            if (mat.isSolid() || mat == Material.WATER) {
+                surfaceBlock = mat;
+                break;
+            }
+        }
+
+        // Water check: surface is water or ocean/river biome
+        if (surfaceBlock == Material.WATER ||
+            biomeName.contains("OCEAN") || biomeName.contains("RIVER") ||
+            biomeName.contains("BEACH")) {
+            return TerrainType.WATER;
+        }
+
+        // Desert check: desert biome or sandy surface
+        if (biomeName.contains("DESERT") || biomeName.contains("BADLANDS") ||
+            surfaceBlock.name().contains("SAND") || surfaceBlock == Material.RED_SAND ||
+            surfaceBlock == Material.TERRACOTTA || surfaceBlock.name().contains("TERRACOTTA")) {
+            return TerrainType.DESERT;
+        }
+
+        // Farm check: plains-like flat biomes with grass
+        if (biomeName.contains("PLAINS") || biomeName.contains("MEADOW") ||
+            biomeName.contains("SAVANNA") || biomeName.contains("SUNFLOWER")) {
+            // Additional flatness check: Y near sea level
+            if (highestY < seaLevel + 15) {
+                return TerrainType.FARM;
+            }
+        }
+
+        // Mountain check: high elevation
+        if (highestY >= seaLevel + 22 ||
+            biomeName.contains("MOUNTAIN") || biomeName.contains("PEAK") ||
+            biomeName.contains("STONY") || biomeName.contains("WINDSWEPT") ||
+            biomeName.contains("SNOWY_SLOPES") || biomeName.contains("FROZEN_PEAKS") ||
+            biomeName.contains("JAGGED")) {
+            return TerrainType.MOUNTAIN;
+        }
+
+        // Forest check: forest biome or tree-covered area
+        if (biomeName.contains("FOREST") || biomeName.contains("TAIGA") ||
+            biomeName.contains("JUNGLE") || biomeName.contains("GROVE") ||
+            biomeName.contains("BIRCH") || biomeName.contains("MANGROVE") ||
+            biomeName.contains("CHERRY")) {
+            return TerrainType.FOREST;
+        }
+
+        // Underground check: sample point is below sea level (caves, ravines)
+        // Also check for nearby ore beneath the surface
+        if (highestY <= seaLevel - 10) {
+            return TerrainType.UNDERGROUND;
+        }
+        // Even if surface is normal height, check for exposed ore (ravines, cliffs, caves)
+        int oreCount = 0;
+        for (int dy = -20; dy <= 0; dy++) {
+            int checkY = Math.max(world.getMinHeight() + 1, highestY + dy);
+            String blockName = world.getBlockAt(x, checkY, z).getType().name();
+            if (blockName.contains("ORE")) oreCount++;
+        }
+        if (oreCount >= 3) {
+            return TerrainType.UNDERGROUND;
+        }
+
+        // Swamp → treat as water since it has water features
+        if (biomeName.contains("SWAMP")) {
+            return TerrainType.WATER;
+        }
+
+        return TerrainType.GENERIC;
+    }
+
+    /**
+     * Finds a location along the shoreline (solid ground within 10 blocks of water).
+     * Ideal for Fishing Outpost spawning.
+     */
+    private int[] findShorelineLocation(World world, int[] center, int regionSize) {
+        int offsetRange = regionSize / 4;
+        int seaLevel = world.getSeaLevel();
+
+        // Try 20 random points looking for shoreline
+        for (int attempt = 0; attempt < 20; attempt++) {
+            int tryX = center[0] + ThreadLocalRandom.current().nextInt(-offsetRange, offsetRange);
+            int tryZ = center[1] + ThreadLocalRandom.current().nextInt(-offsetRange, offsetRange);
+
+            int[] safeLoc = findSafeSpawnLocation(world, tryX, tryZ);
+            if (safeLoc == null) continue;
+
+            // Check if there's water within 10 blocks horizontally
+            boolean nearWater = false;
+            for (int dx = -10; dx <= 10 && !nearWater; dx += 2) {
+                for (int dz = -10; dz <= 10 && !nearWater; dz += 2) {
+                    Material checkMat = world.getBlockAt(safeLoc[0] + dx, seaLevel, safeLoc[2] + dz).getType();
+                    if (checkMat == Material.WATER) {
+                        nearWater = true;
+                    }
+                }
+            }
+
+            if (nearWater) {
+                return safeLoc;
+            }
+        }
+
+        return null;
+    }
+
+    // ==================== END TERRAIN-AWARE OUTPOST SPAWNING ====================
 
     /**
      * Finds a safe spawn location at the given X/Z coordinates.
@@ -730,6 +984,25 @@ public class SqlObjectiveService implements ObjectiveService {
                     completionCallback.onObjectiveCompleted(completed, playerUuid, team));
         }
 
+        // Record stats for objective completion
+        if (statListener != null) {
+            org.bukkit.entity.Player player = org.bukkit.Bukkit.getPlayer(playerUuid);
+            String playerName = player != null ? player.getName() : playerUuid.toString();
+
+            switch (objective.type()) {
+                case RAID_CAPTURE_INTEL -> statListener.recordIntelCaptured(playerUuid, playerName);
+                case RAID_PLANT_EXPLOSIVE -> statListener.recordTntPlanted(playerUuid, playerName);
+                case RAID_DESTROY_CACHE -> statListener.recordSupplyCacheDestroyed(playerUuid, playerName);
+                case RAID_HOLD_GROUND -> statListener.recordHoldGroundWin(playerUuid, playerName);
+                case SETTLEMENT_RESOURCE_DEPOT -> statListener.recordResourceDepotEstablished(playerUuid, playerName);
+                default -> {
+                    // Record generic objective completion
+                    boolean isSettlement = objective.type().getCategory() == ObjectiveCategory.SETTLEMENT;
+                    statListener.recordObjectiveCompleted(playerUuid, playerName, isSettlement);
+                }
+            }
+        }
+
         return CompleteResult.SUCCESS;
     }
 
@@ -773,6 +1046,13 @@ public class SqlObjectiveService implements ObjectiveService {
     private boolean isWithinStructureDetectionRange(RegionObjective objective, int x, int y, int z) {
         int radius = config.getBuildingDetectionRadius();
         int vertical = config.getBuildingDetectionVerticalRange();
+
+        // Watchtowers need extended vertical range since they are tall structures
+        Optional<BuildingType> buildingTypeOpt = BuildingType.fromObjectiveType(objective.type());
+        if (buildingTypeOpt.isPresent() && buildingTypeOpt.get() == BuildingType.WATCHTOWER) {
+            vertical = Math.max(vertical, 32);
+        }
+
         int dx = x - objective.locationX();
         int dz = z - objective.locationZ();
         return (dx * dx) + (dz * dz) <= radius * radius
@@ -858,17 +1138,235 @@ public class SqlObjectiveService implements ObjectiveService {
             return;
         }
 
+        // Check building limits before registration
+        Optional<BuildingType> buildingTypeOpt = BuildingType.fromObjectiveType(objective.type());
+        if (buildingTypeOpt.isPresent()) {
+            BuildingType buildingType = buildingTypeOpt.get();
+            if (isBuildingLimitReached(objective.regionId(), team, buildingType)) {
+                // Limit reached - don't complete the objective, but keep it at 99%
+                plugin.getLogger().info("[Objectives] Building limit reached for " + buildingType.getDisplayName() +
+                        " in " + objective.regionId() + " for team " + team + " - not registering");
+
+                // Notify the player
+                org.bukkit.entity.Player actorPlayer = plugin.getServer().getPlayer(actor);
+                if (actorPlayer != null) {
+                    actorPlayer.sendMessage(org.bukkit.ChatColor.YELLOW + "⚠ " + org.bukkit.ChatColor.WHITE +
+                            "Building limit reached! Your team already has the maximum number of " +
+                            buildingType.getDisplayName() + "s in this region.");
+                    actorPlayer.sendMessage(org.bukkit.ChatColor.GRAY + "The structure is valid but won't be registered.");
+                }
+
+                // Keep rescanning but don't complete
+                firstValidStructureSeenAt.remove(objective.id());
+                return;
+            }
+        }
+
         CompleteResult completion = completeObjective(objective.id(), actor, team);
         if (completion == CompleteResult.SUCCESS || completion == CompleteResult.ALREADY_COMPLETED) {
             db.upsertRegisteredBuilding(objective, result, team, RegisteredBuildingStatus.ACTIVE, now);
+
+            // Broadcast building construction to players in the region
+            if (completion == CompleteResult.SUCCESS) {
+                broadcastBuildingConstruction(objective, result, team);
+            }
+
+            // Sync building blocks to nearby players to prevent ghost blocks
+            syncBuildingBlocksToNearbyPlayers(objective, result);
+
+            // Record stat for building constructed
+            if (statListener != null && completion == CompleteResult.SUCCESS) {
+                org.bukkit.entity.Player actorPlayer = plugin.getServer().getPlayer(actor);
+                String actorName = actorPlayer != null ? actorPlayer.getName() : actor.toString();
+                String buildingTypeName = objective.type().getDisplayName();
+                statListener.recordBuildingConstructed(actor, actorName, buildingTypeName);
+            }
         }
         firstValidStructureSeenAt.remove(objective.id());
+    }
+
+    /**
+     * Checks if the building limit for a specific type has been reached in a region.
+     */
+    private boolean isBuildingLimitReached(String regionId, String team, BuildingType buildingType) {
+        Optional<Integer> roundIdOpt = getCurrentRoundId();
+        if (roundIdOpt.isEmpty()) return false;
+
+        int currentCount = db.countActiveRegisteredBuildingsByType(regionId, roundIdOpt.get(), team, buildingType);
+        int limit = getBuildingLimit(buildingType);
+
+        return currentCount >= limit;
+    }
+
+    /**
+     * Gets the maximum number of buildings of a type allowed per region per team.
+     */
+    private int getBuildingLimit(BuildingType buildingType) {
+        return switch (buildingType) {
+            case OUTPOST -> MAX_OUTPOSTS_PER_REGION;
+            case WATCHTOWER -> MAX_WATCHTOWERS_PER_REGION;
+            case GARRISON -> MAX_GARRISONS_PER_REGION;
+        };
+    }
+
+    /**
+     * Broadcasts a message to all players in the region when a building is constructed.
+     */
+    private void broadcastBuildingConstruction(RegionObjective objective, BuildingDetectionResult result, String team) {
+        if (!objective.hasLocation()) return;
+
+        World world = roundService.getGameWorld().orElse(null);
+        if (world == null) return;
+
+        String variant = result.variant();
+        String buildingType = result.type().getDisplayName();
+        int x = objective.locationX();
+        int y = objective.locationY();
+        int z = objective.locationZ();
+
+        // Build the message
+        String buildingName;
+        if (variant != null && !variant.isEmpty() && !variant.equals("Standard") && !variant.equals("None")) {
+            // Strip "(needs ...)" suffix for display - show base variant name
+            if (variant.contains("(needs")) {
+                String baseName = variant.substring(0, variant.indexOf(" (needs")).trim();
+                buildingName = buildingType + " (" + baseName + " possible — add items to upgrade!)";
+            } else {
+                buildingName = variant;
+            }
+        } else {
+            buildingName = buildingType;
+        }
+
+        // Get team color
+        org.bukkit.ChatColor teamColor = team.equalsIgnoreCase("red")
+            ? org.bukkit.ChatColor.RED
+            : org.bukkit.ChatColor.BLUE;
+
+        String message = teamColor + "⚒ " + org.bukkit.ChatColor.WHITE + buildingName +
+            org.bukkit.ChatColor.GREEN + " has been constructed! " +
+            org.bukkit.ChatColor.GRAY + "(" + x + ", " + y + ", " + z + ")";
+
+        // Find all players in the region
+        String regionId = objective.regionId();
+        for (org.bukkit.entity.Player player : world.getPlayers()) {
+            String playerRegion = regionService.getRegionIdForLocation(
+                player.getLocation().getBlockX(),
+                player.getLocation().getBlockZ()
+            );
+
+            if (regionId.equals(playerRegion)) {
+                player.sendMessage(message);
+                player.playSound(player.getLocation(), org.bukkit.Sound.BLOCK_ANVIL_USE, 0.7f, 1.2f);
+            }
+        }
+
+        // Also log it
+        plugin.getLogger().info("[Buildings] " + buildingName + " constructed in " + regionId +
+            " by team " + team + " at " + x + "," + y + "," + z);
+    }
+
+    /**
+     * Broadcasts a variant upgrade message when a player adds the missing items
+     * to upgrade an outpost to its full variant (e.g., adding a Furnace and Pickaxe
+     * to upgrade to a full Mining Outpost).
+     */
+    private void broadcastVariantUpgrade(RegionObjective objective, String newVariant, String team) {
+        if (!objective.hasLocation()) return;
+
+        World world = roundService.getGameWorld().orElse(null);
+        if (world == null) return;
+
+        org.bukkit.ChatColor teamColor = team.equalsIgnoreCase("red")
+                ? org.bukkit.ChatColor.RED
+                : org.bukkit.ChatColor.BLUE;
+
+        String message = teamColor + "⬆ " + org.bukkit.ChatColor.GREEN + newVariant +
+                org.bukkit.ChatColor.YELLOW + " upgraded! " +
+                org.bukkit.ChatColor.GRAY + "Variant buff now active when leaving the outpost.";
+
+        String regionId = objective.regionId();
+        for (org.bukkit.entity.Player player : world.getPlayers()) {
+            String playerRegion = regionService.getRegionIdForLocation(
+                    player.getLocation().getBlockX(),
+                    player.getLocation().getBlockZ()
+            );
+
+            if (regionId.equals(playerRegion)) {
+                player.sendMessage(message);
+                player.playSound(player.getLocation(), org.bukkit.Sound.BLOCK_BEACON_ACTIVATE, 0.6f, 1.5f);
+            }
+        }
+
+        plugin.getLogger().info("[Buildings] " + newVariant + " variant upgraded in " + regionId + " (team " + team + ")");
+    }
+
+    /**
+     * Syncs all blocks within a completed building's bounds to nearby players.
+     * This helps prevent ghost block issues where the client's block state
+     * doesn't match the server after rapid building.
+     */
+    private void syncBuildingBlocksToNearbyPlayers(RegionObjective objective, BuildingDetectionResult result) {
+        if (!objective.hasLocation()) return;
+
+        World world = roundService.getGameWorld().orElse(null);
+        if (world == null) return;
+
+        // Get building bounds from result
+        int minX = result.minX();
+        int minY = result.minY();
+        int minZ = result.minZ();
+        int maxX = result.maxX();
+        int maxY = result.maxY();
+        int maxZ = result.maxZ();
+
+        // Find center of building for player search
+        Location center = new Location(world,
+            (minX + maxX) / 2.0,
+            (minY + maxY) / 2.0,
+            (minZ + maxZ) / 2.0);
+
+        // Get nearby players (within 64 blocks)
+        Collection<org.bukkit.entity.Player> nearbyPlayers = world.getNearbyPlayers(center, 64);
+        if (nearbyPlayers.isEmpty()) return;
+
+        // Schedule block sync on next tick to ensure server state is finalized
+        plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
+            for (int x = minX; x <= maxX; x++) {
+                for (int y = minY; y <= maxY; y++) {
+                    for (int z = minZ; z <= maxZ; z++) {
+                        Block block = world.getBlockAt(x, y, z);
+                        Location loc = block.getLocation();
+                        for (org.bukkit.entity.Player player : nearbyPlayers) {
+                            player.sendBlockChange(loc, block.getBlockData());
+                        }
+                    }
+                }
+            }
+        }, 2L);
     }
 
     private void handleRegisteredBuildingIntegrity(RegionObjective objective, RegisteredBuilding building, BuildingDetectionResult result) {
         long now = System.currentTimeMillis();
         if (result.valid()) {
+            // Check if variant upgraded (went from "(needs ...)" to clean variant name)
+            String oldVariant = building.variant();
+            String newVariant = result.variant();
+            boolean variantUpgraded = oldVariant != null && newVariant != null
+                    && oldVariant.contains("(needs") && !newVariant.contains("(needs")
+                    && !newVariant.equals("Standard");
+
             db.upsertRegisteredBuilding(objective, result, building.team(), RegisteredBuildingStatus.ACTIVE, now);
+
+            // Broadcast variant upgrade if it happened
+            if (variantUpgraded) {
+                broadcastVariantUpgrade(objective, newVariant, building.team());
+            }
+
+            // Clear damage tracking when building returns to ACTIVE
+            if (objectiveListener != null) {
+                objectiveListener.clearBuildingDamageTracking(building.objectiveId());
+            }
             return;
         }
 
@@ -877,7 +1375,33 @@ public class SqlObjectiveService implements ObjectiveService {
             db.invalidateRegisteredBuilding(building.objectiveId(), now);
             plugin.getLogger().info("[Objectives] Registered " + building.type().getDisplayName()
                     + " in " + building.regionId() + " invalidated after losing structure integrity.");
+
+            // Credit all recent damagers with building destruction stat
+            if (statListener != null && objectiveListener != null) {
+                Set<ObjectiveListener.BuildingDamageRecord> damagers = objectiveListener.getBuildingDamagers(building.objectiveId());
+                for (ObjectiveListener.BuildingDamageRecord damager : damagers) {
+                    // Only credit enemy damagers
+                    if (!damager.damagerTeam().equalsIgnoreCase(building.team())) {
+                        statListener.recordBuildingDestroyed(damager.damagerUuid(), damager.damagerName());
+                        plugin.getLogger().info("[Stats] Credited " + damager.damagerName() +
+                                " with building destruction: " + building.type().getDisplayName());
+                    }
+                }
+                objectiveListener.clearBuildingDamageTracking(building.objectiveId());
+            }
+
+            // Notify via callback
+            if (buildingDestroyedCallback != null) {
+                buildingDestroyedCallback.onBuildingDestroyed(building, getRegionDisplayName(building.regionId()));
+            }
         }
+    }
+
+    private String getRegionDisplayName(String regionId) {
+        if (regionRenderer != null) {
+            return regionRenderer.getRegionName(regionId).orElse(regionId);
+        }
+        return regionId;
     }
 
     private void clearStructureTracking(int objectiveId) {
@@ -1233,6 +1757,13 @@ public class SqlObjectiveService implements ObjectiveService {
 
                             plugin.getLogger().info("[Objectives] Hold Ground defense - " + killerUuid +
                                     " killed attacker " + victimUuid + " with " + victimProgress + "s progress in " + regionId);
+
+                            // Record stat for hold ground defend
+                            if (statListener != null) {
+                                org.bukkit.entity.Player defenderPlayer = org.bukkit.Bukkit.getPlayer(killerUuid);
+                                String defenderName = defenderPlayer != null ? defenderPlayer.getName() : killerUuid.toString();
+                                statListener.recordHoldGroundDefend(killerUuid, defenderName);
+                            }
                         }
                     }
                 }
@@ -1408,6 +1939,33 @@ public class SqlObjectiveService implements ObjectiveService {
         }
 
         return foundChests > 0;
+    }
+
+    /**
+     * Checks if a building objective can be spawned - returns true if at least one team
+     * has not reached the building limit for this type in the region.
+     */
+    private boolean canSpawnBuildingObjective(String regionId, BuildingType buildingType) {
+        Optional<Integer> roundIdOpt = getCurrentRoundId();
+        if (roundIdOpt.isEmpty()) return true; // Allow if we can't check
+
+        int roundId = roundIdOpt.get();
+        int limit = getBuildingLimit(buildingType);
+
+        // Check both teams - if either team can still build, allow the objective
+        int redCount = db.countActiveRegisteredBuildingsByType(regionId, roundId, "RED", buildingType);
+        int blueCount = db.countActiveRegisteredBuildingsByType(regionId, roundId, "BLUE", buildingType);
+
+        // Return true if at least one team hasn't reached the limit
+        boolean canSpawn = redCount < limit || blueCount < limit;
+
+        if (!canSpawn) {
+            plugin.getLogger().info("[Objectives] Skipping " + buildingType.getDisplayName() +
+                    " objective in " + regionId + " - both teams at limit (RED: " + redCount +
+                    ", BLUE: " + blueCount + ", limit: " + limit + ")");
+        }
+
+        return canSpawn;
     }
 
     @Override
@@ -1624,6 +2182,7 @@ public class SqlObjectiveService implements ObjectiveService {
         long now = System.currentTimeMillis();
         long integrityIntervalMs = config.getBuildingIntegrityCheckSeconds() * 1000L;
 
+        // Check integrity of registered (completed) buildings
         for (RegisteredBuilding building : db.getRegisteredBuildingsByStatus(roundIdOpt.get(), RegisteredBuildingStatus.ACTIVE)) {
             long lastChecked = lastStructureIntegrityCheck.getOrDefault(building.objectiveId(), 0L);
             if ((now - lastChecked) < integrityIntervalMs || pendingStructureRescans.containsKey(building.objectiveId())) {
@@ -1633,6 +2192,47 @@ public class SqlObjectiveService implements ObjectiveService {
             lastStructureIntegrityCheck.put(building.objectiveId(), now);
             scheduleStructureRescan(building.objectiveId(), null, building.team(), 1L);
         }
+
+        // Also periodically rescan ACTIVE building objectives that haven't been scanned recently.
+        // This ensures watchtowers (tall structures) and other buildings update even if the player
+        // is building far above/below the objective marker and block events don't trigger rescans.
+        long activeRescanIntervalMs = 10_000L; // 10 seconds for active objectives
+        for (RegionObjective objective : db.getActiveObjectivesByRound(roundIdOpt.get())) {
+            Optional<BuildingType> typeOpt = BuildingType.fromObjectiveType(objective.type());
+            if (typeOpt.isEmpty() || !objective.hasLocation()) continue;
+            if (pendingStructureRescans.containsKey(objective.id())) continue;
+
+            // Skip if already registered (handled above)
+            if (db.getRegisteredBuilding(objective.id()).isPresent()) continue;
+
+            long lastChecked = lastStructureIntegrityCheck.getOrDefault(objective.id(), 0L);
+            if ((now - lastChecked) < activeRescanIntervalMs) continue;
+
+            // Only rescan if a player is nearby (within 64 blocks horizontal)
+            boolean playerNearby = false;
+            World world = roundService.getGameWorld().orElse(null);
+            if (world != null) {
+                for (Player p : world.getPlayers()) {
+                    double dx = p.getLocation().getX() - objective.locationX();
+                    double dz = p.getLocation().getZ() - objective.locationZ();
+                    if (dx * dx + dz * dz <= 64 * 64) {
+                        playerNearby = true;
+                        // Also update the pending actor/team from nearby player
+                        Optional<String> team = teamService.getPlayerTeam(p.getUniqueId());
+                        if (team.isPresent()) {
+                            pendingStructureActors.put(objective.id(), p.getUniqueId());
+                            pendingStructureTeams.put(objective.id(), team.get());
+                        }
+                        break;
+                    }
+                }
+            }
+
+            if (!playerNearby) continue;
+
+            lastStructureIntegrityCheck.put(objective.id(), now);
+            scheduleStructureRescan(objective.id(), null, null, 1L);
+        }
     }
 
     @Override
@@ -1641,8 +2241,36 @@ public class SqlObjectiveService implements ObjectiveService {
     }
 
     @Override
+    public Optional<RegisteredBuilding> getRegisteredBuildingAtLocation(int x, int y, int z) {
+        Optional<Integer> roundIdOpt = getCurrentRoundId();
+        if (roundIdOpt.isEmpty()) {
+            return Optional.empty();
+        }
+
+        // Get all active buildings and check if the location is within any of their bounds
+        for (RegisteredBuilding building : db.getRegisteredBuildingsByStatus(roundIdOpt.get(), RegisteredBuildingStatus.ACTIVE)) {
+            if (x >= building.minX() && x <= building.maxX() &&
+                y >= building.minY() && y <= building.maxY() &&
+                z >= building.minZ() && z <= building.maxZ()) {
+                return Optional.of(building);
+            }
+        }
+
+        return Optional.empty();
+    }
+
+    @Override
     public Optional<BuildingDetectionResult> getBuildingDetectionResult(int objectiveId) {
         return Optional.ofNullable(lastStructureDetections.get(objectiveId));
+    }
+
+    @Override
+    public List<RegisteredBuilding> getAllActiveBuildings() {
+        Optional<Integer> roundIdOpt = getCurrentRoundId();
+        if (roundIdOpt.isEmpty()) {
+            return Collections.emptyList();
+        }
+        return db.getRegisteredBuildingsByStatus(roundIdOpt.get(), RegisteredBuildingStatus.ACTIVE);
     }
 
     @Override
@@ -2086,8 +2714,8 @@ public class SqlObjectiveService implements ObjectiveService {
                     // Check if this player is on the defending team
                     Optional<RegionStatus> statusOpt = regionService.getRegionStatus(data.sourceRegionId());
                     if (statusOpt.isPresent()) {
-                        String defenderTeamExpected = statusOpt.get().ownerTeam();
-                        if (defenderTeamExpected != null && defenderTeamExpected.equalsIgnoreCase(team)) {
+                        String defenderTeam = statusOpt.get().ownerTeam();
+                        if (defenderTeam != null && defenderTeam.equalsIgnoreCase(team)) {
                             // Defender recovered the intel - reset the objective
                             intelCarriers.remove(entry.getKey());
 
@@ -2308,6 +2936,25 @@ public class SqlObjectiveService implements ObjectiveService {
     @Override
     public void setSpawnCallback(ObjectiveSpawnCallback callback) {
         this.spawnCallback = callback;
+    }
+
+    @Override
+    public void setBuildingDestroyedCallback(BuildingDestroyedCallback callback) {
+        this.buildingDestroyedCallback = callback;
+    }
+
+    /**
+     * Sets the stat listener for tracking objective stats.
+     */
+    public void setStatListener(org.flintstqne.entrenched.StatLogic.StatListener listener) {
+        this.statListener = listener;
+    }
+
+    /**
+     * Sets the objective listener for building damage tracking.
+     */
+    public void setObjectiveListener(ObjectiveListener listener) {
+        this.objectiveListener = listener;
     }
 }
 

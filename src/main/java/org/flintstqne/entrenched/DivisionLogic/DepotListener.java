@@ -43,6 +43,7 @@ public class DepotListener implements Listener {
     private final ConfigManager configManager;
     private final DepotItem depotItem;
     private DepotParticleManager particleManager;
+    private org.flintstqne.entrenched.StatLogic.StatListener statListener;
 
     // Track players who are currently viewing depot storage (for save on close)
     private final Map<UUID, Integer> playersViewingDepot = new ConcurrentHashMap<>();
@@ -68,6 +69,13 @@ public class DepotListener implements Listener {
      */
     public void setParticleManager(DepotParticleManager particleManager) {
         this.particleManager = particleManager;
+    }
+
+    /**
+     * Sets the stat listener for tracking depot stats.
+     */
+    public void setStatListener(org.flintstqne.entrenched.StatLogic.StatListener statListener) {
+        this.statListener = statListener;
     }
 
     // ==================== BLOCK PLACEMENT ====================
@@ -108,6 +116,11 @@ public class DepotListener implements Listener {
                 if (particleManager != null) {
                     String team = teamService.getPlayerTeam(player.getUniqueId()).orElse("red");
                     particleManager.showPlacementEffect(location, team);
+                }
+
+                // Record stat for depot placement
+                if (statListener != null) {
+                    statListener.recordDepotPlaced(player.getUniqueId(), player.getName());
                 }
 
                 // Notify division members
@@ -424,6 +437,11 @@ public class DepotListener implements Listener {
                 int lootCount = depotService.getLastRaidDropCount(player.getUniqueId());
                 sendMessage(player, ChatColor.GREEN + "⚔ Raid successful! " +
                         ChatColor.YELLOW + lootCount + " items dropped!");
+
+                // Record stat for depot raid
+                if (statListener != null) {
+                    statListener.recordDepotRaided(player.getUniqueId(), player.getName(), lootCount);
+                }
 
                 // Show raid particle effect
                 if (particleManager != null) {
