@@ -284,6 +284,12 @@ public interface ObjectiveService {
     List<RegisteredBuilding> getAllActiveBuildings();
 
     /**
+     * Gets all registered buildings in the current round, including INVALID (destroyed) ones.
+     * Used for display purposes so players can see damaged buildings that need repair.
+     */
+    List<RegisteredBuilding> getAllBuildings();
+
+    /**
      * Sets a callback for when a registered building is destroyed/invalidated.
      */
     void setBuildingDestroyedCallback(BuildingDestroyedCallback callback);

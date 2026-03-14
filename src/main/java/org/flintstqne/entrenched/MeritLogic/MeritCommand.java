@@ -205,8 +205,17 @@ public class MeritCommand implements CommandExecutor, TabCompleter {
 
         sender.sendMessage(ChatColor.YELLOW + "Enlisted:");
         for (MeritRank rank : MeritRank.values()) {
-            if (!rank.isOfficer() && !rank.isGeneral()) {
+            if (!rank.isOfficer() && !rank.isGeneral() && !rank.isWarrantOfficer()) {
                 sender.sendMessage(ChatColor.GRAY + "  " + rank.getFormattedTag() + " " +
+                        rank.getColor() + rank.getDisplayName() +
+                        ChatColor.DARK_GRAY + " - " + rank.getMeritsRequired() + " merits");
+            }
+        }
+
+        sender.sendMessage(ChatColor.YELLOW + "Warrant Officers:");
+        for (MeritRank rank : MeritRank.values()) {
+            if (rank.isWarrantOfficer()) {
+            if (rank.isOfficer() && !rank.isGeneral() && !rank.isWarrantOfficer()) {
                         rank.getColor() + rank.getDisplayName() +
                         ChatColor.DARK_GRAY + " - " + rank.getMeritsRequired() + " merits");
             }

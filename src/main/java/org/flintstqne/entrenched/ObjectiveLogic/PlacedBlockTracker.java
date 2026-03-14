@@ -200,6 +200,8 @@ public class PlacedBlockTracker {
      * Runs on an async thread.
      */
     private void flush() {
+        long startMs = System.currentTimeMillis();
+
         // Drain writes
         List<PlacedBlockDb.PlacedBlockRecord> writes = new ArrayList<>();
         PlacedBlockDb.PlacedBlockRecord record;
@@ -214,12 +216,17 @@ public class PlacedBlockTracker {
             deletes.add(new long[]{ deleteRecord.x, deleteRecord.y, deleteRecord.z });
         }
 
+        if (writes.isEmpty() && deletes.isEmpty()) return;
+
         if (!writes.isEmpty()) {
             db.batchInsert(writes);
         }
         if (!deletes.isEmpty()) {
             db.batchDelete(deletes);
         }
+
+        long elapsed = System.currentTimeMillis() - startMs;
+        logger.info("[PlacedBlocks] Flush: " + writes.size() + " writes, " + deletes.size() + " deletes in " + elapsed + "ms");
     }
 
     // ==================== CLEANUP ====================
@@ -231,13 +238,22 @@ public class PlacedBlockTracker {
     private void cleanup() {
         if (regionActiveChecker == null) return;
 
+        long startMs = System.currentTimeMillis();
+        int cleaned = 0;
+
         List<String> trackedRegions = db.getTrackedRegions();
         for (String regionId : trackedRegions) {
             if (!regionActiveChecker.isRegionActive(regionId)) {
                 db.deleteRegion(regionId);
                 regionCache.remove(regionId);
                 loadedRegions.remove(regionId);
+                cleaned++;
             }
+        }
+
+        if (cleaned > 0) {
+            long elapsed = System.currentTimeMillis() - startMs;
+            logger.info("[PlacedBlocks] Cleanup: removed " + cleaned + " inactive region(s) in " + elapsed + "ms");
         }
     }
 

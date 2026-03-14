@@ -55,7 +55,7 @@ This creates a system where **players must contribute to earn recognition curren
 
 ## Rank Structure
 
-Military-themed ranks that reflect the warfare setting. Ranks are purely cosmetic and organizational - no gameplay advantages.
+Military-themed ranks following the US Army rank structure. Ranks are purely cosmetic and organizational - no gameplay advantages.
 
 ### Enlisted Ranks
 
@@ -64,30 +64,46 @@ Military-themed ranks that reflect the warfare setting. Ranks are purely cosmeti
 | **Recruit** | `[RCT]` | 0 | New players, fresh to the war |
 | **Private** | `[PVT]` | 10 | Shown some commitment |
 | **Private First Class** | `[PFC]` | 25 | Reliable soldier |
-| **Corporal** | `[CPL]` | 50 | Experienced fighter |
+| **Specialist** | `[SPC]` | 45 | Technical proficiency |
+| **Corporal** | `[CPL]` | 70 | Experienced fighter, junior NCO |
 | **Sergeant** | `[SGT]` | 100 | Proven leader potential |
-| **Staff Sergeant** | `[SSG]` | 175 | Respected veteran |
-| **Master Sergeant** | `[MSG]` | 275 | Elite enlisted |
+| **Staff Sergeant** | `[SSG]` | 150 | Respected veteran |
+| **Sergeant First Class** | `[SFC]` | 210 | Senior NCO, platoon-level |
+| **Master Sergeant** | `[MSG]` | 280 | Elite enlisted, technical track |
+| **First Sergeant** | `[1SG]` | 350 | Company-level command NCO |
+| **Sergeant Major** | `[SGM]` | 430 | Battalion-level NCO |
+| **Command Sergeant Major** | `[CSM]` | 520 | Senior enlisted advisor |
+
+### Warrant Officer Ranks
+
+| Rank | Tag | Merits Required | Description |
+|------|-----|-----------------|-------------|
+| **Warrant Officer 1** | `[WO1]` | 625 | Technical expert, addressed as Sir/Ma'am |
+| **Chief Warrant Officer 2** | `[CW2]` | 750 | Experienced specialist, addressed as Chief |
+| **Chief Warrant Officer 3** | `[CW3]` | 900 | Advanced technical leader |
+| **Chief Warrant Officer 4** | `[CW4]` | 1,075 | Senior technical authority |
+| **Chief Warrant Officer 5** | `[CW5]` | 1,275 | Master technical expert |
 
 ### Officer Ranks
 
 | Rank | Tag | Merits Required | Description |
 |------|-----|-----------------|-------------|
-| **Second Lieutenant** | `[2LT]` | 400 | Junior officer |
-| **First Lieutenant** | `[1LT]` | 600 | Field leader |
-| **Captain** | `[CPT]` | 850 | Company commander |
-| **Major** | `[MAJ]` | 1,200 | Battalion level |
-| **Lieutenant Colonel** | `[LTC]` | 1,750 | Senior officer |
-| **Colonel** | `[COL]` | 2,500 | Regimental commander |
+| **Cadet** | `[CDT]` | 1,500 | Officer candidate |
+| **Second Lieutenant** | `[2LT]` | 1,750 | Junior officer |
+| **First Lieutenant** | `[1LT]` | 2,050 | Field leader |
+| **Captain** | `[CPT]` | 2,400 | Company commander |
+| **Major** | `[MAJ]` | 2,850 | Battalion level |
+| **Lieutenant Colonel** | `[LTC]` | 3,400 | Senior officer |
+| **Colonel** | `[COL]` | 4,100 | Regimental commander |
 
 ### General Ranks
 
 | Rank | Tag | Merits Required | Description |
 |------|-----|-----------------|-------------|
-| **Brigadier General** | `[BG]` | 3,500 | One-star general |
-| **Major General** | `[MG]` | 5,000 | Two-star general |
-| **Lieutenant General** | `[LTG]` | 7,500 | Three-star general |
-| **General** | `[GEN]` | 10,000 | Four-star general |
+| **Brigadier General** | `[BG]` | 5,000 | One-star general |
+| **Major General** | `[MG]` | 6,500 | Two-star general |
+| **Lieutenant General** | `[LTG]` | 8,500 | Three-star general |
+| **General** | `[GEN]` | 11,000 | Four-star general |
 | **General of the Army** | `[GOA]` | 15,000 | Five-star, legendary |
 
 ### Chat Display Format
@@ -618,10 +634,11 @@ Visual indicators of rank:
 
 | Rank Tier | Insignia |
 |-----------|----------|
-| Enlisted | No special indicator |
-| NCO (SGT-MSG) | ⚔ symbol |
-| Officers | ★ symbol |
-| Generals | ★★ to ★★★★★ |
+| Enlisted (RCT-SPC) | No special indicator |
+| NCO (CPL-CSM) | ⚔ symbol |
+| Warrant Officers (WO1-CW5) | ◆ symbol |
+| Officers (CDT-COL) | ★ symbol |
+| Generals (BG-GOA) | ★★ to ★★★★★ |
 
 ### 4. Merit Milestones
 

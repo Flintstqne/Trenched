@@ -192,6 +192,11 @@ public class BuildingBenefitManager {
             if (insideBuilding != null) {
                 if (previousBuildingId == null || previousBuildingId != insideBuilding.objectiveId()) {
                     // Entered a new building
+                    plugin.getLogger().info("[Buildings] " + player.getName() + " ENTERED " +
+                            insideBuilding.type().getDisplayName() + " (obj " + insideBuilding.objectiveId() +
+                            ") variant=" + insideBuilding.variant() +
+                            " bounds=[" + insideBuilding.minX() + "," + insideBuilding.minY() + "," + insideBuilding.minZ() +
+                            " to " + insideBuilding.maxX() + "," + insideBuilding.maxY() + "," + insideBuilding.maxZ() + "]");
                     onPlayerEnterBuilding(player, insideBuilding);
                 }
                 playersInBuildings.put(player.getUniqueId(), insideBuilding.objectiveId());
@@ -199,6 +204,9 @@ public class BuildingBenefitManager {
                 // Left a building
                 RegisteredBuilding leftBuilding = findBuildingById(buildings, previousBuildingId);
                 if (leftBuilding != null) {
+                    plugin.getLogger().info("[Buildings] " + player.getName() + " EXITED " +
+                            leftBuilding.type().getDisplayName() + " (obj " + leftBuilding.objectiveId() +
+                            ") variant=" + leftBuilding.variant());
                     onPlayerExitBuilding(player, leftBuilding);
                 }
                 playersInBuildings.remove(player.getUniqueId());
@@ -267,7 +275,11 @@ public class BuildingBenefitManager {
      */
     private void applyOutpostVariantBuff(Player player, RegisteredBuilding building) {
         String variant = building.variant();
+        plugin.getLogger().info("[Buildings] applyOutpostVariantBuff for " + player.getName() +
+                ": variant='" + variant + "', type=" + building.type());
+
         if (variant == null || variant.equals("Standard") || variant.isEmpty()) {
+            plugin.getLogger().info("[Buildings] No buff - variant is Standard/null/empty");
             return; // No buff for standard outposts
         }
 
@@ -290,12 +302,15 @@ public class BuildingBenefitManager {
         }
 
         if (effectType != null) {
+            plugin.getLogger().info("[Buildings] Applying buff " + effectType.getKey() + " to " + player.getName());
             player.addPotionEffect(new PotionEffect(effectType, durationTicks, 0, true, true, true));
-            player.sendMessage(ChatColor.GREEN + "* " + variant + " buff applied! " +
+            player.sendMessage(ChatColor.GREEN + "✦ " + variant + " buff applied! " +
                     ChatColor.GRAY + "(5 minutes)");
             player.playSound(player.getLocation(), Sound.BLOCK_BEACON_ACTIVATE, 0.5f, 1.5f);
 
             outpostBuffExpiry.put(player.getUniqueId(), System.currentTimeMillis() + (5 * 60 * 1000));
+        } else {
+            plugin.getLogger().warning("[Buildings] No effect matched for variant '" + variant + "'");
         }
     }
 
@@ -444,6 +459,10 @@ public class BuildingBenefitManager {
                     player.getLocation().getBlockZ(),
                     building)) {
                 // Fire exit callback BEFORE removing so buffs (like outpost variant effects) get applied
+                plugin.getLogger().info("[Buildings] PRUNE EXIT: " + player.getName() + " left " +
+                        building.type().getDisplayName() + " (obj " + building.objectiveId() +
+                        ") at " + player.getLocation().getBlockX() + "," +
+                        player.getLocation().getBlockY() + "," + player.getLocation().getBlockZ());
                 onPlayerExitBuilding(player, building);
                 staleTrackedPlayers.add(entry.getKey());
             }
@@ -684,9 +703,12 @@ public class BuildingBenefitManager {
      * Checks if coordinates are inside a building's bounds.
      */
     private boolean isInsideBuilding(int x, int y, int z, RegisteredBuilding building) {
-        return x >= building.minX() && x <= building.maxX() &&
-                y >= building.minY() && y <= building.maxY() &&
-                z >= building.minZ() && z <= building.maxZ();
+        // Add 2-block buffer around the structure bounds so players don't flicker
+        // in/out when standing at doorways or right outside a wall
+        int buffer = 2;
+        return x >= (building.minX() - buffer) && x <= (building.maxX() + buffer) &&
+                y >= (building.minY() - 1) && y <= (building.maxY() + 3) &&
+                z >= (building.minZ() - buffer) && z <= (building.maxZ() + buffer);
     }
 
     /**

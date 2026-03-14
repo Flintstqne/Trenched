@@ -480,9 +480,8 @@ public class ObjectiveCommand implements CommandExecutor, TabCompleter {
      * This is called before any early returns so buildings always display.
      */
     private void showRegisteredBuildings(Player player, String regionId, String team) {
-        List<RegisteredBuilding> buildings = objectiveService.getAllActiveBuildings().stream()
-                .filter(b -> b.regionId().equals(regionId) && b.team().equalsIgnoreCase(team)
-                        && b.status() == RegisteredBuildingStatus.ACTIVE)
+        List<RegisteredBuilding> buildings = objectiveService.getAllBuildings().stream()
+                .filter(b -> b.regionId().equals(regionId) && b.team().equalsIgnoreCase(team))
                 .toList();
 
         if (buildings.isEmpty()) return;
@@ -492,6 +491,27 @@ public class ObjectiveCommand implements CommandExecutor, TabCompleter {
 
         for (RegisteredBuilding building : buildings) {
             String variant = building.variant();
+
+            if (building.status() == RegisteredBuildingStatus.INVALID) {
+                // Destroyed building — show repair hint
+                Component line = Component.text("  ✗ ")
+                        .color(NamedTextColor.RED)
+                        .append(Component.text(building.type().getDisplayName())
+                                .color(NamedTextColor.GRAY)
+                                .decorate(TextDecoration.STRIKETHROUGH))
+                        .append(Component.text(" — DESTROYED")
+                                .color(NamedTextColor.RED));
+                player.sendMessage(line);
+                player.sendMessage(Component.text("    🔧 Rebuild near (")
+                        .color(NamedTextColor.YELLOW)
+                        .append(Component.text(building.anchorX() + ", " + building.anchorZ())
+                                .color(NamedTextColor.WHITE))
+                        .append(Component.text(") to repair!")
+                                .color(NamedTextColor.YELLOW)));
+                continue;
+            }
+
+            // Active building
             Component line = Component.text("  ✓ ")
                     .color(NamedTextColor.GREEN)
                     .append(Component.text(building.type().getDisplayName())

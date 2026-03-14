@@ -816,16 +816,16 @@ public class SqlMeritService implements MeritService {
 
     private void checkRankAchievements(UUID uuid, MeritRank rank) {
         switch (rank) {
-            case CORPORAL -> awardAchievement(uuid, Achievement.RANK_CORPORAL);
+            case CORPORAL, SPECIALIST -> awardAchievement(uuid, Achievement.RANK_CORPORAL);
             case SERGEANT -> awardAchievement(uuid, Achievement.RANK_SERGEANT);
-            case STAFF_SERGEANT -> awardAchievement(uuid, Achievement.RANK_STAFF_SERGEANT);
-            case SECOND_LIEUTENANT, FIRST_LIEUTENANT -> awardAchievement(uuid, Achievement.RANK_LIEUTENANT);
+            case STAFF_SERGEANT, SERGEANT_FIRST_CLASS -> awardAchievement(uuid, Achievement.RANK_STAFF_SERGEANT);
+            case CADET, SECOND_LIEUTENANT, FIRST_LIEUTENANT -> awardAchievement(uuid, Achievement.RANK_LIEUTENANT);
             case CAPTAIN -> awardAchievement(uuid, Achievement.RANK_CAPTAIN);
             case MAJOR -> awardAchievement(uuid, Achievement.RANK_MAJOR);
             case LIEUTENANT_COLONEL, COLONEL -> awardAchievement(uuid, Achievement.RANK_COLONEL);
             case BRIGADIER_GENERAL, MAJOR_GENERAL, LIEUTENANT_GENERAL, GENERAL, GENERAL_OF_THE_ARMY ->
                     awardAchievement(uuid, Achievement.RANK_GENERAL);
-            default -> {} // No achievement for RECRUIT, PRIVATE, PFC, MASTER_SERGEANT
+            default -> {} // No achievement for RECRUIT, PRIVATE, PFC, MASTER_SERGEANT, 1SG, SGM, CSM, WOs
         }
     }
 

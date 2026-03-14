@@ -905,9 +905,9 @@ public class ObjectiveListener implements Listener {
         // Check active building objectives
         var settlements = objectiveService.getActiveObjectives(regionId, ObjectiveCategory.SETTLEMENT);
         for (var obj : settlements) {
-            if ((obj.type() == ObjectiveType.SETTLEMENT_OUTPOST
+            if ((obj.type() == ObjectiveType.SETTLEMENT_ESTABLISH_OUTPOST
                     || obj.type() == ObjectiveType.SETTLEMENT_WATCHTOWER
-                    || obj.type() == ObjectiveType.SETTLEMENT_GARRISON)
+                    || obj.type() == ObjectiveType.SETTLEMENT_GARRISON_QUARTERS)
                     && obj.hasLocation()) {
                 int dx = x - obj.locationX();
                 int dz = z - obj.locationZ();

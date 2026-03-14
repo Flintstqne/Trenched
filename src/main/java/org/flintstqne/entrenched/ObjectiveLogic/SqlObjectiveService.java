@@ -89,6 +89,11 @@ public class SqlObjectiveService implements ObjectiveService {
     private final Map<Integer, Long> lastStructureIntegrityCheck = new ConcurrentHashMap<>();
     private final Map<Integer, BuildingDetectionResult> lastStructureDetections = new ConcurrentHashMap<>();
 
+    // Track consecutive failed integrity checks per building. Must fail 3 times in a row
+    // before invalidation. This prevents sporadic scan failures from destroying buildings.
+    private final Map<Integer, Integer> buildingFailureCount = new ConcurrentHashMap<>();
+    private static final int REQUIRED_FAILURE_COUNT = 3;
+
     // Building limits per region (from docs)
     private static final int MAX_OUTPOSTS_PER_REGION = 2;
     private static final int MAX_WATCHTOWERS_PER_REGION = 1;
@@ -1309,6 +1314,47 @@ public class SqlObjectiveService implements ObjectiveService {
     }
 
     /**
+     * Broadcasts a repair message when a previously destroyed building passes
+     * validation again and is re-registered as ACTIVE.
+     */
+    private void broadcastBuildingRepair(RegisteredBuilding building) {
+        World world = roundService.getGameWorld().orElse(null);
+        if (world == null) return;
+
+        org.bukkit.ChatColor teamColor = building.team().equalsIgnoreCase("red")
+                ? org.bukkit.ChatColor.RED
+                : org.bukkit.ChatColor.BLUE;
+
+        String buildingName = building.type().getDisplayName();
+        if (building.variant() != null && !building.variant().isEmpty()
+                && !building.variant().equals("Standard") && !building.variant().contains("(needs")) {
+            buildingName = building.variant();
+        }
+
+        String regionName = getRegionDisplayName(building.regionId());
+        String message = teamColor + "🔧 " + org.bukkit.ChatColor.GREEN + buildingName +
+                org.bukkit.ChatColor.WHITE + " has been repaired! " +
+                org.bukkit.ChatColor.GRAY + "(" + building.anchorX() + ", " + building.anchorY() + ", " + building.anchorZ() + ")";
+
+        for (org.bukkit.entity.Player player : world.getPlayers()) {
+            Optional<String> pTeam = teamService.getPlayerTeam(player.getUniqueId());
+            if (pTeam.isPresent() && pTeam.get().equalsIgnoreCase(building.team())) {
+                String playerRegion = regionService.getRegionIdForLocation(
+                        player.getLocation().getBlockX(),
+                        player.getLocation().getBlockZ()
+                );
+                if (building.regionId().equals(playerRegion)) {
+                    player.sendMessage(message);
+                    player.playSound(player.getLocation(), org.bukkit.Sound.BLOCK_ANVIL_USE, 0.7f, 1.2f);
+                }
+            }
+        }
+
+        plugin.getLogger().info("[Buildings] " + buildingName + " REPAIRED in " + building.regionId() +
+                " (" + regionName + ") for team " + building.team());
+    }
+
+    /**
      * Syncs all blocks within a completed building's bounds to nearby players.
      * This helps prevent ghost block issues where the client's block state
      * doesn't match the server after rapid building.
@@ -1355,7 +1401,19 @@ public class SqlObjectiveService implements ObjectiveService {
 
     private void handleRegisteredBuildingIntegrity(RegionObjective objective, RegisteredBuilding building, BuildingDetectionResult result) {
         long now = System.currentTimeMillis();
+
+        plugin.getLogger().info("[Buildings] Integrity check for " + building.type().getDisplayName() +
+                " (obj " + building.objectiveId() + ") in " + building.regionId() +
+                ": valid=" + result.valid() + ", score=" + String.format("%.1f", result.totalScore()) +
+                ", status=" + building.status() + ", summary=" + result.summary());
+
         if (result.valid()) {
+            // Check if this is a repair (was INVALID, now passing again)
+            boolean wasRepaired = building.status() == RegisteredBuildingStatus.INVALID;
+
+            // Reset failure counter on successful scan
+            buildingFailureCount.remove(building.objectiveId());
+
             // Check if variant upgraded (went from "(needs ...)" to clean variant name)
             String oldVariant = building.variant();
             String newVariant = result.variant();
@@ -1370,6 +1428,13 @@ public class SqlObjectiveService implements ObjectiveService {
                 broadcastVariantUpgrade(objective, newVariant, building.team());
             }
 
+            // Broadcast repair if building was previously destroyed
+            if (wasRepaired) {
+                plugin.getLogger().info("[Objectives] " + building.type().getDisplayName()
+                        + " in " + building.regionId() + " has been REPAIRED and re-registered!");
+                broadcastBuildingRepair(building);
+            }
+
             // Clear damage tracking when building returns to ACTIVE
             if (objectiveListener != null) {
                 objectiveListener.clearBuildingDamageTracking(building.objectiveId());
@@ -1377,8 +1442,32 @@ public class SqlObjectiveService implements ObjectiveService {
             return;
         }
 
+        // Building failed validation — only invalidate if it's currently ACTIVE.
+        // If it's already INVALID, the repair loop is just checking if it's been
+        // rebuilt yet — no need to re-invalidate or re-log.
+        // Also re-fetch from DB to get the latest status, since the building object
+        // may have been fetched before a concurrent rescan already invalidated it.
+        if (building.status() == RegisteredBuildingStatus.INVALID) {
+            return;
+        }
+        Optional<RegisteredBuilding> freshBuilding = db.getRegisteredBuilding(building.objectiveId());
+        if (freshBuilding.isPresent() && freshBuilding.get().status() == RegisteredBuildingStatus.INVALID) {
+            return;
+        }
+
         long invalidationMs = config.getBuildingInvalidationSeconds() * 1000L;
         if ((now - building.lastValidatedAt()) >= invalidationMs) {
+            // Increment failure counter — require multiple consecutive failures
+            int failures = buildingFailureCount.merge(building.objectiveId(), 1, Integer::sum);
+            plugin.getLogger().info("[Buildings] Integrity failure " + failures + "/" + REQUIRED_FAILURE_COUNT +
+                    " for " + building.type().getDisplayName() + " in " + building.regionId());
+
+            if (failures < REQUIRED_FAILURE_COUNT) {
+                return; // Not enough consecutive failures yet
+            }
+
+            // Enough consecutive failures — invalidate
+            buildingFailureCount.remove(building.objectiveId());
             db.invalidateRegisteredBuilding(building.objectiveId(), now);
             plugin.getLogger().info("[Objectives] Registered " + building.type().getDisplayName()
                     + " in " + building.regionId() + " invalidated after losing structure integrity.");
@@ -1421,6 +1510,7 @@ public class SqlObjectiveService implements ObjectiveService {
         firstValidStructureSeenAt.remove(objectiveId);
         lastStructureIntegrityCheck.remove(objectiveId);
         lastStructureDetections.remove(objectiveId);
+        buildingFailureCount.remove(objectiveId);
     }
 
     @Override
@@ -2200,6 +2290,38 @@ public class SqlObjectiveService implements ObjectiveService {
             scheduleStructureRescan(building.objectiveId(), null, building.team(), 1L);
         }
 
+        // Check INVALID (destroyed) buildings for repair — rescan periodically to see if
+        // players rebuilt. If the scan passes, handleRegisteredBuildingIntegrity will
+        // promote it back to ACTIVE. Use a longer interval to avoid constant scans on rubble.
+        long repairCheckIntervalMs = integrityIntervalMs * 2; // Check less often than active integrity
+        for (RegisteredBuilding building : db.getRegisteredBuildingsByStatus(roundIdOpt.get(), RegisteredBuildingStatus.INVALID)) {
+            long lastChecked = lastStructureIntegrityCheck.getOrDefault(building.objectiveId(), 0L);
+            if ((now - lastChecked) < repairCheckIntervalMs || pendingStructureRescans.containsKey(building.objectiveId())) {
+                continue;
+            }
+
+            // Only rescan if a player from the building's team is nearby
+            boolean teamPlayerNearby = false;
+            World world = roundService.getGameWorld().orElse(null);
+            if (world != null) {
+                for (Player p : world.getPlayers()) {
+                    Optional<String> pTeam = teamService.getPlayerTeam(p.getUniqueId());
+                    if (pTeam.isEmpty() || !pTeam.get().equalsIgnoreCase(building.team())) continue;
+                    double dx = p.getLocation().getX() - building.anchorX();
+                    double dz = p.getLocation().getZ() - building.anchorZ();
+                    if (dx * dx + dz * dz <= 64 * 64) {
+                        teamPlayerNearby = true;
+                        break;
+                    }
+                }
+            }
+
+            if (!teamPlayerNearby) continue;
+
+            lastStructureIntegrityCheck.put(building.objectiveId(), now);
+            scheduleStructureRescan(building.objectiveId(), null, building.team(), 1L);
+        }
+
         // Also periodically rescan ACTIVE building objectives that haven't been scanned recently.
         // This ensures watchtowers (tall structures) and other buildings update even if the player
         // is building far above/below the objective marker and block events don't trigger rescans.
@@ -2281,6 +2403,15 @@ public class SqlObjectiveService implements ObjectiveService {
     }
 
     @Override
+    public List<RegisteredBuilding> getAllBuildings() {
+        Optional<Integer> roundIdOpt = getCurrentRoundId();
+        if (roundIdOpt.isEmpty()) {
+            return Collections.emptyList();
+        }
+        return db.getAllRegisteredBuildingsByRound(roundIdOpt.get());
+    }
+
+    @Override
     public void clearTrackedData() {
         objectiveBlocksTracking.clear();
         enemyChestTracking.clear();
@@ -2291,6 +2422,7 @@ public class SqlObjectiveService implements ObjectiveService {
         firstValidStructureSeenAt.clear();
         lastStructureIntegrityCheck.clear();
         lastStructureDetections.clear();
+        buildingFailureCount.clear();
         pendingStructureActors.clear();
         pendingStructureTeams.clear();
         for (BukkitTask task : pendingStructureRescans.values()) {

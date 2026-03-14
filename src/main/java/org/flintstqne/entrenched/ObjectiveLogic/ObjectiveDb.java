@@ -688,6 +688,30 @@ public final class ObjectiveDb implements AutoCloseable {
     /**
      * Gets all active registered buildings in a region for a specific team.
      */
+    public List<RegisteredBuilding> getAllRegisteredBuildingsByRound(int roundId) {
+        String sql = """
+            SELECT * FROM registered_buildings
+            WHERE round_id = ?
+            ORDER BY region_id ASC, building_type ASC
+            """;
+
+        List<RegisteredBuilding> buildings = new ArrayList<>();
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setInt(1, roundId);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    buildings.add(mapRegisteredBuilding(rs));
+                }
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to get all registered buildings", e);
+        }
+        return buildings;
+    }
+
+    /**
+     * Gets all active registered buildings in a region for a specific team.
+     */
     public List<RegisteredBuilding> getActiveRegisteredBuildingsInRegion(String regionId, int roundId, String team) {
         String sql = """
             SELECT * FROM registered_buildings

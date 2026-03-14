@@ -175,9 +175,9 @@ public final class Trenched extends JavaPlugin {
                 // A region is "active" if it has building objectives or registered buildings
                 var settlements = objectiveService.getActiveObjectives(regionId, org.flintstqne.entrenched.ObjectiveLogic.ObjectiveCategory.SETTLEMENT);
                 boolean hasBuildingObj = settlements.stream().anyMatch(o ->
-                        o.type() == org.flintstqne.entrenched.ObjectiveLogic.ObjectiveType.SETTLEMENT_OUTPOST
+                        o.type() == org.flintstqne.entrenched.ObjectiveLogic.ObjectiveType.SETTLEMENT_ESTABLISH_OUTPOST
                         || o.type() == org.flintstqne.entrenched.ObjectiveLogic.ObjectiveType.SETTLEMENT_WATCHTOWER
-                        || o.type() == org.flintstqne.entrenched.ObjectiveLogic.ObjectiveType.SETTLEMENT_GARRISON);
+                        || o.type() == org.flintstqne.entrenched.ObjectiveLogic.ObjectiveType.SETTLEMENT_GARRISON_QUARTERS);
                 if (hasBuildingObj) return true;
                 // Also check if there are registered buildings
                 return objectiveService.getAllActiveBuildings().stream()
@@ -312,6 +312,13 @@ public final class Trenched extends JavaPlugin {
 
             // Expire any active objectives in the captured region
             objectiveService.expireObjectivesInRegion(regionId);
+
+            // Clear player-placed block tracking for the captured region
+            // The new owner's builds will be tracked fresh
+            if (placedBlockTracker != null) {
+                placedBlockTracker.clearRegion(regionId);
+                getLogger().info("[PlacedBlocks] Cleared tracking for captured region " + regionId);
+            }
 
             // Record capture heat for endgame overtime target selection
             if (endgameManager != null) {
@@ -450,6 +457,14 @@ public final class Trenched extends JavaPlugin {
         RoundCommand roundCommand = new RoundCommand(roundService, teamService, regionRenderer, scoreboardUtil, phaseScheduler, configManager);
         roundCommand.setNewRoundInitializer(newRoundInitializer);
         roundCommand.setEndgameManager(endgameManager);
+        // Wire placed block tracker cleanup for manual /round end
+        if (placedBlockTracker != null) {
+            final var tracker = placedBlockTracker;
+            roundCommand.setRoundEndCleanup(() -> {
+                tracker.clearAll();
+                getLogger().info("[PlacedBlocks] Cleared all tracking data (manual round end)");
+            });
+        }
         var roundCmd = Objects.requireNonNull(getCommand("round"), "Command `round` missing from plugin.yml");
         roundCmd.setExecutor(roundCommand);
         roundCmd.setTabCompleter(roundCommand);
@@ -900,6 +915,12 @@ public final class Trenched extends JavaPlugin {
             getLogger().info("[Endgame] Round ended in a DRAW");
         } else {
             getLogger().info("[Endgame] Round won by " + winner.toUpperCase());
+        }
+
+        // Clear all player-placed block tracking data for the finished round
+        if (placedBlockTracker != null) {
+            placedBlockTracker.clearAll();
+            getLogger().info("[PlacedBlocks] Cleared all tracking data for round end");
         }
 
         // TODO: Future - store round stats, display summary, etc.

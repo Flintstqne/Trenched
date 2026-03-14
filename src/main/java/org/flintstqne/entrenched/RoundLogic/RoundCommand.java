@@ -27,6 +27,7 @@ public class RoundCommand implements CommandExecutor, TabCompleter {
     private final SimpleDateFormat dateFormat = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
     private NewRoundInitializer newRoundInitializer;
     private RoundEndgameManager endgameManager;
+    private Runnable roundEndCleanup;
 
     public RoundCommand(RoundService roundService, TeamService teamService, RegionRenderer regionRenderer,
                         ScoreboardUtil scoreboardUtil, PhaseScheduler phaseScheduler, ConfigManager configManager) {
@@ -53,6 +54,13 @@ public class RoundCommand implements CommandExecutor, TabCompleter {
     public void setEndgameManager(RoundEndgameManager manager) {
         this.endgameManager = manager;
         log("RoundEndgameManager set");
+    }
+
+    /**
+     * Sets an optional cleanup callback to run when a round ends manually via /round end.
+     */
+    public void setRoundEndCleanup(Runnable cleanup) {
+        this.roundEndCleanup = cleanup;
     }
 
     @Override
@@ -459,6 +467,16 @@ public class RoundCommand implements CommandExecutor, TabCompleter {
         if (phaseScheduler != null) {
             phaseScheduler.stop();
             log("PhaseScheduler stopped for ended round");
+        }
+
+        // Run any registered cleanup callbacks (e.g., placed block tracker reset)
+        if (roundEndCleanup != null) {
+            try {
+                roundEndCleanup.run();
+                log("Round-end cleanup callback executed");
+            } catch (Exception e) {
+                log("Round-end cleanup failed: " + e.getMessage());
+            }
         }
 
         log("=== END Command Complete ===");

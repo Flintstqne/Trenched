@@ -203,6 +203,7 @@ public class PlaceholderExpansion extends me.clip.placeholderapi.expansion.Place
             case "is_officer" -> String.valueOf(rank.isOfficer());
             case "is_general" -> String.valueOf(rank.isGeneral());
             case "is_nco" -> String.valueOf(rank.isNCO());
+            case "is_warrant_officer" -> String.valueOf(rank.isWarrantOfficer());
             case "rank_level" -> String.valueOf(rank.ordinal());
 
             // ==================== PREFIXES FOR CHAT/TAB ====================
