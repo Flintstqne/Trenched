@@ -11,6 +11,7 @@ import org.flintstqne.entrenched.BlueMapHook.BlueMapIntegration;
 import org.flintstqne.entrenched.ChatLogic.ChatChannelManager;
 import org.flintstqne.entrenched.ChatLogic.ChatCommand;
 import org.flintstqne.entrenched.DivisionLogic.*;
+import org.flintstqne.entrenched.LinkLogic.*;
 import org.flintstqne.entrenched.MeritLogic.*;
 import org.flintstqne.entrenched.ObjectiveLogic.*;
 import org.flintstqne.entrenched.PartyLogic.*;
@@ -82,6 +83,10 @@ public final class Trenched extends JavaPlugin {
     private DepotRecipes depotRecipes;
     private DepotListener depotListener;
     private DepotParticleManager depotParticleManager;
+
+    // Discord ↔ Minecraft Linking
+    private LinkDb linkDb;
+    private LinkService linkService;
 
     // Statistics System
     private org.flintstqne.entrenched.StatLogic.StatDb statDb;
@@ -201,6 +206,37 @@ public final class Trenched extends JavaPlugin {
         objectiveListener = new ObjectiveListener(this, objectiveService, objectiveUIManager, regionService, teamService, configManager);
         ((SqlObjectiveService) objectiveService).setObjectiveListener(objectiveListener);
 
+        // Wire up building destroyed callback — broadcasts specific repair needs to team
+        objectiveService.setBuildingDestroyedCallback((building, regionName, detectionResult) -> {
+            for (Player player : Bukkit.getOnlinePlayers()) {
+                Optional<String> playerTeam = teamService.getPlayerTeam(player.getUniqueId());
+                if (playerTeam.isPresent() && playerTeam.get().equalsIgnoreCase(building.team())) {
+                    player.sendMessage(configManager.getPrefix() + org.bukkit.ChatColor.RED + "⚠ [Alert] " +
+                            building.type().getDisplayName() + " destroyed in " + regionName + "!");
+                    player.sendMessage(org.bukkit.ChatColor.GRAY + "  Location: " + org.bukkit.ChatColor.WHITE +
+                            building.anchorX() + ", " + building.anchorY() + ", " + building.anchorZ());
+
+                    // Show what specific aspects of the building need repair
+                    if (detectionResult != null) {
+                        java.util.List<String> checklist = detectionResult.getChecklist();
+                        for (String line : checklist) {
+                            if (line.isEmpty()) continue;
+                            boolean failing = line.startsWith("✗") || line.contains("✗");
+                            boolean isHeader = line.startsWith("§");
+                            if (failing) {
+                                // Only show failing items — these are what needs repair
+                                player.sendMessage(org.bukkit.ChatColor.RED + "  " + line);
+                            } else if (isHeader) {
+                                // Skip variant headers for destroyed building alerts
+                            }
+                            // Skip passing items (✓) to keep the alert concise
+                        }
+                        player.sendMessage(org.bukkit.ChatColor.YELLOW + "  🔧 Repair these issues to restore the building!");
+                    }
+                }
+            }
+        });
+
         // Wire placed block tracker to objective listener if enabled
         if (placedBlockTracker != null) {
             objectiveListener.setPlacedBlockTracker(placedBlockTracker);
@@ -210,6 +246,8 @@ public final class Trenched extends JavaPlugin {
         buildingBenefitManager = new BuildingBenefitManager(this, objectiveService, regionService, teamService, roundService, configManager);
         buildingBenefitManager.setRegionRenderer(regionRenderer);
         buildingBenefitManager.start();
+        // Register as event listener — required for the spyglass spotting system
+        getServer().getPluginManager().registerEvents(buildingBenefitManager, this);
 
         // Initialize Garrison Spawn Service for quick-travel system
         garrisonSpawnService = new GarrisonSpawnService(this, objectiveService, regionService, teamService, roundService, configManager);
@@ -263,6 +301,10 @@ public final class Trenched extends JavaPlugin {
         deathListener = new DeathListener(this, roadService, teamService, configManager);
         supplyPenaltyListener = new SupplyPenaltyListener(roadService, teamService, deathListener);
 
+        // Hook player death → immediately drop building benefit tracking so no spurious exit buff fires
+        deathListener.setDeathCallback(player ->
+                buildingBenefitManager.notifyPlayerDied(player.getUniqueId()));
+
         // Connect death listener to garrison spawn service for spawn map
         deathListener.setRespawnCallback((player, spawnLocation) -> {
             if (garrisonSpawnService != null) {
@@ -287,22 +329,6 @@ public final class Trenched extends JavaPlugin {
             regionNotificationManager.broadcastSupplyDisrupted(team, affectedRegions, sourceRegion);
         });
 
-        // Connect building destroyed callback to notify players
-        objectiveService.setBuildingDestroyedCallback((building, regionName) -> {
-            // Notify all team members that a building was destroyed
-            for (Player player : Bukkit.getOnlinePlayers()) {
-                Optional<String> playerTeam = teamService.getPlayerTeam(player.getUniqueId());
-                if (playerTeam.isPresent() && playerTeam.get().equalsIgnoreCase(building.team())) {
-                    player.sendMessage(configManager.getPrefix() + org.bukkit.ChatColor.RED + "[Alert] " +
-                            building.type().getDisplayName() + " destroyed!");
-                    player.sendMessage(org.bukkit.ChatColor.GRAY + "  Location: " + org.bukkit.ChatColor.AQUA +
-                            "(x: " + building.anchorX() + ", z: " + building.anchorZ() + ")");
-                    player.sendMessage(org.bukkit.ChatColor.GRAY + "  Region: " + org.bukkit.ChatColor.WHITE + regionName);
-                    player.sendMessage(org.bukkit.ChatColor.GRAY + "  Repair it to regain its benefits!");
-                    player.playSound(player.getLocation(), org.bukkit.Sound.BLOCK_ANVIL_DESTROY, 1.0f, 0.5f);
-                }
-            }
-        });
 
         // Connect capture callback to notification manager AND auto-scan for roads
         final World captureWorld = gameWorld;
@@ -429,9 +455,16 @@ public final class Trenched extends JavaPlugin {
 
         getLogger().info("[Trenched] Statistics system initialized");
 
+        // Initialize Discord ↔ Minecraft linking system (always, so /link works in-game)
+        linkDb = new LinkDb(this);
+        linkService = new LinkService(linkDb);
+        getLogger().info("[Trenched] Discord linking system initialized");
+
         // Start Stats API server if enabled
         if (configManager.isStatApiEnabled()) {
-            statApiServer = new org.flintstqne.entrenched.StatLogic.StatApiServer(this, statService, configManager);
+            statApiServer = new org.flintstqne.entrenched.StatLogic.StatApiServer(
+                    this, statService, configManager, meritService, divisionService, regionService, teamService);
+            statApiServer.setLinkService(linkService);
             statApiServer.start();
             getLogger().info("[Trenched] Stats API server started on port " + configManager.getStatApiPort());
         }
@@ -570,6 +603,13 @@ public final class Trenched extends JavaPlugin {
         var statsCmd = Objects.requireNonNull(getCommand("stats"), "Command `stats` missing from plugin.yml");
         statsCmd.setExecutor(statCommand);
         statsCmd.setTabCompleter(statCommand);
+
+        // Link commands (/link, /unlink)
+        LinkCommand linkCommand = new LinkCommand(linkService);
+        Objects.requireNonNull(getCommand("link"), "Command `link` missing from plugin.yml")
+                .setExecutor(linkCommand);
+        Objects.requireNonNull(getCommand("unlink"), "Command `unlink` missing from plugin.yml")
+                .setExecutor(linkCommand);
 
         // Events registration
         getServer().getPluginManager().registerEvents(new TeamListener(teamService, scoreboardUtil, this), this);
@@ -802,6 +842,13 @@ public final class Trenched extends JavaPlugin {
         if (statService != null) statService.stop();
         if (statApiServer != null) statApiServer.stop();
         if (statDb != null) statDb.close();
+
+        // Close link database
+        if (linkDb != null) {
+            try { linkDb.close(); } catch (Exception e) {
+                getLogger().warning("[Trenched] Error closing link database: " + e.getMessage());
+            }
+        }
 
         // Unregister depot recipes
         if (depotRecipes != null) depotRecipes.unregisterRecipes();

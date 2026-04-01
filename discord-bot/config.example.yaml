@@ -9,6 +9,14 @@ discord:
   # Leave empty or remove for global commands
   guild_id: null
 
+  # Optional: Channel ID for the daily midnight UTC map screenshot
+  # Leave empty or remove to disable scheduled map posts
+  map_channel_id: null
+
+  # Optional: Channel ID for the daily Player of the Day spotlight (posted at noon UTC)
+  # Leave empty or remove to disable auto-posted spotlights
+  spotlight_channel_id: null
+
 api:
   # URL to your Minecraft server's stats API
   # Default port is 8080 unless changed in the plugin config
@@ -16,4 +24,38 @@ api:
 
   # API key from your server's config.yml (stats-api.key)
   key: "change-this-secret-key"
+
+bluemap:
+  # URL to the BlueMap web interface
+  # Default BlueMap webapp port is 8100
+  url: "http://localhost:8100"
+
+  # Map ID to screenshot (usually your world name, e.g. "world")
+  map_id: "world"
+
+  # Screenshot viewport size (square to match the 2048x2048 map)
+  width: 2100
+  height: 2100
+
+  # Time in seconds to wait for the map to fully render before screenshotting
+  render_wait: 3
+
+  # Default camera distance for the top-down flat view.
+  # ~1200 fits the full 2048x2048 map in the 2100px viewport.
+  # Lower = zoomed in, higher = zoomed out.
+  default_distance: 1200
+
+# Discord role auto-assignment for linked accounts
+# Set each to the Discord Role ID (right-click role → Copy ID), or null to disable
+roles:
+  # Role given to EVERYONE who joins the Discord server (no linking required)
+  # Useful for a "Member" role that unlocks basic channels
+  auto_join: null
+
+  # Role given to all linked accounts (e.g., "Linked" or "Verified")
+  linked: null
+
+  # Team roles — automatically swapped when a player changes team in-game
+  team_red: null
+  team_blue: null
 

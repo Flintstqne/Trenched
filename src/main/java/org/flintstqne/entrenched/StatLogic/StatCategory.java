@@ -2,10 +2,10 @@ package org.flintstqne.entrenched.StatLogic;
 
 /**
  * All tracked stat categories organized by group.
- * 35 stats across 5 groups: Combat, Territory, Objective, Building, Participation
+ * 40 stats across 5 groups: Combat, Territory, Objective, Building, Participation
  */
 public enum StatCategory {
-    // === COMBAT STATS (9) ===
+    // === COMBAT STATS (12) ===
     KILLS("kills", "Kills", StatGroup.COMBAT),
     DEATHS("deaths", "Deaths", StatGroup.COMBAT),
     ASSISTS("assists", "Assists", StatGroup.COMBAT),
@@ -15,6 +15,9 @@ public enum StatCategory {
     REVENGE_KILLS("revenge_kills", "Revenge Kills", StatGroup.COMBAT),
     DAMAGE_DEALT("damage_dealt", "Damage Dealt", StatGroup.COMBAT),
     DAMAGE_TAKEN("damage_taken", "Damage Taken", StatGroup.COMBAT),
+    BULLETS_SHOT("bullets_shot", "Bullets Shot", StatGroup.COMBAT),
+    POTIONS_USED("potions_used", "Potions Used", StatGroup.COMBAT),
+    HEALING_POTIONS_USED("healing_potions_used", "Healing Potions Used", StatGroup.COMBAT),
 
     // === TERRITORY STATS (6) ===
     REGIONS_CAPTURED("regions_captured", "Regions Captured", StatGroup.TERRITORY),
@@ -37,7 +40,7 @@ public enum StatCategory {
     HOLD_GROUND_DEFENDS("hold_ground_defends", "Hold Ground Defends", StatGroup.OBJECTIVE),
     RESOURCE_DEPOTS_ESTABLISHED("resource_depots_established", "Resource Depots Established", StatGroup.OBJECTIVE),
 
-    // === BUILDING & LOGISTICS STATS (12) ===
+    // === BUILDING & LOGISTICS STATS (14) ===
     BUILDINGS_CONSTRUCTED("buildings_constructed", "Buildings Constructed", StatGroup.BUILDING),
     BUILDINGS_DESTROYED("buildings_destroyed", "Buildings Destroyed", StatGroup.BUILDING),
     OUTPOSTS_BUILT("outposts_built", "Outposts Built", StatGroup.BUILDING),
@@ -50,6 +53,8 @@ public enum StatCategory {
     ROADS_DAMAGED("roads_damaged", "Roads Damaged", StatGroup.BUILDING),
     BANNERS_PLACED("banners_placed", "Banners Placed", StatGroup.BUILDING),
     CONTAINERS_STOCKED("containers_stocked", "Containers Stocked", StatGroup.BUILDING),
+    BLOCKS_BROKEN("blocks_broken", "Blocks Broken", StatGroup.BUILDING),
+    BLOCKS_PLACED("blocks_placed", "Blocks Placed", StatGroup.BUILDING),
 
     // === PARTICIPATION STATS (8) ===
     ROUNDS_PLAYED("rounds_played", "Rounds Played", StatGroup.PARTICIPATION),

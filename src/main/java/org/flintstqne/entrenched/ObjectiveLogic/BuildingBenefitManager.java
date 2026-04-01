@@ -1,20 +1,33 @@
 package org.flintstqne.entrenched.ObjectiveLogic;
 
+import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.format.NamedTextColor;
 import org.bukkit.Bukkit;
-import org.bukkit.ChatColor;
-import org.bukkit.Color;
+import org.bukkit.FluidCollisionMode;
 import org.bukkit.Location;
+import org.bukkit.Material;
 import org.bukkit.Particle;
 import org.bukkit.Sound;
 import org.bukkit.World;
 import org.bukkit.entity.Player;
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.EventPriority;
+import org.bukkit.event.Listener;
+import org.bukkit.event.block.Action;
+import org.bukkit.event.player.PlayerInteractEvent;
+import org.bukkit.inventory.EquipmentSlot;
+import org.bukkit.inventory.ItemStack;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.potion.PotionEffect;
 import org.bukkit.potion.PotionEffectType;
 import org.bukkit.scheduler.BukkitTask;
+import org.bukkit.block.Block;
+import org.bukkit.util.RayTraceResult;
+import org.bukkit.util.Vector;
 import org.flintstqne.entrenched.BlueMapHook.RegionRenderer;
 import org.flintstqne.entrenched.ConfigManager;
 import org.flintstqne.entrenched.RegionLogic.RegionService;
+import org.flintstqne.entrenched.RoadLogic.DeathListener;
 import org.flintstqne.entrenched.RoundLogic.RoundService;
 import org.flintstqne.entrenched.TeamLogic.TeamService;
 
@@ -22,7 +35,6 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -38,7 +50,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * - Garrison quick-travel spawn system (future)
  * - Building particle effects
  */
-public class BuildingBenefitManager {
+public class BuildingBenefitManager implements Listener {
 
     private final JavaPlugin plugin;
     private final ObjectiveService objectiveService;
@@ -48,6 +60,8 @@ public class BuildingBenefitManager {
     private final ConfigManager config;
     private RegionRenderer regionRenderer;
 
+    // Optional reference to DeathListener - used to suppress exit buffs on death
+    private DeathListener deathListener;
     // Tasks
     private BukkitTask benefitTickTask;
     private BukkitTask particleTask;
@@ -62,15 +76,24 @@ public class BuildingBenefitManager {
     private final Map<String, Long> lastEnemyAlert = new ConcurrentHashMap<>();
     private static final long ENEMY_ALERT_COOLDOWN_MS = 30000; // 30 seconds
 
-    // Track players with active outpost buffs - playerId -> expiry timestamp
-    private final Map<UUID, Long> outpostBuffExpiry = new ConcurrentHashMap<>();
+    // Track players with active outpost buffs - playerId -> (variantName -> expiry timestamp)
+    // Keyed per-variant so different outpost types each have their own independent cooldown.
+    private final Map<UUID, Map<String, Long>> outpostBuffExpiry = new ConcurrentHashMap<>();
 
-    // Track enemies detected by watchtowers per friendly team.
-    private final Map<String, Map<UUID, Long>> watchtowerDetectedEnemies = new ConcurrentHashMap<>();
-    private static final long WATCHTOWER_MARKER_DURATION_MS = 5000; // 5 seconds of recon markers
-    private static final double WATCHTOWER_MARKER_VIEW_DISTANCE_SQUARED = 192 * 192;
-    private static final Particle.DustOptions WATCHTOWER_MARKER_DUST =
-            new Particle.DustOptions(Color.fromRGB(255, 80, 80), 1.2f);
+    // Shared building cache — refreshed at most once every 5 s to keep both
+    // tickBenefits (1 Hz) and tickParticles (2 Hz) off the DB hot path.
+    private volatile List<RegisteredBuilding> cachedBuildings = Collections.emptyList();
+    private long lastBuildingCacheRefreshMs = 0L;
+    private static final long BUILDING_CACHE_REFRESH_INTERVAL_MS = 5_000L;
+
+    // Track enemies currently glowing (spotted via spyglass) — UUID → expiry timestamp ms
+    private final Map<UUID, Long> glowingEnemies = new ConcurrentHashMap<>();
+    private static final int GLOWING_DURATION_TICKS = 20 * 20;   // 20 seconds
+    private static final long GLOWING_DURATION_MS   = 20_000L;
+
+    // Per-spotter cooldown to prevent spam — UUID → cooldown-expiry timestamp ms
+    private final Map<UUID, Long> spyglassCooldowns = new ConcurrentHashMap<>();
+    private static final long SPYGLASS_COOLDOWN_MS = 5_000L; // 5 seconds between spots
 
     // Counter for ambient sound (plays every 6th particle tick = ~3 seconds)
     private int ambientSoundCounter = 0;
@@ -92,6 +115,18 @@ public class BuildingBenefitManager {
      */
     public void setRegionRenderer(RegionRenderer regionRenderer) {
         this.regionRenderer = regionRenderer;
+    }
+
+    /**
+     * Called when a player dies. Removes them from building tracking immediately
+     * so the next benefit tick does not fire an exit callback (and award a buff).
+     */
+    public void notifyPlayerDied(UUID playerId) {
+        playersInBuildings.remove(playerId);
+        // Also evict from watchtower occupant sets
+        for (Set<UUID> occupants : watchtowerOccupants.values()) {
+            occupants.remove(playerId);
+        }
     }
 
     /**
@@ -128,7 +163,15 @@ public class BuildingBenefitManager {
             particleTask.cancel();
         }
 
-        watchtowerDetectedEnemies.clear();
+        // Remove GLOWING from all enemies that were spotted this session
+        for (UUID enemyId : glowingEnemies.keySet()) {
+            Player enemy = Bukkit.getPlayer(enemyId);
+            if (enemy != null && enemy.isOnline()) {
+                enemy.removePotionEffect(PotionEffectType.GLOWING);
+            }
+        }
+        glowingEnemies.clear();
+        spyglassCooldowns.clear();
 
         plugin.getLogger().info("[Buildings] Benefit manager stopped");
     }
@@ -141,7 +184,18 @@ public class BuildingBenefitManager {
         watchtowerOccupants.clear();
         lastEnemyAlert.clear();
         outpostBuffExpiry.clear();
-        watchtowerDetectedEnemies.clear();
+        cachedBuildings = Collections.emptyList();
+        lastBuildingCacheRefreshMs = 0L;
+
+        // Remove GLOWING from all spotted enemies when a new round starts
+        for (UUID enemyId : glowingEnemies.keySet()) {
+            Player enemy = Bukkit.getPlayer(enemyId);
+            if (enemy != null && enemy.isOnline()) {
+                enemy.removePotionEffect(PotionEffectType.GLOWING);
+            }
+        }
+        glowingEnemies.clear();
+        spyglassCooldowns.clear();
     }
 
     // ==================== MAIN TICK ====================
@@ -155,13 +209,17 @@ public class BuildingBenefitManager {
             return;
         }
 
-        // Get all active buildings
+        // Get all active buildings (cached — see getActiveBuildings())
         List<RegisteredBuilding> buildings = getActiveBuildings();
+
+        // Always prune tracked players even when the buildings list is empty.
+        // If every building was destroyed while players were inside, we must still
+        // evict them from playersInBuildings — otherwise they stay there forever.
+        pruneTrackedPlayers(buildings, gameWorld);
+
         if (buildings.isEmpty()) {
             return;
         }
-
-        pruneTrackedPlayers(buildings, gameWorld);
 
         // Process each online player
         for (Player player : gameWorld.getPlayers()) {
@@ -221,7 +279,7 @@ public class BuildingBenefitManager {
         }
 
         // Refresh team-only recon markers from active watchtower detections.
-        tickWatchtowerDetections();
+        cleanupGlowingEnemies();
 
         // Clean up expired outpost buffs
         tickOutpostBuffExpiry();
@@ -283,6 +341,20 @@ public class BuildingBenefitManager {
             return; // No buff for standard outposts
         }
 
+        // Prevent indefinite refresh by rapidly stepping in/out.
+        // Only grant a new buff once the previous one for THIS variant has expired.
+        // Keyed per-variant so a Forest Outpost buff doesn't block a Mountain Outpost buff.
+        Map<String, Long> playerExpiries = outpostBuffExpiry.get(player.getUniqueId());
+        if (playerExpiries != null) {
+            Long existingExpiry = playerExpiries.get(variant);
+            if (existingExpiry != null && System.currentTimeMillis() < existingExpiry) {
+                plugin.getLogger().info("[Buildings] Buff skipped for " + player.getName() +
+                        " - " + variant + " buff still active for " +
+                        ((existingExpiry - System.currentTimeMillis()) / 1000) + "s");
+                return;
+            }
+        }
+
         PotionEffectType effectType = null;
         int durationTicks = 5 * 60 * 20; // 5 minutes
 
@@ -304,11 +376,14 @@ public class BuildingBenefitManager {
         if (effectType != null) {
             plugin.getLogger().info("[Buildings] Applying buff " + effectType.getKey() + " to " + player.getName());
             player.addPotionEffect(new PotionEffect(effectType, durationTicks, 0, true, true, true));
-            player.sendMessage(ChatColor.GREEN + "✦ " + variant + " buff applied! " +
-                    ChatColor.GRAY + "(5 minutes)");
+            player.sendMessage(Component.text("✦ ", NamedTextColor.GREEN)
+                    .append(Component.text(variant + " buff applied! ", NamedTextColor.GREEN))
+                    .append(Component.text("(5 minutes)", NamedTextColor.GRAY)));
             player.playSound(player.getLocation(), Sound.BLOCK_BEACON_ACTIVATE, 0.5f, 1.5f);
 
-            outpostBuffExpiry.put(player.getUniqueId(), System.currentTimeMillis() + (5 * 60 * 1000));
+            outpostBuffExpiry
+                    .computeIfAbsent(player.getUniqueId(), k -> new ConcurrentHashMap<>())
+                    .put(variant, System.currentTimeMillis() + (5 * 60 * 1000));
         } else {
             plugin.getLogger().warning("[Buildings] No effect matched for variant '" + variant + "'");
         }
@@ -319,13 +394,20 @@ public class BuildingBenefitManager {
      */
     private void tickOutpostBuffExpiry() {
         long now = System.currentTimeMillis();
-        outpostBuffExpiry.entrySet().removeIf(entry -> entry.getValue() < now);
+        // Remove individual variant entries that have expired, then remove the player
+        // entry entirely if all variant entries are gone.
+        outpostBuffExpiry.entrySet().removeIf(entry -> {
+            entry.getValue().entrySet().removeIf(v -> v.getValue() < now);
+            return entry.getValue().isEmpty();
+        });
     }
 
     // ==================== WATCHTOWER DETECTION ====================
 
     /**
-     * Processes watchtower enemy detection for a player.
+     * Processes watchtower passive range-awareness for a player on the platform.
+     * Enemies entering detection range still trigger a team alert, but actual spotting
+     * (Glowing) requires the player to actively aim through a spyglass — see onSpyglassUse().
      */
     private void tickWatchtowerDetection(Player occupant, String occupantTeam, RegisteredBuilding watchtower, World world) {
         // Check if player is on the watchtower platform
@@ -347,34 +429,28 @@ public class BuildingBenefitManager {
         int detectionRange = calculateDetectionRange(towerHeight);
         double detectionRangeSquared = detectionRange * detectionRange;
 
-        // Find enemies within range
+        // Find enemies within range — only used to trigger the passive alert message
         Location towerTop = new Location(world, watchtower.anchorX(), watchtower.maxY(), watchtower.anchorZ());
         String regionId = watchtower.regionId();
 
-        boolean enemyDetected = false;
+        boolean enemyNearby = false;
         for (Player target : world.getPlayers()) {
-            if (target.getUniqueId().equals(occupant.getUniqueId())) {
-                continue;
-            }
+            if (target.getUniqueId().equals(occupant.getUniqueId())) continue;
 
             Optional<String> targetTeamOpt = teamService.getPlayerTeam(target.getUniqueId());
-            if (targetTeamOpt.isEmpty()) {
-                continue;
-            }
+            if (targetTeamOpt.isEmpty()) continue;
 
             String targetTeam = targetTeamOpt.get();
-            if (targetTeam.equalsIgnoreCase(occupantTeam)) {
-                continue; // Same team
-            }
+            if (targetTeam.equalsIgnoreCase(occupantTeam)) continue; // Same team
 
             if (target.getLocation().distanceSquared(towerTop) <= detectionRangeSquared) {
-                markWatchtowerDetection(occupantTeam, target);
-                enemyDetected = true;
+                enemyNearby = true;
+                break; // One is enough to trigger the alert
             }
         }
 
-        // Send enemy alert if enemies detected and not on cooldown
-        if (enemyDetected) {
+        // Send passive range alert if enemies are nearby (throttled by cooldown)
+        if (enemyNearby) {
             sendEnemyAlert(occupantTeam, regionId, watchtower);
         }
     }
@@ -395,14 +471,243 @@ public class BuildingBenefitManager {
         return 64; // Base range for 15-19 blocks
     }
 
+    // ==================== SPYGLASS SPOTTING — ACTIVE DETECTION ====================
+
     /**
-     * Marks an enemy as detected for a specific friendly team.
+     * Fires when a player right-clicks while holding a spyglass.
+     *
+     * Requirements (no exception):
+     *   1. Player must be standing on a friendly watchtower platform.
+     *   2. Player must be holding a spyglass.
+     *   3. The ray-cast from the player's eye must reach an enemy without being
+     *      blocked by a solid block — i.e., genuine line-of-sight is required.
+     *
+     * On success the enemy receives the GLOWING potion effect for {@value GLOWING_DURATION_TICKS}
+     * ticks (20 s), making their silhouette visible through terrain to everyone.
      */
-    private void markWatchtowerDetection(String team, Player enemy) {
-        String normalizedTeam = team.toLowerCase(Locale.ROOT);
-        watchtowerDetectedEnemies
-                .computeIfAbsent(normalizedTeam, ignored -> new ConcurrentHashMap<>())
-                .put(enemy.getUniqueId(), System.currentTimeMillis() + WATCHTOWER_MARKER_DURATION_MS);
+    @EventHandler(priority = EventPriority.NORMAL, ignoreCancelled = false)
+    public void onSpyglassUse(PlayerInteractEvent event) {
+        // Only main-hand right-clicks — prevents double-fire from off-hand slot
+        if (event.getHand() != EquipmentSlot.HAND) return;
+        if (event.getAction() != Action.RIGHT_CLICK_AIR && event.getAction() != Action.RIGHT_CLICK_BLOCK) return;
+
+        ItemStack item = event.getItem();
+        if (item == null || item.getType() != Material.SPYGLASS) return;
+
+        Player spotter = event.getPlayer();
+
+        // ── Requirement 1: must be on a friendly watchtower platform ──────────────
+        RegisteredBuilding watchtower = findWatchtowerPlatformForPlayer(spotter);
+        if (watchtower == null) return; // silently ignore — spyglass works normally elsewhere
+
+        plugin.getLogger().info("[Watchtower] Spyglass used by " + spotter.getName() +
+                " on watchtower (obj " + watchtower.objectiveId() + ")");
+
+        // ── Cooldown guard ────────────────────────────────────────────────────────
+        Long cooldownExpiry = spyglassCooldowns.get(spotter.getUniqueId());
+        if (cooldownExpiry != null && System.currentTimeMillis() < cooldownExpiry) {
+            long remaining = (cooldownExpiry - System.currentTimeMillis() + 999) / 1000L;
+            spotter.sendMessage(Component.text("⏳ Spyglass recharging — " + remaining + "s remaining.")
+                    .color(NamedTextColor.YELLOW));
+            return;
+        }
+
+        // ── Team check ────────────────────────────────────────────────────────────
+        Optional<String> teamOpt = teamService.getPlayerTeam(spotter.getUniqueId());
+        if (teamOpt.isEmpty()) return;
+        String spotterTeam = teamOpt.get();
+
+        // ── Requirement 3: ray-cast — solid blocks obstruct line-of-sight ────────
+        int towerHeight = watchtower.maxY() - watchtower.minY();
+        int detectionRange = calculateDetectionRange(towerHeight);
+
+        // Step 1: Entity-only raytrace to find who the player is aiming at.
+        // This ignores blocks entirely so the watchtower's own fences/walls/slabs
+        // cannot prevent the spotter from acquiring a target.
+        RayTraceResult entityResult = spotter.getWorld().rayTraceEntities(
+                spotter.getEyeLocation(),
+                spotter.getEyeLocation().getDirection(),
+                detectionRange,
+                0.3,    // small hitbox expansion for comfortable aiming
+                entity -> entity instanceof Player p && !p.getUniqueId().equals(spotter.getUniqueId())
+        );
+
+        if (entityResult == null || !(entityResult.getHitEntity() instanceof Player enemy)) {
+            spotter.sendMessage(Component.text("No target in sight.")
+                    .color(NamedTextColor.GRAY));
+            return;
+        }
+
+        // Step 2: Verify genuine line-of-sight via block raytrace, but skip any
+        // block that falls inside the watchtower's own bounding box.  Without this,
+        // the tower's platform fences/walls block the ray before it leaves the
+        // structure, making it impossible to spot anyone.
+        if (!hasLineOfSightPastWatchtower(spotter, enemy, watchtower)) {
+            spotter.sendMessage(Component.text("No target in sight — view obstructed.")
+                    .color(NamedTextColor.GRAY));
+            return;
+        }
+
+        // ── Verify the hit entity is an enemy ────────────────────────────────────
+        Optional<String> enemyTeamOpt = teamService.getPlayerTeam(enemy.getUniqueId());
+        if (enemyTeamOpt.isEmpty() || enemyTeamOpt.get().equalsIgnoreCase(spotterTeam)) {
+            spotter.sendMessage(Component.text("No enemy in crosshair.")
+                    .color(NamedTextColor.GRAY));
+            return;
+        }
+
+        // ── Apply Glowing and notify ──────────────────────────────────────────────
+        applyGlowingToEnemy(spotter, enemy, spotterTeam, watchtower);
+
+        // Set per-spotter cooldown
+        spyglassCooldowns.put(spotter.getUniqueId(), System.currentTimeMillis() + SPYGLASS_COOLDOWN_MS);
+    }
+
+    /**
+     * Applies the GLOWING potion effect to the spotted enemy and broadcasts alerts.
+     *
+     * The GLOWING effect draws the enemy's entity outline through solid terrain for all
+     * players — exactly the through-wall visibility the design specifies.
+     */
+    private void applyGlowingToEnemy(Player spotter, Player enemy, String spotterTeam,
+                                     RegisteredBuilding watchtower) {
+        // Apply (or refresh) GLOWING — ambient=false, particles=false keeps it clean
+        enemy.addPotionEffect(new PotionEffect(
+                PotionEffectType.GLOWING, GLOWING_DURATION_TICKS, 0, false, false, false));
+
+        // Track so we can forcibly remove it on round-end / plugin stop
+        glowingEnemies.put(enemy.getUniqueId(), System.currentTimeMillis() + GLOWING_DURATION_MS);
+
+        String regionName = getRegionDisplayName(watchtower.regionId());
+        int durationSeconds = GLOWING_DURATION_TICKS / 20;
+
+        // ── Notify the spotter ────────────────────────────────────────────────────
+        spotter.sendMessage(Component.text("🔍 ", NamedTextColor.GOLD)
+                .append(Component.text("Spotted ", NamedTextColor.WHITE))
+                .append(Component.text(enemy.getName(), NamedTextColor.RED))
+                .append(Component.text("! Glowing for " + durationSeconds + "s.",
+                        NamedTextColor.YELLOW)));
+        spotter.playSound(spotter.getLocation(), Sound.ENTITY_EXPERIENCE_ORB_PICKUP, 1.0f, 1.4f);
+
+        // ── Notify teammates in the same region only ─────────────────────────────
+        String watchtowerRegion = watchtower.regionId();
+        World gameWorld = spotter.getWorld();
+        for (Player teammate : gameWorld.getPlayers()) {
+            if (teammate.getUniqueId().equals(spotter.getUniqueId())) continue;
+            Optional<String> tmTeam = teamService.getPlayerTeam(teammate.getUniqueId());
+            if (tmTeam.isEmpty() || !tmTeam.get().equalsIgnoreCase(spotterTeam)) continue;
+            // Skip players outside the watchtower's region — alert isn't actionable for them
+            String tmRegion = regionService.getRegionIdForLocation(
+                    teammate.getLocation().getBlockX(), teammate.getLocation().getBlockZ());
+            if (!watchtowerRegion.equals(tmRegion)) continue;
+
+            teammate.sendMessage(Component.text("[Watchtower] ", NamedTextColor.YELLOW)
+                    .append(Component.text(spotter.getName(), NamedTextColor.GOLD))
+                    .append(Component.text(" spotted ", NamedTextColor.WHITE))
+                    .append(Component.text(enemy.getName(), NamedTextColor.RED))
+                    .append(Component.text(" in ", NamedTextColor.WHITE))
+                    .append(Component.text(regionName, NamedTextColor.GOLD))
+                    .append(Component.text("! [Glowing " + durationSeconds + "s]",
+                            NamedTextColor.YELLOW)));
+            teammate.playSound(teammate.getLocation(), Sound.BLOCK_NOTE_BLOCK_BELL, 1.0f, 1.2f);
+        }
+
+        // ── Notify the spotted enemy so they can react ────────────────────────────
+        enemy.sendMessage(Component.text("👁 ", NamedTextColor.RED)
+                .append(Component.text(
+                        "You've been spotted by a watchtower! Your position is visible for "
+                                + durationSeconds + "s.",
+                        NamedTextColor.RED)));
+        enemy.playSound(enemy.getLocation(), Sound.ENTITY_PLAYER_LEVELUP, 0.5f, 0.5f);
+    }
+
+    /**
+     * Returns the active friendly watchtower whose platform the player is standing on,
+     * or {@code null} if the player is not on any watchtower platform.
+     */
+    private RegisteredBuilding findWatchtowerPlatformForPlayer(Player player) {
+        Optional<String> teamOpt = teamService.getPlayerTeam(player.getUniqueId());
+        if (teamOpt.isEmpty()) return null;
+        String playerTeam = teamOpt.get();
+
+        for (RegisteredBuilding building : getActiveBuildings()) {
+            if (building.type() != BuildingType.WATCHTOWER) continue;
+            if (!building.team().equalsIgnoreCase(playerTeam)) continue;
+            if (isOnWatchtowerPlatform(player, building)) return building;
+        }
+        return null;
+    }
+
+    /**
+     * Checks line-of-sight from spotter to enemy, ignoring solid blocks that are
+     * inside the watchtower's own bounding box.  Without this, the tower's fences,
+     * walls, and slab edges block the ray before it ever leaves the structure.
+     * <p>
+     * Algorithm: iteratively ray-trace blocks towards the target.  Each time the
+     * first hit block is inside the tower, advance past it and trace again.  If a
+     * non-tower block is hit before the enemy, LOS is genuinely blocked.
+     */
+    private boolean hasLineOfSightPastWatchtower(Player spotter, Player enemy,
+                                                  RegisteredBuilding watchtower) {
+        Location start = spotter.getEyeLocation();
+        // Aim at the enemy's eye rather than their feet for a more natural check
+        Location target = enemy.getEyeLocation();
+        Vector toTarget = target.toVector().subtract(start.toVector());
+        double totalDistance = toTarget.length();
+        if (totalDistance < 0.1) return true; // practically on top of each other
+
+        Vector direction = toTarget.clone().normalize();
+        Location current = start.clone();
+        double remaining = totalDistance;
+
+        // Safety cap — a watchtower platform is at most a few blocks thick
+        for (int i = 0; i < 10 && remaining > 0.5; i++) {
+            RayTraceResult blockHit = spotter.getWorld().rayTraceBlocks(
+                    current, direction, remaining,
+                    FluidCollisionMode.NEVER,
+                    true  // ignore passable (non-solid) blocks like glass panes, vegetation
+            );
+
+            if (blockHit == null) {
+                return true; // No solid blocks between current position and target
+            }
+
+            Block hitBlock = blockHit.getHitBlock();
+            if (hitBlock == null) {
+                return true;
+            }
+
+            // If the blocking block is inside the watchtower's structure, skip past it
+            int bx = hitBlock.getX();
+            int by = hitBlock.getY();
+            int bz = hitBlock.getZ();
+            if (bx >= watchtower.minX() && bx <= watchtower.maxX() &&
+                by >= watchtower.minY() && by <= watchtower.maxY() &&
+                bz >= watchtower.minZ() && bz <= watchtower.maxZ()) {
+                // Advance 0.15 blocks past the hit point so we don't re-hit the same face
+                double hitDist = blockHit.getHitPosition().distance(current.toVector());
+                double advance = hitDist + 0.15;
+                current = current.clone().add(direction.clone().multiply(advance));
+                remaining -= advance;
+                continue;
+            }
+
+            // Hit a block that is NOT part of the watchtower — genuine obstruction
+            return false;
+        }
+
+        // Exhausted iterations (very thick tower?) — give the spotter the benefit of the doubt
+        return true;
+    }
+
+    /**
+     * Removes expired entries from the glowing-enemy and spyglass-cooldown maps.
+     * Called every second from {@link #tickBenefits()}.
+     */
+    private void cleanupGlowingEnemies() {
+        long now = System.currentTimeMillis();
+        glowingEnemies.entrySet().removeIf(entry -> entry.getValue() < now);
+        spyglassCooldowns.entrySet().removeIf(entry -> entry.getValue() < now);
     }
 
     /**
@@ -421,14 +726,22 @@ public class BuildingBenefitManager {
 
         String regionName = getRegionDisplayName(regionId);
 
-        // Alert all team members
-        for (Player player : Bukkit.getOnlinePlayers()) {
+        // Alert team members in the game world only — not lobby/spectator players
+        World gameWorld = roundService.getGameWorld().orElse(null);
+        if (gameWorld == null) return;
+
+        for (Player player : gameWorld.getPlayers()) {
             Optional<String> playerTeam = teamService.getPlayerTeam(player.getUniqueId());
-            if (playerTeam.isPresent() && playerTeam.get().equalsIgnoreCase(team)) {
-                player.sendMessage(ChatColor.YELLOW + "[Watchtower] " + ChatColor.WHITE + "Enemy spotted in " +
-                        ChatColor.GOLD + regionName + ChatColor.WHITE + "!");
-                player.playSound(player.getLocation(), Sound.BLOCK_NOTE_BLOCK_BELL, 1.0f, 1.0f);
-            }
+            if (playerTeam.isEmpty() || !playerTeam.get().equalsIgnoreCase(team)) continue;
+            // Only alert players who are actually in the same region
+            String playerRegion = regionService.getRegionIdForLocation(
+                    player.getLocation().getBlockX(), player.getLocation().getBlockZ());
+            if (!regionId.equals(playerRegion)) continue;
+            player.sendMessage(Component.text("[Watchtower] ", NamedTextColor.YELLOW)
+                    .append(Component.text("Enemy spotted in ", NamedTextColor.WHITE))
+                    .append(Component.text(regionName, NamedTextColor.GOLD))
+                    .append(Component.text("!", NamedTextColor.WHITE)));
+            player.playSound(player.getLocation(), Sound.BLOCK_NOTE_BLOCK_BELL, 1.0f, 1.0f);
         }
     }
 
@@ -514,71 +827,6 @@ public class BuildingBenefitManager {
         }
     }
 
-    /**
-     * Refreshes team-only recon markers for detected enemies.
-     */
-    private void tickWatchtowerDetections() {
-        long now = System.currentTimeMillis();
-        List<String> emptyTeams = new ArrayList<>();
-
-        for (Map.Entry<String, Map<UUID, Long>> teamEntry : watchtowerDetectedEnemies.entrySet()) {
-            String team = teamEntry.getKey();
-            Map<UUID, Long> detectedEnemies = teamEntry.getValue();
-            List<UUID> expiredEnemies = new ArrayList<>();
-
-            for (Map.Entry<UUID, Long> detectionEntry : detectedEnemies.entrySet()) {
-                if (detectionEntry.getValue() < now) {
-                    expiredEnemies.add(detectionEntry.getKey());
-                    continue;
-                }
-
-                Player enemy = Bukkit.getPlayer(detectionEntry.getKey());
-                if (enemy == null || !enemy.isOnline()) {
-                    expiredEnemies.add(detectionEntry.getKey());
-                    continue;
-                }
-
-                showWatchtowerMarker(team, enemy);
-            }
-
-            for (UUID enemyId : expiredEnemies) {
-                detectedEnemies.remove(enemyId);
-            }
-
-            if (detectedEnemies.isEmpty()) {
-                emptyTeams.add(team);
-            }
-        }
-
-        for (String team : emptyTeams) {
-            watchtowerDetectedEnemies.remove(team);
-        }
-    }
-
-    /**
-     * Shows a team-only recon marker over a detected enemy.
-     */
-    private void showWatchtowerMarker(String team, Player enemy) {
-        Location enemyLoc = enemy.getLocation();
-        Location markerLoc = enemyLoc.clone().add(0, enemy.getHeight() + 0.4, 0);
-
-        for (Player viewer : Bukkit.getOnlinePlayers()) {
-            if (!viewer.getWorld().equals(enemy.getWorld())) {
-                continue;
-            }
-            if (viewer.getLocation().distanceSquared(enemyLoc) > WATCHTOWER_MARKER_VIEW_DISTANCE_SQUARED) {
-                continue;
-            }
-
-            Optional<String> viewerTeamOpt = teamService.getPlayerTeam(viewer.getUniqueId());
-            if (viewerTeamOpt.isEmpty() || !viewerTeamOpt.get().equalsIgnoreCase(team)) {
-                continue;
-            }
-
-            viewer.spawnParticle(Particle.DUST, markerLoc, 6, 0.25, 0.5, 0.25, 0.0, WATCHTOWER_MARKER_DUST);
-            viewer.spawnParticle(Particle.END_ROD, markerLoc.clone().add(0, 0.3, 0), 2, 0.15, 0.25, 0.15, 0.0);
-        }
-    }
 
     /**
      * Checks if a player is on the watchtower platform.
@@ -712,10 +960,16 @@ public class BuildingBenefitManager {
     }
 
     /**
-     * Gets all active registered buildings.
+     * Gets all active registered buildings, using a 5-second TTL cache to avoid
+     * hammering the database from tickBenefits (1 Hz) and tickParticles (2 Hz).
      */
     private List<RegisteredBuilding> getActiveBuildings() {
-        return objectiveService.getAllActiveBuildings();
+        long now = System.currentTimeMillis();
+        if (now - lastBuildingCacheRefreshMs >= BUILDING_CACHE_REFRESH_INTERVAL_MS) {
+            cachedBuildings = objectiveService.getAllActiveBuildings();
+            lastBuildingCacheRefreshMs = now;
+        }
+        return cachedBuildings;
     }
 
     /**

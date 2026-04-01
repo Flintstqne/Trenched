@@ -89,10 +89,16 @@ public class SqlObjectiveService implements ObjectiveService {
     private final Map<Integer, Long> lastStructureIntegrityCheck = new ConcurrentHashMap<>();
     private final Map<Integer, BuildingDetectionResult> lastStructureDetections = new ConcurrentHashMap<>();
 
-    // Track consecutive failed integrity checks per building. Must fail 3 times in a row
-    // before invalidation. This prevents sporadic scan failures from destroying buildings.
+    // Registered building integrity tracking (separate from pre-registration rescans)
+    private final Map<Integer, BukkitTask> pendingBuildingIntegrityRescans = new ConcurrentHashMap<>();
     private final Map<Integer, Integer> buildingFailureCount = new ConcurrentHashMap<>();
-    private static final int REQUIRED_FAILURE_COUNT = 3;
+    private static final int REQUIRED_FAILURE_COUNT = 3; // Consecutive failures before invalidation
+
+    // Cache for tickStructureObjectives — avoids full DB scans every second.
+    // Lists are refreshed at most once per STRUCTURE_CACHE_REFRESH_INTERVAL_MS.
+    private volatile List<RegionObjective>     cachedStructureObjectives = Collections.emptyList();
+    private long lastStructureCacheRefreshMs = 0L;
+    private static final long STRUCTURE_CACHE_REFRESH_INTERVAL_MS = 5_000L;
 
     // Building limits per region (from docs)
     private static final int MAX_OUTPOSTS_PER_REGION = 2;
@@ -413,9 +419,23 @@ public class SqlObjectiveService implements ObjectiveService {
                         locY = terrainLocation[1];
                         locZ = terrainLocation[2];
                     }
+                } else if (type == ObjectiveType.SETTLEMENT_RESOURCE_DEPOT) {
+                    // Supply depot must spawn on the open surface — not inside player-dug mines.
+                    // Use extra attempts with sky-light validation.
+                    int offsetRange = config.getRegionSize() / 4;
+                    for (int attempt = 0; attempt < 15 && locX == null; attempt++) {
+                        int tryX = center[0] + ThreadLocalRandom.current().nextInt(-offsetRange, offsetRange);
+                        int tryZ = center[1] + ThreadLocalRandom.current().nextInt(-offsetRange, offsetRange);
+                        int[] surfaceLoc = findSurfaceSpawnLocation(world, tryX, tryZ);
+                        if (surfaceLoc != null) {
+                            locX = surfaceLoc[0];
+                            locY = surfaceLoc[1];
+                            locZ = surfaceLoc[2];
+                        }
+                    }
                 }
 
-                // Fallback or non-outpost: generic safe location
+                // Fallback or non-outpost/non-depot: generic safe location
                 if (locX == null) {
                     int offsetRange = config.getRegionSize() / 4;
                     int[] safeLocation = null;
@@ -429,9 +449,31 @@ public class SqlObjectiveService implements ObjectiveService {
                         locY = safeLocation[1];
                         locZ = safeLocation[2];
                     } else {
+                        // Last-resort fallback: use the region center.
+                        // Refuse to place in open water, lava, or near water bodies.
+                        int fallbackHighest = world.getHighestBlockYAt(center[0], center[1]);
+                        Material fallbackTop = world.getBlockAt(center[0], fallbackHighest, center[1]).getType();
+                        if (fallbackTop == Material.WATER || fallbackTop == Material.LAVA ||
+                            fallbackTop == Material.KELP || fallbackTop == Material.KELP_PLANT ||
+                            fallbackTop == Material.SEAGRASS || fallbackTop == Material.TALL_SEAGRASS ||
+                            fallbackTop == Material.LILY_PAD ||
+                            fallbackTop.name().contains("CORAL")) {
+                            plugin.getLogger().warning("[Objectives] Could not find a dry spawn for " +
+                                    type + " in " + regionId +
+                                    " after all attempts — region center is over " + fallbackTop +
+                                    ". Skipping spawn.");
+                            return SpawnResult.NO_VALID_LOCATION;
+                        }
+                        // Also reject if surrounded by water
+                        if (isNearWater(world, center[0], fallbackHighest, center[1])) {
+                            plugin.getLogger().warning("[Objectives] Could not find a dry spawn for " +
+                                    type + " in " + regionId +
+                                    " — region center is surrounded by water. Skipping spawn.");
+                            return SpawnResult.NO_VALID_LOCATION;
+                        }
                         locX = center[0];
                         locZ = center[1];
-                        locY = world.getHighestBlockYAt(locX, locZ) + 1;
+                        locY = fallbackHighest + 1;
                     }
                 }
             } else {
@@ -644,7 +686,7 @@ public class SqlObjectiveService implements ObjectiveService {
             int tryX = center[0] + ThreadLocalRandom.current().nextInt(-offsetRange, offsetRange);
             int tryZ = center[1] + ThreadLocalRandom.current().nextInt(-offsetRange, offsetRange);
 
-            int[] safeLoc = findSafeSpawnLocation(world, tryX, tryZ);
+            int[] safeLoc = findSafeSpawnLocation(world, tryX, tryZ, true);
             if (safeLoc == null) continue;
 
             // Check if there's water within 10 blocks horizontally
@@ -668,17 +710,24 @@ public class SqlObjectiveService implements ObjectiveService {
 
     // ==================== END TERRAIN-AWARE OUTPOST SPAWNING ====================
 
+    private int[] findSafeSpawnLocation(World world, int x, int z) {
+        return findSafeSpawnLocation(world, x, z, false);
+    }
+
     /**
      * Finds a safe spawn location at the given X/Z coordinates.
      * Avoids water, lava, leaves, and other unsuitable blocks.
+     * Also rejects locations that are surrounded by water (tiny islands, sandbars)
+     * unless allowNearWater is true (used for fishing outpost shore locations).
      * Returns null if no safe location found at this X/Z.
      *
      * @param world The world to search in
      * @param x The X coordinate
      * @param z The Z coordinate
+     * @param allowNearWater If true, skips the water proximity check (for shore locations)
      * @return int[3] containing {x, y, z} or null if no safe location found
      */
-    private int[] findSafeSpawnLocation(World world, int x, int z) {
+    private int[] findSafeSpawnLocation(World world, int x, int z, boolean allowNearWater) {
         // Start from the highest block and work down to find solid ground
         int highestY = world.getHighestBlockYAt(x, z);
 
@@ -694,12 +743,61 @@ public class SqlObjectiveService implements ObjectiveService {
 
             // Check if the block below is solid ground (not water, lava, leaves, etc.)
             if (isSolidGround(type) && isPassable(typeAbove) && isPassable(typeTwoAbove)) {
+                // Reject if the surrounding area is mostly water (tiny island / sandbar)
+                if (!allowNearWater && isNearWater(world, x, y, z)) {
+                    return null;
+                }
                 // Found safe location - return position above the solid block
                 return new int[]{x, y + 1, z};
             }
         }
 
         return null; // No safe location found
+    }
+
+    /**
+     * Finds a spawn location that must be on the open surface (sky-light visible).
+     * Used for Resource Depot objectives so they don't spawn inside player-dug mines.
+     * Avoids water, lava, and waterlogged areas.
+     */
+    private int[] findSurfaceSpawnLocation(World world, int x, int z) {
+        int[] safeLoc = findSafeSpawnLocation(world, x, z);
+        if (safeLoc == null) return null;
+
+        // Additional sky-light validation: ensure the location can see the sky
+        Block above = world.getBlockAt(safeLoc[0], safeLoc[1], safeLoc[2]);
+        if (above.getLightFromSky() < 12) {
+            return null; // Too dark, likely underground or under dense canopy
+        }
+
+        return safeLoc;
+    }
+
+    /**
+     * Checks if a location is near water (surrounded by water in a 5-block radius).
+     * Returns true if more than 40% of the sampled blocks at the same Y-level are water,
+     * meaning the spot is a tiny island, sandbar, or beach too close to water.
+     */
+    private boolean isNearWater(World world, int x, int y, int z) {
+        int waterCount = 0;
+        int totalChecks = 0;
+        int checkRadius = 5;
+
+        for (int dx = -checkRadius; dx <= checkRadius; dx += 2) {
+            for (int dz = -checkRadius; dz <= checkRadius; dz += 2) {
+                if (dx == 0 && dz == 0) continue;
+                totalChecks++;
+                // Check at ground level and one above
+                Material matAt = world.getBlockAt(x + dx, y, z + dz).getType();
+                Material matAbove = world.getBlockAt(x + dx, y + 1, z + dz).getType();
+                if (matAt == Material.WATER || matAbove == Material.WATER) {
+                    waterCount++;
+                }
+            }
+        }
+
+        // If more than 40% of surrounding area is water, reject this location
+        return totalChecks > 0 && (double) waterCount / totalChecks > 0.4;
     }
 
     /**
@@ -736,6 +834,13 @@ public class SqlObjectiveService implements ObjectiveService {
         if (material == Material.LILY_PAD || material == Material.SEAGRASS ||
             material == Material.TALL_SEAGRASS || material == Material.KELP ||
             material == Material.KELP_PLANT) {
+            return false;
+        }
+
+        // Exclude coral and related aquatic blocks (found underwater on reefs)
+        if (name.contains("CORAL") || name.contains("SEA_PICKLE") ||
+            name.contains("SPONGE") || name.contains("SEA_LANTERN") ||
+            name.contains("CONDUIT") || name.contains("TURTLE_EGG")) {
             return false;
         }
 
@@ -1044,6 +1149,7 @@ public class SqlObjectiveService implements ObjectiveService {
     // ==================== OBJECTIVE DETECTION ====================
 
     private void scheduleNearbyStructureRescans(UUID playerUuid, String team, String regionId, int x, int y, int z) {
+        // Rescan active (not-yet-completed) building objectives near the changed block.
         for (RegionObjective objective : getActiveObjectives(regionId, ObjectiveCategory.SETTLEMENT)) {
             if (!BuildingType.fromObjectiveType(objective.type()).isPresent()) {
                 continue;
@@ -1052,6 +1158,23 @@ public class SqlObjectiveService implements ObjectiveService {
                 continue;
             }
             scheduleStructureRescan(objective.id(), playerUuid, team, config.getBuildingDetectionDebounceTicks());
+        }
+
+        // Also rescan registered (already-completed) buildings near the changed block.
+        // This enables integrity checking — if a registered building is damaged, it can be invalidated.
+        for (RegisteredBuilding building : getAllActiveBuildings()) {
+            if (!building.regionId().equals(regionId)) continue;
+            int dx = x - building.anchorX();
+            int dz = z - building.anchorZ();
+            int dy = y - building.anchorY();
+            int radius = config.getBuildingDetectionRadius();
+            int vertical = config.getBuildingDetectionVerticalRange();
+            if (building.type() == BuildingType.WATCHTOWER) {
+                vertical = Math.max(vertical, 32);
+            }
+            if (dx * dx + dz * dz <= radius * radius && Math.abs(dy) <= vertical) {
+                scheduleRegisteredBuildingRescan(building.objectiveId(), config.getBuildingDetectionDebounceTicks());
+            }
         }
     }
 
@@ -1119,10 +1242,102 @@ public class SqlObjectiveService implements ObjectiveService {
 
         if (objective.isActive()) {
             handleActiveStructureObjective(objective, result);
+        }
+    }
+
+    /**
+     * Schedules a debounced integrity rescan for an already-registered building.
+     * Triggered when blocks are placed/broken near the building.
+     */
+    private void scheduleRegisteredBuildingRescan(int objectiveId, long delayTicks) {
+        BukkitTask existing = pendingBuildingIntegrityRescans.remove(objectiveId);
+        if (existing != null) {
+            existing.cancel();
+        }
+
+        BukkitTask task = org.bukkit.Bukkit.getScheduler().runTaskLater(plugin, () -> {
+            pendingBuildingIntegrityRescans.remove(objectiveId);
+            runRegisteredBuildingRescan(objectiveId);
+        }, Math.max(1L, delayTicks));
+        pendingBuildingIntegrityRescans.put(objectiveId, task);
+    }
+
+    /**
+     * Runs an integrity rescan for a registered building.
+     * If the building no longer passes validation after REQUIRED_FAILURE_COUNT consecutive failures,
+     * it is invalidated and the buildingDestroyedCallback is fired with the detection result
+     * showing exactly what aspects failed.
+     */
+    private void runRegisteredBuildingRescan(int objectiveId) {
+        Optional<RegisteredBuilding> buildingOpt = db.getRegisteredBuilding(objectiveId);
+        if (buildingOpt.isEmpty() || buildingOpt.get().status() != RegisteredBuildingStatus.ACTIVE) {
+            buildingFailureCount.remove(objectiveId);
             return;
         }
 
-        db.getRegisteredBuilding(objectiveId).ifPresent(building -> handleRegisteredBuildingIntegrity(objective, building, result));
+        RegisteredBuilding building = buildingOpt.get();
+
+        Optional<RegionObjective> objectiveOpt = db.getObjective(objectiveId);
+        if (objectiveOpt.isEmpty()) {
+            buildingFailureCount.remove(objectiveId);
+            return;
+        }
+
+        RegionObjective objective = objectiveOpt.get();
+        Optional<BuildingType> buildingTypeOpt = BuildingType.fromObjectiveType(objective.type());
+        if (buildingTypeOpt.isEmpty() || !objective.hasLocation()) {
+            buildingFailureCount.remove(objectiveId);
+            return;
+        }
+
+        World world = roundService.getGameWorld().orElse(null);
+        if (world == null) return;
+
+        BuildingDetectionResult result = buildingDetector.scan(world, objective, buildingTypeOpt.get(), building.team());
+        lastStructureDetections.put(objectiveId, result);
+
+        if (result.valid()) {
+            // Building is fine — reset failure counter
+            buildingFailureCount.remove(objectiveId);
+            return;
+        }
+
+        // Building failed validation — increment consecutive failure count
+        int failures = buildingFailureCount.merge(objectiveId, 1, Integer::sum);
+        plugin.getLogger().info("[Buildings] Integrity check failed for " + building.type().getDisplayName() +
+                " (obj " + objectiveId + ") — failure " + failures + "/" + REQUIRED_FAILURE_COUNT +
+                " — " + result.summary());
+
+        if (failures < REQUIRED_FAILURE_COUNT) {
+            // Not enough consecutive failures yet — schedule another check soon
+            scheduleRegisteredBuildingRescan(objectiveId, 40L); // Re-check in 2 seconds
+            return;
+        }
+
+        // Enough consecutive failures — invalidate the building
+        buildingFailureCount.remove(objectiveId);
+        long now = System.currentTimeMillis();
+        db.invalidateRegisteredBuilding(objectiveId, now);
+
+        plugin.getLogger().info("[Buildings] INVALIDATED " + building.type().getDisplayName() +
+                " (obj " + objectiveId + ") in " + building.regionId() + " — " + result.summary());
+
+        // Credit building destroyers (stat tracking)
+        if (objectiveListener != null) {
+            var damagers = objectiveListener.getBuildingDamagers(objectiveId);
+            for (var record : damagers) {
+                if (statListener != null) {
+                    statListener.recordBuildingDestroyed(record.damagerUuid(), record.damagerName());
+                }
+            }
+            objectiveListener.clearBuildingDamageTracking(objectiveId);
+        }
+
+        // Fire the destroyed callback with specific failure details
+        if (buildingDestroyedCallback != null) {
+            String regionName = getRegionDisplayName(building.regionId());
+            buildingDestroyedCallback.onBuildingDestroyed(building, regionName, result);
+        }
     }
 
     private void handleActiveStructureObjective(RegionObjective objective, BuildingDetectionResult result) {
@@ -1279,9 +1494,9 @@ public class SqlObjectiveService implements ObjectiveService {
     }
 
     /**
-     * Broadcasts a variant upgrade message when a player adds the missing items
-     * to upgrade an outpost to its full variant (e.g., adding a Furnace and Pickaxe
-     * to upgrade to a full Mining Outpost).
+     * Broadcasts a variant upgrade message when a building upgrades to a full variant.
+     * For garrisons: team-only broadcast, buff-on-arrival wording.
+     * For outposts: region-wide broadcast, buff-on-leaving wording.
      */
     private void broadcastVariantUpgrade(RegionObjective objective, String newVariant, String team) {
         if (!objective.hasLocation()) return;
@@ -1289,16 +1504,34 @@ public class SqlObjectiveService implements ObjectiveService {
         World world = roundService.getGameWorld().orElse(null);
         if (world == null) return;
 
-        org.bukkit.ChatColor teamColor = team.equalsIgnoreCase("red")
-                ? org.bukkit.ChatColor.RED
-                : org.bukkit.ChatColor.BLUE;
+        boolean isGarrison = newVariant.contains("Garrison");
+        String buffDesc = isGarrison
+                ? "Buff active on arrival — teleport to claim it!"
+                : "Variant buff now active when leaving the outpost.";
 
-        String message = teamColor + "⬆ " + org.bukkit.ChatColor.GREEN + newVariant +
-                org.bukkit.ChatColor.YELLOW + " upgraded! " +
-                org.bukkit.ChatColor.GRAY + "Variant buff now active when leaving the outpost.";
+        net.kyori.adventure.text.format.NamedTextColor teamColor =
+                team.equalsIgnoreCase("red")
+                        ? net.kyori.adventure.text.format.NamedTextColor.RED
+                        : net.kyori.adventure.text.format.NamedTextColor.BLUE;
+
+        net.kyori.adventure.text.Component message = net.kyori.adventure.text.Component
+                .text("⬆ ", teamColor)
+                .append(net.kyori.adventure.text.Component.text(newVariant,
+                        net.kyori.adventure.text.format.NamedTextColor.GREEN))
+                .append(net.kyori.adventure.text.Component.text(" upgraded! ",
+                        net.kyori.adventure.text.format.NamedTextColor.YELLOW))
+                .append(net.kyori.adventure.text.Component.text(buffDesc,
+                        net.kyori.adventure.text.format.NamedTextColor.GRAY));
 
         String regionId = objective.regionId();
         for (org.bukkit.entity.Player player : world.getPlayers()) {
+            // Garrison upgrades are team-only; outpost upgrades are region-wide
+            if (isGarrison) {
+                if (teamService == null) continue;
+                Optional<String> pTeam = teamService.getPlayerTeam(player.getUniqueId());
+                if (pTeam.isEmpty() || !pTeam.get().equalsIgnoreCase(team)) continue;
+            }
+
             String playerRegion = regionService.getRegionIdForLocation(
                     player.getLocation().getBlockX(),
                     player.getLocation().getBlockZ()
@@ -1311,47 +1544,6 @@ public class SqlObjectiveService implements ObjectiveService {
         }
 
         plugin.getLogger().info("[Buildings] " + newVariant + " variant upgraded in " + regionId + " (team " + team + ")");
-    }
-
-    /**
-     * Broadcasts a repair message when a previously destroyed building passes
-     * validation again and is re-registered as ACTIVE.
-     */
-    private void broadcastBuildingRepair(RegisteredBuilding building) {
-        World world = roundService.getGameWorld().orElse(null);
-        if (world == null) return;
-
-        org.bukkit.ChatColor teamColor = building.team().equalsIgnoreCase("red")
-                ? org.bukkit.ChatColor.RED
-                : org.bukkit.ChatColor.BLUE;
-
-        String buildingName = building.type().getDisplayName();
-        if (building.variant() != null && !building.variant().isEmpty()
-                && !building.variant().equals("Standard") && !building.variant().contains("(needs")) {
-            buildingName = building.variant();
-        }
-
-        String regionName = getRegionDisplayName(building.regionId());
-        String message = teamColor + "🔧 " + org.bukkit.ChatColor.GREEN + buildingName +
-                org.bukkit.ChatColor.WHITE + " has been repaired! " +
-                org.bukkit.ChatColor.GRAY + "(" + building.anchorX() + ", " + building.anchorY() + ", " + building.anchorZ() + ")";
-
-        for (org.bukkit.entity.Player player : world.getPlayers()) {
-            Optional<String> pTeam = teamService.getPlayerTeam(player.getUniqueId());
-            if (pTeam.isPresent() && pTeam.get().equalsIgnoreCase(building.team())) {
-                String playerRegion = regionService.getRegionIdForLocation(
-                        player.getLocation().getBlockX(),
-                        player.getLocation().getBlockZ()
-                );
-                if (building.regionId().equals(playerRegion)) {
-                    player.sendMessage(message);
-                    player.playSound(player.getLocation(), org.bukkit.Sound.BLOCK_ANVIL_USE, 0.7f, 1.2f);
-                }
-            }
-        }
-
-        plugin.getLogger().info("[Buildings] " + buildingName + " REPAIRED in " + building.regionId() +
-                " (" + regionName + ") for team " + building.team());
     }
 
     /**
@@ -1399,99 +1591,6 @@ public class SqlObjectiveService implements ObjectiveService {
         }, 2L);
     }
 
-    private void handleRegisteredBuildingIntegrity(RegionObjective objective, RegisteredBuilding building, BuildingDetectionResult result) {
-        long now = System.currentTimeMillis();
-
-        plugin.getLogger().info("[Buildings] Integrity check for " + building.type().getDisplayName() +
-                " (obj " + building.objectiveId() + ") in " + building.regionId() +
-                ": valid=" + result.valid() + ", score=" + String.format("%.1f", result.totalScore()) +
-                ", status=" + building.status() + ", summary=" + result.summary());
-
-        if (result.valid()) {
-            // Check if this is a repair (was INVALID, now passing again)
-            boolean wasRepaired = building.status() == RegisteredBuildingStatus.INVALID;
-
-            // Reset failure counter on successful scan
-            buildingFailureCount.remove(building.objectiveId());
-
-            // Check if variant upgraded (went from "(needs ...)" to clean variant name)
-            String oldVariant = building.variant();
-            String newVariant = result.variant();
-            boolean variantUpgraded = oldVariant != null && newVariant != null
-                    && oldVariant.contains("(needs") && !newVariant.contains("(needs")
-                    && !newVariant.equals("Standard");
-
-            db.upsertRegisteredBuilding(objective, result, building.team(), RegisteredBuildingStatus.ACTIVE, now);
-
-            // Broadcast variant upgrade if it happened
-            if (variantUpgraded) {
-                broadcastVariantUpgrade(objective, newVariant, building.team());
-            }
-
-            // Broadcast repair if building was previously destroyed
-            if (wasRepaired) {
-                plugin.getLogger().info("[Objectives] " + building.type().getDisplayName()
-                        + " in " + building.regionId() + " has been REPAIRED and re-registered!");
-                broadcastBuildingRepair(building);
-            }
-
-            // Clear damage tracking when building returns to ACTIVE
-            if (objectiveListener != null) {
-                objectiveListener.clearBuildingDamageTracking(building.objectiveId());
-            }
-            return;
-        }
-
-        // Building failed validation — only invalidate if it's currently ACTIVE.
-        // If it's already INVALID, the repair loop is just checking if it's been
-        // rebuilt yet — no need to re-invalidate or re-log.
-        // Also re-fetch from DB to get the latest status, since the building object
-        // may have been fetched before a concurrent rescan already invalidated it.
-        if (building.status() == RegisteredBuildingStatus.INVALID) {
-            return;
-        }
-        Optional<RegisteredBuilding> freshBuilding = db.getRegisteredBuilding(building.objectiveId());
-        if (freshBuilding.isPresent() && freshBuilding.get().status() == RegisteredBuildingStatus.INVALID) {
-            return;
-        }
-
-        long invalidationMs = config.getBuildingInvalidationSeconds() * 1000L;
-        if ((now - building.lastValidatedAt()) >= invalidationMs) {
-            // Increment failure counter — require multiple consecutive failures
-            int failures = buildingFailureCount.merge(building.objectiveId(), 1, Integer::sum);
-            plugin.getLogger().info("[Buildings] Integrity failure " + failures + "/" + REQUIRED_FAILURE_COUNT +
-                    " for " + building.type().getDisplayName() + " in " + building.regionId());
-
-            if (failures < REQUIRED_FAILURE_COUNT) {
-                return; // Not enough consecutive failures yet
-            }
-
-            // Enough consecutive failures — invalidate
-            buildingFailureCount.remove(building.objectiveId());
-            db.invalidateRegisteredBuilding(building.objectiveId(), now);
-            plugin.getLogger().info("[Objectives] Registered " + building.type().getDisplayName()
-                    + " in " + building.regionId() + " invalidated after losing structure integrity.");
-
-            // Credit all recent damagers with building destruction stat
-            if (statListener != null && objectiveListener != null) {
-                Set<ObjectiveListener.BuildingDamageRecord> damagers = objectiveListener.getBuildingDamagers(building.objectiveId());
-                for (ObjectiveListener.BuildingDamageRecord damager : damagers) {
-                    // Only credit enemy damagers
-                    if (!damager.damagerTeam().equalsIgnoreCase(building.team())) {
-                        statListener.recordBuildingDestroyed(damager.damagerUuid(), damager.damagerName());
-                        plugin.getLogger().info("[Stats] Credited " + damager.damagerName() +
-                                " with building destruction: " + building.type().getDisplayName());
-                    }
-                }
-                objectiveListener.clearBuildingDamageTracking(building.objectiveId());
-            }
-
-            // Notify via callback
-            if (buildingDestroyedCallback != null) {
-                buildingDestroyedCallback.onBuildingDestroyed(building, getRegionDisplayName(building.regionId()));
-            }
-        }
-    }
 
     private String getRegionDisplayName(String regionId) {
         if (regionRenderer != null) {
@@ -1510,7 +1609,6 @@ public class SqlObjectiveService implements ObjectiveService {
         firstValidStructureSeenAt.remove(objectiveId);
         lastStructureIntegrityCheck.remove(objectiveId);
         lastStructureDetections.remove(objectiveId);
-        buildingFailureCount.remove(objectiveId);
     }
 
     @Override
@@ -2277,56 +2375,19 @@ public class SqlObjectiveService implements ObjectiveService {
         }
 
         long now = System.currentTimeMillis();
-        long integrityIntervalMs = config.getBuildingIntegrityCheckSeconds() * 1000L;
 
-        // Check integrity of registered (completed) buildings
-        for (RegisteredBuilding building : db.getRegisteredBuildingsByStatus(roundIdOpt.get(), RegisteredBuildingStatus.ACTIVE)) {
-            long lastChecked = lastStructureIntegrityCheck.getOrDefault(building.objectiveId(), 0L);
-            if ((now - lastChecked) < integrityIntervalMs || pendingStructureRescans.containsKey(building.objectiveId())) {
-                continue;
-            }
-
-            lastStructureIntegrityCheck.put(building.objectiveId(), now);
-            scheduleStructureRescan(building.objectiveId(), null, building.team(), 1L);
+        // Refresh cached objective list at most once every 5 seconds to avoid
+        // full DB scans per second (this method runs every 20 ticks / 1 second).
+        if (now - lastStructureCacheRefreshMs >= STRUCTURE_CACHE_REFRESH_INTERVAL_MS) {
+            cachedStructureObjectives = db.getActiveObjectivesByRound(roundIdOpt.get());
+            lastStructureCacheRefreshMs = now;
         }
 
-        // Check INVALID (destroyed) buildings for repair — rescan periodically to see if
-        // players rebuilt. If the scan passes, handleRegisteredBuildingIntegrity will
-        // promote it back to ACTIVE. Use a longer interval to avoid constant scans on rubble.
-        long repairCheckIntervalMs = integrityIntervalMs * 2; // Check less often than active integrity
-        for (RegisteredBuilding building : db.getRegisteredBuildingsByStatus(roundIdOpt.get(), RegisteredBuildingStatus.INVALID)) {
-            long lastChecked = lastStructureIntegrityCheck.getOrDefault(building.objectiveId(), 0L);
-            if ((now - lastChecked) < repairCheckIntervalMs || pendingStructureRescans.containsKey(building.objectiveId())) {
-                continue;
-            }
-
-            // Only rescan if a player from the building's team is nearby
-            boolean teamPlayerNearby = false;
-            World world = roundService.getGameWorld().orElse(null);
-            if (world != null) {
-                for (Player p : world.getPlayers()) {
-                    Optional<String> pTeam = teamService.getPlayerTeam(p.getUniqueId());
-                    if (pTeam.isEmpty() || !pTeam.get().equalsIgnoreCase(building.team())) continue;
-                    double dx = p.getLocation().getX() - building.anchorX();
-                    double dz = p.getLocation().getZ() - building.anchorZ();
-                    if (dx * dx + dz * dz <= 64 * 64) {
-                        teamPlayerNearby = true;
-                        break;
-                    }
-                }
-            }
-
-            if (!teamPlayerNearby) continue;
-
-            lastStructureIntegrityCheck.put(building.objectiveId(), now);
-            scheduleStructureRescan(building.objectiveId(), null, building.team(), 1L);
-        }
-
-        // Also periodically rescan ACTIVE building objectives that haven't been scanned recently.
+        // Periodically rescan ACTIVE building objectives that haven't been scanned recently.
         // This ensures watchtowers (tall structures) and other buildings update even if the player
         // is building far above/below the objective marker and block events don't trigger rescans.
         long activeRescanIntervalMs = 10_000L; // 10 seconds for active objectives
-        for (RegionObjective objective : db.getActiveObjectivesByRound(roundIdOpt.get())) {
+        for (RegionObjective objective : cachedStructureObjectives) {
             Optional<BuildingType> typeOpt = BuildingType.fromObjectiveType(objective.type());
             if (typeOpt.isEmpty() || !objective.hasLocation()) continue;
             if (pendingStructureRescans.containsKey(objective.id())) continue;
@@ -2422,13 +2483,22 @@ public class SqlObjectiveService implements ObjectiveService {
         firstValidStructureSeenAt.clear();
         lastStructureIntegrityCheck.clear();
         lastStructureDetections.clear();
-        buildingFailureCount.clear();
         pendingStructureActors.clear();
+        // Reset cached lists so the new round starts with a fresh fetch
+        cachedStructureObjectives = Collections.emptyList();
+        lastStructureCacheRefreshMs = 0L;
         pendingStructureTeams.clear();
         for (BukkitTask task : pendingStructureRescans.values()) {
             task.cancel();
         }
         pendingStructureRescans.clear();
+
+        // Clear registered building integrity tracking
+        for (BukkitTask task : pendingBuildingIntegrityRescans.values()) {
+            task.cancel();
+        }
+        pendingBuildingIntegrityRescans.clear();
+        buildingFailureCount.clear();
 
         // Remove glowing from any active intel carriers before clearing
         for (IntelCarrierData data : intelCarriers.values()) {
@@ -2642,8 +2712,21 @@ public class SqlObjectiveService implements ObjectiveService {
             intelItem.setItemMeta(meta);
         }
 
-        // Drop the item at the location
-        Location loc = new Location(world, x + 0.5, y + 1, z + 0.5);
+        // Drop the item at the location.
+        // If the stored coordinates are inside water or lava (e.g. a carrier who died
+        // while swimming), scan upward to the fluid surface so the item is reachable.
+        int adjustedY = y;
+        Block dropBlock = world.getBlockAt(x, adjustedY + 1, z);
+        while ((dropBlock.getType() == Material.WATER || dropBlock.getType() == Material.LAVA)
+                && adjustedY < world.getMaxHeight() - 2) {
+            adjustedY++;
+            dropBlock = world.getBlockAt(x, adjustedY + 1, z);
+        }
+        if (adjustedY != y) {
+            plugin.getLogger().info("[Objectives] Intel spawn adjusted from Y=" + (y + 1) +
+                    " to Y=" + (adjustedY + 1) + " to avoid fluid at " + x + "," + z);
+        }
+        Location loc = new Location(world, x + 0.5, adjustedY + 1, z + 0.5);
         org.bukkit.entity.Item droppedItem = world.dropItem(loc, intelItem);
         droppedItem.setGlowing(true);
         droppedItem.setCustomNameVisible(true);

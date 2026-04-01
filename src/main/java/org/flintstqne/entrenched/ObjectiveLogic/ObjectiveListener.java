@@ -371,9 +371,23 @@ public class ObjectiveListener implements Listener {
                     if (inventory instanceof org.bukkit.inventory.DoubleChestInventory doubleChestInv) {
                         org.bukkit.block.DoubleChest doubleChest = (org.bukkit.block.DoubleChest) doubleChestInv.getHolder();
                         if (doubleChest != null) {
-                            // Use the left side as canonical key for this double chest
-                            Location leftLoc = ((org.bukkit.block.Chest) doubleChest.getLeftSide()).getLocation();
-                            String doubleChestKey = leftLoc.getBlockX() + "," + leftLoc.getBlockY() + "," + leftLoc.getBlockZ();
+                            // Use the left side as canonical deduplication key.
+                            // getLeftSide() can return null when the adjacent chunk is unloaded,
+                            // and the return type is InventoryHolder — guard both cases.
+                            String doubleChestKey;
+                            try {
+                                InventoryHolder leftHolder = doubleChest.getLeftSide();
+                                if (leftHolder instanceof org.bukkit.block.Chest leftChest) {
+                                    Location leftLoc = leftChest.getLocation();
+                                    doubleChestKey = leftLoc.getBlockX() + "," + leftLoc.getBlockY() + "," + leftLoc.getBlockZ();
+                                } else {
+                                    // Fall back: use the current block position as key.
+                                    doubleChestKey = x + "," + y + "," + z;
+                                }
+                            } catch (Exception e) {
+                                // Unexpected API exception — use current block position.
+                                doubleChestKey = x + "," + y + "," + z;
+                            }
 
                             // Only count if we haven't seen this double chest before
                             if (!countedDoubleChests.contains(doubleChestKey)) {
@@ -390,6 +404,24 @@ public class ObjectiveListener implements Listener {
                                 totalItems += containerItems;
 
                                 // Check if this container qualifies (has enough items)
+                                if (containerItems >= minItemsPerContainer) {
+                                    qualifyingContainers++;
+                                }
+                            }
+                        } else {
+                            // getHolder() unexpectedly returned null — count as a single container
+                            // so the chest is not silently ignored.
+                            String locationKey = x + "," + y + "," + z;
+                            if (!countedSingleContainers.contains(locationKey)) {
+                                countedSingleContainers.add(locationKey);
+                                totalContainers++;
+                                int containerItems = 0;
+                                for (ItemStack item : doubleChestInv.getContents()) {
+                                    if (item != null && item.getType() != Material.AIR) {
+                                        containerItems += item.getAmount();
+                                    }
+                                }
+                                totalItems += containerItems;
                                 if (containerItems >= minItemsPerContainer) {
                                     qualifyingContainers++;
                                 }
@@ -726,17 +758,38 @@ public class ObjectiveListener implements Listener {
         Inventory inventory = event.getInventory();
         InventoryHolder holder = inventory.getHolder();
 
-        // Check if it's a container block
-        if (!(holder instanceof Container container)) return;
+        // Resolve the location and a Container reference for stat-tracking.
+        // Single containers (barrel, shulker, single chest) implement Container directly.
+        // Double chests use DoubleChest as their holder — NOT Container — so we must
+        // special-case them or they are silently ignored.
+        Location loc = null;
+        Container statContainer = null;
 
-        Location loc = container.getLocation();
+        if (holder instanceof Container container) {
+            loc = container.getLocation();
+            statContainer = container;
+        } else if (holder instanceof org.bukkit.block.DoubleChest doubleChest) {
+            // Prefer left side for a consistent location key; fall back to right side.
+            InventoryHolder leftSide = doubleChest.getLeftSide();
+            InventoryHolder rightSide = doubleChest.getRightSide();
+            if (leftSide instanceof Container leftContainer) {
+                loc = leftContainer.getLocation();
+                statContainer = leftContainer; // getInventory() returns full 54-slot DoubleChestInventory
+            } else if (rightSide instanceof Container rightContainer) {
+                loc = rightContainer.getLocation();
+                statContainer = rightContainer;
+            }
+        }
+
         if (loc == null || loc.getWorld() == null) return;
 
         String regionId = regionService.getRegionIdForLocation(loc.getBlockX(), loc.getBlockZ());
         if (regionId == null) return;
 
         // Track container stocking for stat
-        trackContainerStocking(player, container, loc);
+        if (statContainer != null) {
+            trackContainerStocking(player, statContainer, loc);
+        }
 
         // Check if there's an active resource depot objective in this region
         boolean hasResourceDepotObjective = objectiveService.getActiveObjectives(regionId, ObjectiveCategory.SETTLEMENT)

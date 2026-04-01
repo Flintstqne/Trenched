@@ -26,7 +26,8 @@ public record BuildingDetectionResult(
         int minZ,
         int maxX,
         int maxY,
-        int maxZ
+        int maxZ,
+        int bedCount
 ) {
     public int getProgressPercent() {
         return (int) Math.round(Math.max(0.0, Math.min(1.0, progressRatio)) * 100.0);
@@ -106,7 +107,7 @@ public record BuildingDetectionResult(
 
         // If only 1-2 base items missing AND variant has upgrade hints, append variant tip
         String variantHint = "";
-        if (missing.size() <= 2 && variant != null && variant.contains("(needs") && type == BuildingType.OUTPOST) {
+        if (missing.size() <= 2 && variant != null && variant.contains("(needs")) {
             String baseName = variant.substring(0, variant.indexOf(" (needs"));
             String needs = variant.substring(variant.indexOf("(needs ") + 7, variant.length() - 1);
             variantHint = " | " + baseName + ": " + needs;
@@ -178,6 +179,34 @@ public record BuildingDetectionResult(
                 checklist.add((!lowerSummary.contains("roof") ? "✓" : "✗") + " Roof Coverage");
                 checklist.add((!lowerSummary.contains("bed") ? "✓" : "✗") + " Team-colored Beds (3+)");
                 checklist.add((!lowerSummary.contains("entrance") ? "✓" : "✗") + " Entrance");
+                // "more barracks detail" is added by BuildingDetector when total score < required
+                checklist.add((!lowerSummary.contains("barracks") ? "✓" : "✗") + " Barracks Quality (overall score)");
+
+                // Show current variant upgrade progress
+                if (variant != null && !variant.equals("Basic Garrison")) {
+                    String baseName = variant.contains("(needs")
+                            ? variant.substring(0, variant.indexOf(" (needs"))
+                            : variant;
+                    boolean variantComplete = !variant.contains("(needs");
+                    checklist.add(""); // blank line separator
+                    checklist.add("§e⬆ " + baseName + (variantComplete ? " ✓" : " (in progress):"));
+                    if (variant.contains("(needs")) {
+                        String needs = variant.substring(variant.indexOf("(needs ") + 7, variant.length() - 1);
+                        for (String item : needs.split(", ")) {
+                            checklist.add("  §c✗ " + item.trim());
+                        }
+                    }
+                }
+
+                // Full variant reference catalog (first match wins — variants don't stack)
+                checklist.add("");
+                checklist.add("§6─── Variant Guide (first match wins) ───");
+                checklist.add("§7Basic§f: 3+ team beds (default)");
+                checklist.add("§7Medical§f: Brewing Stand + chest + §d3 healing potions§f → §dRegen I§f (30s on arrival)");
+                checklist.add("§7Armory§f: Anvil/Smithing + chest + §b5 iron ingots§f → §bResistance I§f (30s on arrival)");
+                checklist.add("§7Supply§f: 4+ chests + §664+ items total§f → §6Saturation§f (60s) + §a+1 spawn capacity");
+                checklist.add("§7Command§f: 2+ Lecterns or Banners → §cStrength I§f (30s on arrival)");
+                checklist.add("§7Fortified§f: 20+ wall/fence blocks → §9Resistance II§f (15s on arrival)");
             }
         }
 

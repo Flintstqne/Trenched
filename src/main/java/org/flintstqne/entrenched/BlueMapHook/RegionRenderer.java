@@ -21,6 +21,8 @@ import org.flintstqne.entrenched.RoundLogic.Round;
 import org.flintstqne.entrenched.RoundLogic.RoundService;
 
 import java.util.*;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 public class RegionRenderer {
 
@@ -50,6 +52,7 @@ public class RegionRenderer {
 
 
     private final JavaPlugin plugin;
+    private final Logger logger;
     private final Map<String, String> regionNames = new HashMap<>();
     private final RoundService roundService;
     private final RegionService regionService;
@@ -61,6 +64,7 @@ public class RegionRenderer {
 
     public RegionRenderer(JavaPlugin plugin, RoundService roundService, RegionService regionService) {
         this.plugin = plugin;
+        this.logger = plugin.getLogger();
         this.roundService = roundService;
         this.regionService = regionService;
     }
@@ -72,10 +76,7 @@ public class RegionRenderer {
      */
     public boolean loadNamesForCurrentRound() {
         Optional<Round> currentRoundOpt = roundService.getCurrentRound();
-        if (currentRoundOpt.isEmpty()) {
-            plugin.getLogger().info("[RegionRenderer] loadNamesForCurrentRound: No active round");
-            return false;
-        }
+        if (currentRoundOpt.isEmpty()) return false;
 
         Round round = currentRoundOpt.get();
         int rid = round.roundId();
@@ -86,14 +87,12 @@ public class RegionRenderer {
                 regionNames.clear();
                 regionNames.putAll(persistedNames);
                 loadedRoundId = rid;
-                plugin.getLogger().info("[RegionRenderer] Loaded " + persistedNames.size() + " region names for round " + rid);
                 return true;
             } else {
-                plugin.getLogger().info("[RegionRenderer] No persisted region names found for round " + rid);
                 return false;
             }
         } catch (Exception e) {
-            plugin.getLogger().warning("[RegionRenderer] Failed to load region names for round " + rid + ": " + e.getMessage());
+            logger.log(Level.WARNING, "Failed to load region names for round " + rid, e);
             return false;
         }
     }
@@ -148,8 +147,6 @@ public class RegionRenderer {
     }
 
     public void scheduleUpdateForOverworld(World world) {
-        plugin.getLogger().info("[RegionRenderer] Scheduling marker update for world: " + world.getName());
-
         final int[] polls = {0};
         final BukkitTask[] taskRef = {null};
 
@@ -158,11 +155,7 @@ public class RegionRenderer {
 
             Optional<BlueMapAPI> apiOpt = BlueMapAPI.getInstance();
             if (apiOpt.isEmpty()) {
-                logPollingStatus("Waiting for BlueMap API", polls[0]);
-                if (polls[0] >= MAX_POLLS) {
-                    plugin.getLogger().warning("[RegionRenderer] BlueMap API not available after " + MAX_POLLS + " polls");
-                    cancelTask(taskRef[0]);
-                }
+                if (polls[0] >= MAX_POLLS) cancelTask(taskRef[0]);
                 return;
             }
 
@@ -170,76 +163,21 @@ public class RegionRenderer {
             Optional<BlueMapMap> mapOpt = findMapForWorld(api, world);
 
             if (mapOpt.isEmpty()) {
-                logPollingStatus("Waiting for map '" + world.getName() + "'", polls[0]);
-                if (polls[0] >= MAX_POLLS) {
-                    plugin.getLogger().warning("[RegionRenderer] Map for world '" + world.getName() + "' not found after " + MAX_POLLS + " polls");
-                    cancelTask(taskRef[0]);
-                }
+                if (polls[0] >= MAX_POLLS) cancelTask(taskRef[0]);
                 return;
             }
 
-            // Map is available. Stop the short-lived poll task and schedule a long-lived updater.
             cancelTask(taskRef[0]);
-            BlueMapMap map = mapOpt.get();
-            plugin.getLogger().info("[RegionRenderer] Map found: " + map.getId() + " - scheduling periodic marker refresh every " + (MAP_UPDATE_PERIOD_TICKS/20L) + "s");
 
-            // Schedule a repeating updater that will refresh markers on the map periodically
-            plugin.getServer().getScheduler().runTaskTimer(plugin, () -> {
-                try {
-                    refreshMarkers(world);
-                } catch (Throwable t) {
-                    plugin.getLogger().warning("[RegionRenderer] Error during periodic marker refresh: " + t.getMessage());
-                }
-            }, 0L, MAP_UPDATE_PERIOD_TICKS);
+            plugin.getServer().getScheduler().runTaskTimer(plugin, () -> refreshMarkers(world),
+                    0L, MAP_UPDATE_PERIOD_TICKS);
 
-            // Do an initial immediate refresh so the map is populated now
-            try {
-                refreshMarkers(world);
-            } catch (Throwable t) {
-                plugin.getLogger().warning("[RegionRenderer] Error during initial marker refresh: " + t.getMessage());
-            }
+            refreshMarkers(world);
 
         }, 0L, POLL_PERIOD_TICKS);
     }
 
 
-    private void printRegionGrid() {
-        plugin.getLogger().info("[RegionRenderer] ========== Region Grid ==========");
-
-        char rowLabel = 'A';
-        for (int z = 0; z < GRID_SIZE; z++) {
-            StringBuilder row = new StringBuilder("[RegionRenderer] Row " + rowLabel + ": ");
-
-            for (int x = 0; x < GRID_SIZE; x++) {
-                String regionId = rowLabel + String.valueOf(x + 1);
-                String regionName = regionNames.getOrDefault(regionId, "Unknown");
-
-                // Pad names to 20 characters for alignment
-                row.append(String.format("%-20s", regionName));
-
-                if (x < GRID_SIZE - 1) {
-                    row.append(" | ");
-                }
-            }
-
-            plugin.getLogger().info(row.toString());
-
-            if (z < GRID_SIZE - 1) {
-                plugin.getLogger().info("[RegionRenderer] " + "-".repeat(95));
-            }
-
-            rowLabel++;
-        }
-
-        plugin.getLogger().info("[RegionRenderer] =================================");
-    }
-
-
-    private void logPollingStatus(String message, int poll) {
-        if (poll == 1 || poll % 10 == 0) {
-            plugin.getLogger().info("[RegionRenderer] " + message + " (poll " + poll + "/" + MAX_POLLS + ")");
-        }
-    }
 
     private void cancelTask(BukkitTask task) {
         if (task != null && !task.isCancelled()) task.cancel();
@@ -257,37 +195,24 @@ public class RegionRenderer {
 
     // New: deterministic generation + persist helper that can be called from commands
     public void generateAndPersistNamesForCurrentRound(World world) {
-        if (world == null) {
-            plugin.getLogger().warning("[RegionRenderer] generateAndPersistNamesForCurrentRound called with null world");
-            return;
-        }
-
-        plugin.getLogger().info("[RegionRenderer] generateAndPersistNamesForCurrentRound: starting for world " + world.getName());
+        if (world == null) return;
 
         Optional<Round> currentRoundOpt = roundService.getCurrentRound();
-        if (currentRoundOpt.isEmpty()) {
-            plugin.getLogger().warning("[RegionRenderer] No active round found - will generate transient names but will not persist");
-        }
 
         // Clear in-memory names if round changed
         if (currentRoundOpt.isPresent()) {
             int rid = currentRoundOpt.get().roundId();
             if (loadedRoundId == null || !loadedRoundId.equals(rid)) {
-                plugin.getLogger().info("[RegionRenderer] Detected round change (was=" + loadedRoundId + ", now=" + rid + ") - clearing names before loading/generation");
                 regionNames.clear();
                 loadedRoundId = rid;
 
-                // IMPORTANT: Try to load persisted names for this round FIRST
                 try {
                     Map<String, String> persistedNames = roundService.getRegionNames(rid);
                     if (persistedNames != null && !persistedNames.isEmpty()) {
                         regionNames.putAll(persistedNames);
-                        plugin.getLogger().info("[RegionRenderer] Loaded " + persistedNames.size() + " persisted region names for round " + rid);
-                    } else {
-                        plugin.getLogger().info("[RegionRenderer] No persisted region names found for round " + rid + " - will generate new ones");
                     }
                 } catch (Exception e) {
-                    plugin.getLogger().warning("[RegionRenderer] Failed to load persisted region names: " + e.getMessage());
+                    logger.log(Level.WARNING, "Failed to load persisted region names for round " + rid, e);
                 }
             }
         }
@@ -301,10 +226,7 @@ public class RegionRenderer {
         for (int z = 0; z < GRID_SIZE; z++) {
             for (int x = 0; x < GRID_SIZE; x++) {
                 String regionId = rowLabel + String.valueOf(x + 1);
-                if (regionNames.containsKey(regionId)) {
-                    plugin.getLogger().info("[RegionRenderer] Skipping generation for " + regionId + " (already present: " + regionNames.get(regionId) + ")");
-                    continue;
-                }
+                if (regionNames.containsKey(regionId)) continue;
 
                 String regionName;
                 do {
@@ -314,55 +236,36 @@ public class RegionRenderer {
 
                 regionNames.put(regionId, regionName);
                 anyGenerated = true;
-                plugin.getLogger().info("[RegionRenderer] Generated name for " + regionId + " -> " + regionName);
             }
 
             rowLabel++;
         }
 
-        // Only persist if we generated any new names (to avoid overwriting with same data)
         if (anyGenerated && currentRoundOpt.isPresent()) {
             Round r = currentRoundOpt.get();
             try {
-                plugin.getLogger().info("[RegionRenderer] Persisting " + regionNames.size() + " region names for round " + r.roundId());
                 roundService.setRegionNames(r.roundId(), new HashMap<>(regionNames));
-                plugin.getLogger().info("[RegionRenderer] Region names persisted successfully for round " + r.roundId());
             } catch (Exception e) {
-                plugin.getLogger().warning("[RegionRenderer] Failed to persist region names: " + e.getMessage());
+                logger.log(Level.WARNING, "Failed to persist region names for round " + r.roundId(), e);
             }
-        } else if (!anyGenerated) {
-            plugin.getLogger().info("[RegionRenderer] All region names were already loaded - no persistence needed");
-        } else {
-            plugin.getLogger().info("[RegionRenderer] No active round - generated names are transient and not persisted");
         }
-
-        plugin.getLogger().info("[RegionRenderer] generateAndPersistNamesForCurrentRound: complete");
     }
 
     /**
      * Force-refresh BlueMap markers for the given world using the currently-loaded region names.
-     * Safe to call at any time; logs and returns if BlueMap or the specific map is not available.
+     * Region names must be loaded or generated before calling this method (via
+     * {@link #loadNamesForCurrentRound()} or {@link #generateAndPersistNamesForCurrentRound(World)}).
      */
     public void refreshMarkers(World world) {
-        if (world == null) {
-            plugin.getLogger().warning("[RegionRenderer] refreshMarkers called with null world");
-            return;
-        }
+        if (world == null) return;
 
         Optional<BlueMapAPI> apiOpt = BlueMapAPI.getInstance();
-        if (apiOpt.isEmpty()) {
-            plugin.getLogger().warning("[RegionRenderer] Cannot refresh markers - BlueMap API not available");
-            return;
-        }
+        if (apiOpt.isEmpty()) return;
 
         Optional<BlueMapMap> mapOpt = findMapForWorld(apiOpt.get(), world);
-        if (mapOpt.isEmpty()) {
-            plugin.getLogger().warning("[RegionRenderer] Cannot refresh markers - map for world '" + world.getName() + "' not found");
-            return;
-        }
+        if (mapOpt.isEmpty()) return;
 
         BlueMapMap map = mapOpt.get();
-        //plugin.getLogger().info("[RegionRenderer] Refreshing markers on map: " + map.getId());
 
         MarkerSet markerSet = map.getMarkerSets().computeIfAbsent(
                 MARKER_SET_ID,
@@ -398,61 +301,36 @@ public class RegionRenderer {
                 int centerZ = z0 + REGION_BLOCKS / 2;
                 int y = MAP_LAYER_Y;
 
+                String regionId = rowLabel + String.valueOf(x + 1);
+                String regionName = regionNames.get(regionId);
+
+                if (regionName == null) {
+                    continue; // names must be loaded before rendering
+                }
+
                 MapUtils.RegionKey cellKey = MapUtils.regionKeyForBlock(centerX, centerZ);
 
                 Color lineColor = DEFAULT_LINE;
                 Color fillColor = DEFAULT_FILL;
 
-                // First check if this is a home region (these get special treatment)
                 if (cellKey.equals(redRegion)) {
                     lineColor = RED_LINE;
                     fillColor = RED_FILL;
                 } else if (cellKey.equals(blueRegion)) {
                     lineColor = BLUE_LINE;
                     fillColor = BLUE_FILL;
-                } else {
-                    // For non-home regions, check if they've been captured by a team
-                    String regionId = rowLabel + String.valueOf(x + 1);
-                    if (regionService != null) {
-                        Optional<RegionStatus> statusOpt = regionService.getRegionStatus(regionId);
-                        if (statusOpt.isPresent()) {
-                            RegionStatus status = statusOpt.get();
-                            String owner = status.ownerTeam();
-                            if ("red".equalsIgnoreCase(owner)) {
-                                lineColor = RED_LINE;
-                                fillColor = RED_FILL;
-                            } else if ("blue".equalsIgnoreCase(owner)) {
-                                lineColor = BLUE_LINE;
-                                fillColor = BLUE_FILL;
-                            }
-                            // If owner is null, it stays neutral (default gray)
+                } else if (regionService != null) {
+                    Optional<RegionStatus> statusOpt = regionService.getRegionStatus(regionId);
+                    if (statusOpt.isPresent()) {
+                        String owner = statusOpt.get().ownerTeam();
+                        if ("red".equalsIgnoreCase(owner)) {
+                            lineColor = RED_LINE;
+                            fillColor = RED_FILL;
+                        } else if ("blue".equalsIgnoreCase(owner)) {
+                            lineColor = BLUE_LINE;
+                            fillColor = BLUE_FILL;
                         }
                     }
-                }
-
-                String regionId = rowLabel + String.valueOf(x + 1);
-                String regionName = regionNames.get(regionId);
-
-                if (regionName == null) {
-                    // Attempt to load persisted name for current round
-                    try {
-                        Optional<Round> currentRoundOpt = roundService.getCurrentRound();
-                        if (currentRoundOpt.isPresent()) {
-                            Round r = currentRoundOpt.get();
-                            Map<String, String> saved = roundService.getRegionNames(r.roundId());
-                            if (saved != null && saved.containsKey(regionId)) {
-                                regionName = saved.get(regionId);
-                                regionNames.put(regionId, regionName);
-                            }
-                        }
-                    } catch (Exception e) {
-                        plugin.getLogger().warning("[RegionRenderer] Failed to load persisted name for " + regionId + ": " + e.getMessage());
-                    }
-                }
-
-                if (regionName == null) {
-                    regionName = RegionNameGenerator.generateRegionName();
-                    regionNames.put(regionId, regionName);
                 }
 
                 Shape shape = new Shape(List.of(
@@ -500,8 +378,5 @@ public class RegionRenderer {
 
             rowLabel++;
         }
-
-
-        //plugin.getLogger().info("[RegionRenderer] Markers refreshed for map " + map.getId());
     }
 }

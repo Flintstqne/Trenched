@@ -1037,6 +1037,9 @@ public class ObjectiveUIManager {
         World gameWorld = roundService.getGameWorld().orElse(null);
         if (gameWorld == null) return;
 
+        // Fetch registered buildings once for the whole tick (used to suppress redundant beacons).
+        List<RegisteredBuilding> activeBuildings = objectiveService.getAllActiveBuildings();
+
         // Get all regions with active objectives
         for (RegionStatus status : regionService.getAllRegionStatuses()) {
             List<RegionObjective> objectives = objectiveService.getActiveObjectives(status.regionId());
@@ -1052,6 +1055,38 @@ public class ObjectiveUIManager {
                 if (objective.type() == ObjectiveType.RAID_CAPTURE_INTEL) {
                     spawnIntelParticles(gameWorld, status.regionId(), objective);
                     continue;
+                }
+
+                // For building-type settlement objectives, suppress the beacon if:
+                //  1) A building of the SAME type is already registered in this region, OR
+                //  2) ANY registered building's bounding box physically overlaps the
+                //     objective's anchor location (with a small buffer).
+                // The registered building already emits its own distinct particles
+                // (SOUL_FIRE_FLAME for watchtowers, END_ROD for outposts, etc.).
+                // Two overlapping particle effects on the same structure confuse players.
+                Optional<BuildingType> buildingTypeOpt = BuildingType.fromObjectiveType(objective.type());
+                if (buildingTypeOpt.isPresent()) {
+                    BuildingType bType = buildingTypeOpt.get();
+                    boolean sameTypeRegistered = activeBuildings.stream()
+                            .anyMatch(b -> b.regionId().equals(status.regionId()) && b.type() == bType);
+                    if (sameTypeRegistered) continue;
+
+                    // Even if no building of the same type exists, suppress the beacon when
+                    // any other registered building physically overlaps this objective's
+                    // anchor.  This avoids the confusing double-particle effect when e.g. a
+                    // watchtower is built on top of an outpost anchor.
+                    if (objective.hasLocation()) {
+                        final int ox = objective.locationX();
+                        final int oy = objective.locationY();
+                        final int oz = objective.locationZ();
+                        final int buf = 3; // small buffer around the building bounds
+                        boolean overlapsBuilding = activeBuildings.stream().anyMatch(b ->
+                                b.regionId().equals(status.regionId()) &&
+                                ox >= b.minX() - buf && ox <= b.maxX() + buf &&
+                                oy >= b.minY() - buf && oy <= b.maxY() + buf &&
+                                oz >= b.minZ() - buf && oz <= b.maxZ() + buf);
+                        if (overlapsBuilding) continue;
+                    }
                 }
 
                 if (!objective.hasLocation()) continue;
@@ -1070,11 +1105,9 @@ public class ObjectiveUIManager {
 
                 if (!hasNearbyPlayer) continue;
 
-                // Spawn beacon-like particles
+                // Use a per-type colour so players can distinguish overlapping beacons at a glance.
                 Particle.DustOptions dust = new Particle.DustOptions(
-                        objective.type().isRaid() ? Color.RED : Color.GREEN,
-                        1.5f
-                );
+                        getObjectiveBeaconColor(objective.type()), 1.5f);
 
                 // Vertical beam
                 for (int y = 0; y < 20; y += 2) {
@@ -1092,6 +1125,31 @@ public class ObjectiveUIManager {
                 }
             }
         }
+    }
+
+    /**
+     * Returns a distinct beacon colour for each objective type so players can identify
+     * which floating dust beacon belongs to which objective when multiple objectives are
+     * active in the same region.
+     */
+    private Color getObjectiveBeaconColor(ObjectiveType type) {
+        return switch (type) {
+            // Settlement — building objectives (each matches the building's own particle hue)
+            case SETTLEMENT_ESTABLISH_OUTPOST    -> Color.LIME;          // bright green  — outpost
+            case SETTLEMENT_WATCHTOWER           -> Color.AQUA;          // cyan          — matches SOUL_FIRE_FLAME
+            case SETTLEMENT_GARRISON_QUARTERS    -> Color.YELLOW;        // yellow        — beds / warmth
+            case SETTLEMENT_RESOURCE_DEPOT       -> Color.ORANGE;        // orange        — supplies
+            // Settlement — positional objectives
+            case SETTLEMENT_SECURE_PERIMETER     -> Color.WHITE;         // white         — walls / fortifications
+            case SETTLEMENT_SUPPLY_ROUTE         -> Color.SILVER;        // silver/grey   — roads / paths
+            // Raid objectives
+            case RAID_DESTROY_CACHE              -> Color.RED;
+            case RAID_ASSASSINATE_COMMANDER      -> Color.MAROON;
+            case RAID_SABOTAGE_DEFENSES          -> Color.FUCHSIA;
+            case RAID_PLANT_EXPLOSIVE            -> Color.ORANGE;
+            // Fallback
+            default -> type.isRaid() ? Color.RED : Color.GREEN;
+        };
     }
 
     /**

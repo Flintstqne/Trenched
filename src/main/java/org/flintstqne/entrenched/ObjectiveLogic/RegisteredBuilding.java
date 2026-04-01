@@ -29,6 +29,7 @@ public record RegisteredBuilding(
         String variant,
         long registeredAt,
         long lastValidatedAt,
-        Long invalidatedAt
+        Long invalidatedAt,
+        int bedCount
 ) {
 }

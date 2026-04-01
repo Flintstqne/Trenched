@@ -82,6 +82,12 @@ commands:
     description: View player statistics, leaderboards, and round data
     usage: /stats [player|leaderboard|round|team]
     aliases: [stat, statistics]
+  link:
+    description: Generate a one-time code to link your Discord account
+    usage: /link
+  unlink:
+    description: Remove your Discord account link
+    usage: /unlink
 
 permissions:
   entrenched.admin:

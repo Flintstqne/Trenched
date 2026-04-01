@@ -76,11 +76,36 @@ public final class DeathListener implements Listener {
         void onPlayerRespawn(Player player, org.bukkit.Location spawnLocation);
     }
 
+    // Callback invoked immediately on death (before respawn logic)
+    private DeathCallback deathCallback;
+
+    /**
+     * Sets a callback to be invoked the moment a player dies.
+     * Called before respawn logic so death-side cleanup runs first.
+     */
+    public void setDeathCallback(DeathCallback callback) {
+        this.deathCallback = callback;
+    }
+
+    /**
+     * Callback interface for death events.
+     */
+    @FunctionalInterface
+    public interface DeathCallback {
+        void onPlayerDied(Player player);
+    }
+
     // ==================== DEATH TRACKING ====================
 
     @EventHandler(priority = EventPriority.MONITOR)
     public void onPlayerDeath(PlayerDeathEvent event) {
         Player player = event.getEntity();
+
+        // Notify death callback first (e.g., remove building benefit tracking)
+        if (deathCallback != null) {
+            deathCallback.onPlayerDied(player);
+        }
+
         Player killer = player.getKiller();
 
         if (killer != null) {

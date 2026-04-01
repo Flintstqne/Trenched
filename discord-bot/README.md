@@ -4,10 +4,13 @@ A Discord bot for displaying player statistics from the Entrenched Minecraft ser
 
 ## Features
 
-- `/stats <username>` - View player statistics
-- `/leaderboard <category>` - View stat leaderboards
-- `/round [id]` - View round statistics
-- `/compare <player1> <player2>` - Compare two players
+- `/stats <username>` — Full player stat card (combat, territory, objectives, building, participation)
+- `/leaderboard <category>` — Top-player leaderboards across 15 stat categories
+- `/round [id]` — Round summary with team breakdowns and MVP
+- `/rounds` — List all recorded rounds at a glance
+- `/compare <player1> <player2>` — Side-by-side player comparison with win/loss tally
+- `/team <red|blue> [round]` — Team aggregate statistics
+- `/server` — Check if the game server API is online
 
 ## Setup
 
@@ -117,4 +120,3 @@ The bot uses these API endpoints:
 ### Rate limiting
 
 The API has a default rate limit of 60 requests per minute. If you're hitting limits, consider caching responses or reducing command usage.
-

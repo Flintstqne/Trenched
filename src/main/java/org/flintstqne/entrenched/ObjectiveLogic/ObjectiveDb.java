@@ -152,6 +152,12 @@ public final class ObjectiveDb implements AutoCloseable {
                 st.executeUpdate("ALTER TABLE registered_buildings RENAME COLUMN type TO building_type");
             }
         }
+
+        if (!columns.contains("bed_count")) {
+            try (Statement st = connection.createStatement()) {
+                st.executeUpdate("ALTER TABLE registered_buildings ADD COLUMN bed_count INTEGER NOT NULL DEFAULT 0");
+            }
+        }
     }
 
     @Override
@@ -586,8 +592,8 @@ public final class ObjectiveDb implements AutoCloseable {
               anchor_x, anchor_y, anchor_z,
               min_x, min_y, min_z, max_x, max_y, max_z,
               total_score, structure_score, interior_score, access_score, signature_score, context_score,
-              variant, registered_at, last_validated_at, invalidated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              variant, bed_count, registered_at, last_validated_at, invalidated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(objective_id) DO UPDATE SET
               region_id = excluded.region_id,
               round_id = excluded.round_id,
@@ -610,6 +616,7 @@ public final class ObjectiveDb implements AutoCloseable {
               signature_score = excluded.signature_score,
               context_score = excluded.context_score,
               variant = excluded.variant,
+              bed_count = excluded.bed_count,
               last_validated_at = excluded.last_validated_at,
               invalidated_at = excluded.invalidated_at
             """;
@@ -637,9 +644,10 @@ public final class ObjectiveDb implements AutoCloseable {
             ps.setDouble(20, detection.signatureScore());
             ps.setDouble(21, detection.contextScore());
             ps.setString(22, detection.variant());
-            ps.setLong(23, now);
+            ps.setInt(23, detection.bedCount());
             ps.setLong(24, now);
-            ps.setNull(25, Types.INTEGER);
+            ps.setLong(25, now);
+            ps.setNull(26, Types.INTEGER);
             ps.executeUpdate();
         } catch (SQLException e) {
             throw new RuntimeException("Failed to upsert registered building", e);
@@ -849,7 +857,8 @@ public final class ObjectiveDb implements AutoCloseable {
                 rs.getString("variant"),
                 rs.getLong("registered_at"),
                 rs.getLong("last_validated_at"),
-                invalidatedAt
+                invalidatedAt,
+                rs.getInt("bed_count")
         );
     }
 }

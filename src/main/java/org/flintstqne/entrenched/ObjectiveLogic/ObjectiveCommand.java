@@ -194,7 +194,8 @@ public class ObjectiveCommand implements CommandExecutor, TabCompleter {
                         Math.pow(obj.locationX() - player.getLocation().getX(), 2) +
                         Math.pow(obj.locationZ() - player.getLocation().getZ(), 2)
                 );
-                objLine = objLine.append(Component.text(" (" + dist + "m away)")
+                objLine = objLine.append(Component.text(" (" + dist + "m away — "
+                                + obj.locationX() + ", " + obj.locationY() + ", " + obj.locationZ() + ")")
                         .color(NamedTextColor.GRAY));
             }
 
@@ -220,6 +221,28 @@ public class ObjectiveCommand implements CommandExecutor, TabCompleter {
             }
             player.sendMessage(Component.text("    " + description)
                     .color(NamedTextColor.GRAY));
+
+            // For building-type objectives (outpost, watchtower, garrison),
+            // show the full requirements checklist as subpoints.
+            if (BuildingType.fromObjectiveType(obj.type()).isPresent()) {
+                objectiveService.getBuildingDetectionResult(obj.id()).ifPresent(detection -> {
+                    List<String> checklist = detection.getChecklist();
+                    for (String line : checklist) {
+                        if (line.isEmpty()) continue;
+                        // Lines may contain legacy §-color codes from getChecklist()
+                        boolean done = line.startsWith("✓") || line.contains("✓");
+                        boolean isHeader = line.startsWith("§");
+                        if (isHeader) {
+                            // Variant headers / guide lines — render with legacy codes
+                            player.sendMessage(net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer
+                                    .legacySection().deserialize("      " + line));
+                        } else {
+                            NamedTextColor color = done ? NamedTextColor.GREEN : NamedTextColor.RED;
+                            player.sendMessage(Component.text("      " + line).color(color));
+                        }
+                    }
+                });
+            }
         }
 
         // Footer with tip
@@ -362,6 +385,19 @@ public class ObjectiveCommand implements CommandExecutor, TabCompleter {
 
             player.sendMessage(Component.text("  " + detection.summary())
                     .color(detection.valid() ? NamedTextColor.GREEN : NamedTextColor.GRAY));
+
+            // Show checklist for building objectives (includes variant guide for garrisons)
+            List<String> checklist = detection.getChecklist();
+            if (!checklist.isEmpty()) {
+                player.sendMessage(Component.text("─── Checklist ───")
+                        .color(NamedTextColor.DARK_GRAY));
+                for (String line : checklist) {
+                    if (line.isEmpty()) continue;
+                    // Use legacy color codes in the checklist strings (§ codes)
+                    player.sendMessage(net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer
+                            .legacySection().deserialize("  " + line));
+                }
+            }
         });
 
         objectiveService.getRegisteredBuilding(obj.id()).ifPresent(building -> {
@@ -506,8 +542,20 @@ public class ObjectiveCommand implements CommandExecutor, TabCompleter {
                         .color(NamedTextColor.YELLOW)
                         .append(Component.text(building.anchorX() + ", " + building.anchorZ())
                                 .color(NamedTextColor.WHITE))
-                        .append(Component.text(") to repair!")
+                        .append(Component.text(") to repair:")
                                 .color(NamedTextColor.YELLOW)));
+
+                // Show specific failing requirements from the last detection result
+                objectiveService.getBuildingDetectionResult(building.objectiveId()).ifPresent(detection -> {
+                    java.util.List<String> checklist = detection.getChecklist();
+                    for (String cl : checklist) {
+                        if (cl.isEmpty()) continue;
+                        boolean failing = cl.startsWith("✗") || cl.contains("✗");
+                        if (failing) {
+                            player.sendMessage(Component.text("      " + cl).color(NamedTextColor.RED));
+                        }
+                    }
+                });
                 continue;
             }
 

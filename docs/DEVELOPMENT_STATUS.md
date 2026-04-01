@@ -345,7 +345,7 @@ A spawn-based travel system tied to the "Build Garrison Quarters" objective.
 | **Spawn Map Item** | ✅ Complete | Players receive a map item after respawning at team spawn |
 | **Garrison Selection GUI** | ✅ Complete | Right-click map to open inventory GUI showing all friendly garrisons |
 | **Teleport to Garrison** | ✅ Complete | Click a garrison in GUI to teleport there |
-| **Teleport Cooldown** | ✅ Complete | 60-second cooldown between garrison teleports |
+| **Teleport Cooldown** | ✅ Complete | 600-second (10 min) cooldown between garrison teleports |
 | **Spawn Map Distance Limit** | ✅ Complete | Map disappears if player moves 50+ blocks from spawn |
 | **Garrison Capacity** | ✅ Complete | Limited teleports per minute based on bed count (3-6/min) |
 | **Garrison Variants** | ✅ Complete | Different garrison types provide buffs on arrival |
@@ -382,7 +382,7 @@ A spawn-based travel system tied to the "Build Garrison Quarters" objective.
    - Click garrison to teleport
    - Capacity usage incremented
    - Variant buff applied on arrival
-   - 60-second cooldown applied
+   - 600-second (10 min) cooldown applied
 
 4. **Map Expiry**
    - Map disappears if player moves 50+ blocks from spawn location

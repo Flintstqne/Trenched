@@ -7,6 +7,8 @@ import org.bukkit.block.Block;
 import org.bukkit.block.Container;
 import org.bukkit.block.data.BlockData;
 import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.meta.PotionMeta;
+import org.bukkit.potion.PotionType;
 import org.flintstqne.entrenched.ConfigManager;
 
 import java.util.ArrayDeque;
@@ -218,15 +220,17 @@ public final class BuildingDetector {
     private List<Set<BlockPos>> mergeNearbyComponents(List<Set<BlockPos>> components) {
         if (components.size() <= 1) return components;
 
-        // Build a spatial index for fast proximity lookups
-        // Key: (x>>1, y>>1, z>>1) -> list of component indices
+        // Build a spatial index for fast proximity lookups.
+        // Key: raw block coordinate -> list of component indices whose blocks are within 2 of that position.
+        // Each block in component i is written to all positions in the ±2 neighbourhood around it.
+        // The query phase then does a single exact lookup of the query block's coordinate;
+        // if component i wrote to that coordinate, the two blocks are ≤2 apart.
         Map<Long, List<Integer>> spatialIndex = new HashMap<>();
         for (int i = 0; i < components.size(); i++) {
             for (BlockPos pos : components.get(i)) {
-                // Index by 2-block cells to efficiently find neighbors within distance 2
-                for (int dx = -1; dx <= 1; dx++) {
-                    for (int dy = -1; dy <= 1; dy++) {
-                        for (int dz = -1; dz <= 1; dz++) {
+                for (int dx = -2; dx <= 2; dx++) {
+                    for (int dy = -2; dy <= 2; dy++) {
+                        for (int dz = -2; dz <= 2; dz++) {
                             long key = packPos(pos.x + dx, pos.y + dy, pos.z + dz);
                             spatialIndex.computeIfAbsent(key, k -> new ArrayList<>()).add(i);
                         }
@@ -301,7 +305,7 @@ public final class BuildingDetector {
         return switch (type) {
             case OUTPOST -> scoreOutpost(world, objective, bounds, stats, interior);
             case WATCHTOWER -> scoreWatchtower(world, objective, bounds, stats);
-            case GARRISON -> scoreGarrison(bounds, stats, interior, team);
+            case GARRISON -> scoreGarrison(world, bounds, stats, interior, team);
         };
     }
 
@@ -370,7 +374,7 @@ public final class BuildingDetector {
 
         return result(BuildingType.OUTPOST, valid, total, OUTPOST_REQUIRED_SCORE,
                 structureScore, interiorScore, accessScore, signatureScore, contextScore,
-                variant.variant, summary, stats.structuralBlocks, stats.footprint, bounds);
+                variant.variant, summary, stats.structuralBlocks, stats.footprint, 0, bounds);
     }
 
     private BuildingDetectionResult scoreWatchtower(World world, RegionObjective objective, Bounds bounds,
@@ -429,15 +433,15 @@ public final class BuildingDetector {
 
         return result(BuildingType.WATCHTOWER, valid, total, WATCHTOWER_REQUIRED_SCORE,
                 structureScore, interiorScore, accessScore, signatureScore, contextScore,
-                "Watchtower", summary, stats.structuralBlocks, stats.footprint, bounds);
+                "Watchtower", summary, stats.structuralBlocks, stats.footprint, 0, bounds);
     }
 
-    private BuildingDetectionResult scoreGarrison(Bounds bounds, ComponentStats stats,
+    private BuildingDetectionResult scoreGarrison(World world, Bounds bounds, ComponentStats stats,
                                                   InteriorStats interior, String team) {
         debug("  [GARRISON] Scoring component at bounds %d,%d,%d to %d,%d,%d",
             bounds.minX, bounds.minY, bounds.minZ, bounds.maxX, bounds.maxY, bounds.maxZ);
 
-        VariantScore variant = detectGarrisonVariant(stats);
+        VariantScore variant = detectGarrisonVariant(world, bounds, stats);
         int countedBeds = team == null || team.isBlank() ? stats.beds : stats.teamBeds;
 
         debug("  [GARRISON] Stats: structural=%d (need 34), floor=%d (need 12), interior=%d (need 10)",
@@ -493,12 +497,12 @@ public final class BuildingDetector {
         }
 
         String summary = valid
-                ? "Valid garrison" + (variant.variant.equals("Barracks") ? "" : " (" + variant.variant + ")")
+                ? "Valid garrison" + (variant.variant.equals("Basic Garrison") ? "" : " (" + variant.variant + ")")
                 : "Garrison needs " + String.join(", ", failures) + ".";
 
         return result(BuildingType.GARRISON, valid, total, GARRISON_REQUIRED_SCORE,
                 structureScore, interiorScore, accessScore, signatureScore, contextScore,
-                variant.variant, summary, stats.structuralBlocks, stats.footprint, bounds);
+                variant.variant, summary, stats.structuralBlocks, stats.footprint, countedBeds, bounds);
     }
 
     private ComponentStats collectComponentStats(World world, Set<BlockPos> component, Bounds bounds, String team) {
@@ -917,37 +921,122 @@ public final class BuildingDetector {
         return new VariantScore("Standard", 2.0);
     }
 
-    private VariantScore detectGarrisonVariant(ComponentStats stats) {
-        // Variants from docs:
-        // Medical Garrison: + Brewing Stand, + 3 Healing Potions in chest
-        // Armory Garrison: + Anvil, + 5 Iron Ingots in chest
-        // Command Garrison: + Lectern with written book, + Banner
-        // Supply Garrison: + 4 Chests (min 64 items total)
-        // Fortified Garrison: + 20 defensive blocks (walls/fences) surrounding
+    private VariantScore detectGarrisonVariant(World world, Bounds bounds, ComponentStats stats) {
+        // Variants do NOT stack — first match in priority order wins.
+        // Priority: Fortified > Command > Supply > Armory > Medical > Basic
 
-        // Check for Fortified (most defensive blocks)
+        // === PHASE 1: Scan container contents within building bounds ===
+        // Mirrors detectOutpostVariant Phase 2: iterate the bounds (+2 margin) and read every Container.
+        int scanMinX = bounds.minX - 2, scanMaxX = bounds.maxX + 2;
+        int scanMinY = bounds.minY - 1, scanMaxY = bounds.maxY + 2;
+        int scanMinZ = bounds.minZ - 2, scanMaxZ = bounds.maxZ + 2;
+
+        int healingPotions = 0;  // potions of Healing or Regeneration — for Medical
+        int ironIngots    = 0;   // iron ingots — for Armory
+        int totalItems    = 0;   // all items summed — for Supply (need 64+)
+
+        for (int sx = scanMinX; sx <= scanMaxX; sx++) {
+            for (int sz = scanMinZ; sz <= scanMaxZ; sz++) {
+                for (int sy = Math.max(world.getMinHeight(), scanMinY);
+                         sy <= Math.min(world.getMaxHeight() - 1, scanMaxY); sy++) {
+
+                    if (!(world.getBlockAt(sx, sy, sz).getState() instanceof Container container)) continue;
+
+                    for (ItemStack item : container.getInventory().getContents()) {
+                        if (item == null || item.getType().isAir()) continue;
+
+                        int amount = item.getAmount();
+                        totalItems += amount;
+
+                        Material itemType = item.getType();
+
+                        if (itemType == Material.IRON_INGOT) {
+                            ironIngots += amount;
+                        }
+
+                        if ((itemType == Material.POTION
+                                || itemType == Material.SPLASH_POTION
+                                || itemType == Material.LINGERING_POTION)
+                                && item.getItemMeta() instanceof PotionMeta meta) {
+                            PotionType base = meta.getBasePotionType();
+                            if (base == PotionType.HEALING
+                                    || base == PotionType.STRONG_HEALING
+                                    || base == PotionType.REGENERATION
+                                    || base == PotionType.LONG_REGENERATION
+                                    || base == PotionType.STRONG_REGENERATION) {
+                                healingPotions += amount;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        debug("  [GARRISON-VARIANT] Chest scan: healingPotions=%d/3, ironIngots=%d/5, totalItems=%d/64",
+                healingPotions, ironIngots, totalItems);
+        debug("  [GARRISON-VARIANT] Block counts: defensive=%d/20, military=%d/2, storage=%d/4, utility=%d",
+                stats.defensiveBlocks, stats.militaryUtilityBlocks, stats.storageBlocks, stats.utilityBlocks);
+
+        // === PHASE 2: Full variants (first match wins) ===
+
+        // Fortified: 20+ defensive blocks — no chest item needed
         if (stats.defensiveBlocks >= 20) {
             return new VariantScore("Fortified Garrison", 10.0);
         }
 
-        // Check for Command (military utility = lecterns, banners)
+        // Command: 2+ military utility (lectern + banner) — no extra chest item needed;
+        // the combination of command-post furniture IS the signal
         if (stats.militaryUtilityBlocks >= 2) {
             return new VariantScore("Command Garrison", 9.0);
         }
 
-        // Check for Supply (lots of storage)
+        // Supply: 4+ storage containers AND 64+ items total across all storage
         if (stats.storageBlocks >= 4) {
-            return new VariantScore("Supply Garrison", 8.0);
+            if (totalItems >= 64) {
+                return new VariantScore("Supply Garrison", 8.0);
+            }
+            int needed = 64 - totalItems;
+            debug("  [GARRISON-VARIANT] Supply blocks met but only %d/64 items", totalItems);
+            return new VariantScore("Supply Garrison (needs " + needed + " more items in chests)", 5.5);
         }
 
-        // Check for Armory (anvils count as military utility)
+        // Armory: anvil/smithing table + storage + 5 iron ingots in chest
         if (stats.militaryUtilityBlocks >= 1 && stats.storageBlocks >= 1) {
-            return new VariantScore("Armory Garrison", 7.0);
+            if (ironIngots >= 5) {
+                return new VariantScore("Armory Garrison", 7.0);
+            }
+            int needed = 5 - ironIngots;
+            debug("  [GARRISON-VARIANT] Armory blocks met but only %d/5 iron ingots", ironIngots);
+            return new VariantScore("Armory Garrison (needs " + needed + " more iron ingots in chest)", 5.5);
         }
 
-        // Check for Medical (brewing stands count as utility)
-        if (stats.utilityBlocks >= 2 && stats.storageBlocks >= 1) {
-            return new VariantScore("Medical Garrison", 6.0);
+        // Medical: brewing stand/cauldron + storage + 3 healing/regen potions in chest
+        if (stats.utilityBlocks >= 1 && stats.storageBlocks >= 1) {
+            if (healingPotions >= 3) {
+                return new VariantScore("Medical Garrison", 6.0);
+            }
+            int needed = 3 - healingPotions;
+            debug("  [GARRISON-VARIANT] Medical blocks met but only %d/3 healing potions", healingPotions);
+            return new VariantScore("Medical Garrison (needs " + needed + " more healing potions in chest)", 5.5);
+        }
+
+        // === PHASE 3: Near-miss hints (one hint, highest achievable tier) ===
+
+        if (stats.defensiveBlocks >= 10) {
+            int needed = 20 - stats.defensiveBlocks;
+            return new VariantScore("Fortified Garrison (needs " + needed + " more wall/fence blocks)", 5.5);
+        }
+
+        if (stats.militaryUtilityBlocks == 1 && stats.storageBlocks == 0) {
+            return new VariantScore("Armory Garrison (needs a chest + 5 iron ingots)", 5.5);
+        }
+
+        if (stats.storageBlocks == 3) {
+            return new VariantScore("Supply Garrison (needs 1 more chest and items)", 5.5);
+        }
+
+        if (stats.utilityBlocks >= 1 && stats.storageBlocks == 0) {
+            return new VariantScore("Medical Garrison (needs a chest + 3 healing potions)", 5.5);
         }
 
         return new VariantScore("Basic Garrison", 5.0);
@@ -957,7 +1046,7 @@ public final class BuildingDetector {
     private BuildingDetectionResult result(BuildingType type, boolean valid, double total, double required,
                                            double structureScore, double interiorScore, double accessScore,
                                            double signatureScore, double contextScore, String variant, String summary,
-                                           int structuralBlocks, int footprint, Bounds bounds) {
+                                           int structuralBlocks, int footprint, int bedCount, Bounds bounds) {
         double progressRatio = valid ? 1.0 : clamp(total / required, 0.0, 0.99);
         return new BuildingDetectionResult(
                 type,
@@ -979,13 +1068,14 @@ public final class BuildingDetector {
                 bounds.minZ,
                 bounds.maxX,
                 bounds.maxY,
-                bounds.maxZ
+                bounds.maxZ,
+                bedCount
         );
     }
 
     private BuildingDetectionResult invalid(BuildingType type, String summary) {
         return new BuildingDetectionResult(type, false, 0.0, 0.0, 100.0,
-                0.0, 0.0, 0.0, 0.0, 0.0, "None", summary, 0, 0, 0, 0, 0, 0, 0, 0);
+                0.0, 0.0, 0.0, 0.0, 0.0, "None", summary, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     }
 
     private boolean isRelevantMaterial(Material material, BuildingType type) {
@@ -996,6 +1086,7 @@ public final class BuildingDetector {
                 || isEntranceMaterial(material)
                 || isAccessMaterial(material)
                 || isGeneralUtility(material)
+                || isMilitaryUtility(material)
                 || (type == BuildingType.WATCHTOWER && material == Material.CAMPFIRE);
     }
 
@@ -1095,9 +1186,12 @@ public final class BuildingDetector {
         if (material == null) {
             return false;
         }
+        // Civilian crafting/utility — Medical Garrison indicator (BREWING_STAND)
+        // No overlap with isMilitaryUtility
         return switch (material) {
-            case FURNACE, BLAST_FURNACE, SMOKER, ANVIL, CHIPPED_ANVIL, DAMAGED_ANVIL,
-                    CARTOGRAPHY_TABLE, STONECUTTER, LOOM, CAULDRON, BREWING_STAND -> true;
+            case FURNACE, BLAST_FURNACE, SMOKER,
+                    CARTOGRAPHY_TABLE, STONECUTTER, LOOM,
+                    CAULDRON, BREWING_STAND -> true;
             default -> false;
         };
     }
@@ -1106,10 +1200,13 @@ public final class BuildingDetector {
         if (material == null) {
             return false;
         }
+        // Combat/tactical — Armory (ANVIL) and Command (LECTERN + banner) indicators
+        // No overlap with isGeneralUtility
         return switch (material) {
-            case FURNACE, BLAST_FURNACE, SMOKER, ANVIL, CHIPPED_ANVIL, DAMAGED_ANVIL,
-                    SMITHING_TABLE, GRINDSTONE, FLETCHING_TABLE, BREWING_STAND, CAULDRON -> true;
-            default -> false;
+            case ANVIL, CHIPPED_ANVIL, DAMAGED_ANVIL,
+                    SMITHING_TABLE, GRINDSTONE, FLETCHING_TABLE,
+                    LECTERN -> true;
+            default -> material.name().endsWith("_BANNER"); // wall and standing banners
         };
     }
 
@@ -1118,9 +1215,14 @@ public final class BuildingDetector {
             return false;
         }
         String name = material.name();
-        // Walls, fences, iron bars, etc.
-        return name.contains("WALL") || name.contains("FENCE") || name.contains("IRON_BARS")
-                || name.contains("COBWEB") || name.contains("CHAIN");
+        // endsWith("_WALL")  → matches cobblestone_wall, stone_brick_wall, etc.
+        //                      excludes WALL_TORCH, WALL_SIGN, WALL_BANNER (all start with "WALL_")
+        // endsWith("_FENCE") → matches oak_fence, nether_brick_fence, etc.
+        //                      excludes FENCE_GATE (entrance block, not defensive)
+        return name.endsWith("_WALL") || name.endsWith("_FENCE")
+                || material == Material.IRON_BARS
+                || material == Material.COBWEB
+                || name.equals("CHAIN");  // Material.CHAIN added 1.16 — use name to avoid snapshot resolution issues
     }
 
     private boolean isBed(Material material) {

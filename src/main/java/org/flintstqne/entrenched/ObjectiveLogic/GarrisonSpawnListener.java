@@ -5,7 +5,9 @@ import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.Action;
+import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.inventory.InventoryClickEvent;
+import org.bukkit.event.player.PlayerDropItemEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.inventory.ItemStack;
 
@@ -49,5 +51,19 @@ public class GarrisonSpawnListener implements Listener {
         }
 
         garrisonSpawnService.handleGarrisonMenuClick(player, clickedItem);
+    }
+
+    /** Prevent the garrison map from being dropped with Q. */
+    @EventHandler(priority = EventPriority.HIGH)
+    public void onPlayerDrop(PlayerDropItemEvent event) {
+        if (garrisonSpawnService.isSpawnMap(event.getItemDrop().getItemStack())) {
+            event.setCancelled(true);
+        }
+    }
+
+    /** Strip garrison maps from death drops — they are consumed or expire, never loot. */
+    @EventHandler(priority = EventPriority.HIGH)
+    public void onPlayerDeath(PlayerDeathEvent event) {
+        event.getDrops().removeIf(item -> garrisonSpawnService.isSpawnMap(item));
     }
 }

@@ -111,3 +111,10 @@ buildNumber.properties
 
 # Common working directory
 run/
+
+# Discord bot secrets (never commit real tokens/keys)
+discord-bot/config.yaml
+discord-bot/__pycache__/
+discord-bot/cogs/__pycache__/
+discord-bot/utils/__pycache__/
+

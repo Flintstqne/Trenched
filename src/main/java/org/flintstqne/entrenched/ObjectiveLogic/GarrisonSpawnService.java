@@ -52,13 +52,14 @@ public class GarrisonSpawnService {
     // Key for identifying spawn map items
     private final NamespacedKey SPAWN_MAP_KEY;
     private final NamespacedKey SPAWN_LOCATION_KEY;
+    private final NamespacedKey GARRISON_ID_KEY;
 
     // Track players with active spawn maps - playerId -> spawn location
     private final Map<UUID, Location> playersWithSpawnMaps = new ConcurrentHashMap<>();
 
     // Track teleport cooldowns - playerId -> cooldown expiry timestamp
     private final Map<UUID, Long> teleportCooldowns = new ConcurrentHashMap<>();
-    private static final long TELEPORT_COOLDOWN_MS = 600000; // 600 seconds
+    private static final long TELEPORT_COOLDOWN_MS = 600000; // 600 seconds (10 minutes)
 
     // Track garrison teleport capacity - buildingId -> teleports this minute
     private final Map<Integer, Integer> garrisonTeleportsThisMinute = new ConcurrentHashMap<>();
@@ -85,6 +86,7 @@ public class GarrisonSpawnService {
 
         this.SPAWN_MAP_KEY = new NamespacedKey(plugin, "garrison_spawn_map");
         this.SPAWN_LOCATION_KEY = new NamespacedKey(plugin, "spawn_location");
+        this.GARRISON_ID_KEY = new NamespacedKey(plugin, "garrison_id");
     }
 
     /**
@@ -231,6 +233,25 @@ public class GarrisonSpawnService {
             return;
         }
 
+        // Refresh the lore on the held spawn map so the garrison count is current
+        ItemStack heldMap = player.getInventory().getItemInOffHand();
+        if (isSpawnMap(heldMap)) {
+            ItemMeta mapMeta = heldMap.getItemMeta();
+            if (mapMeta != null) {
+                List<Component> freshLore = new ArrayList<>();
+                freshLore.add(Component.text("Right-click to open garrison menu", NamedTextColor.GRAY)
+                        .decoration(net.kyori.adventure.text.format.TextDecoration.ITALIC, false));
+                freshLore.add(Component.empty());
+                freshLore.add(Component.text(garrisons.size() + " garrison(s) available", NamedTextColor.YELLOW)
+                        .decoration(net.kyori.adventure.text.format.TextDecoration.ITALIC, false));
+                freshLore.add(Component.empty());
+                freshLore.add(Component.text("Disappears after moving " + SPAWN_MAP_DISTANCE_LIMIT + " blocks", NamedTextColor.RED)
+                        .decoration(net.kyori.adventure.text.format.TextDecoration.ITALIC, false));
+                mapMeta.lore(freshLore);
+                heldMap.setItemMeta(mapMeta);
+            }
+        }
+
         // Create GUI - size based on number of garrisons (minimum 9, max 54)
         int size = Math.min(54, Math.max(9, ((garrisons.size() / 9) + 1) * 9));
         Inventory gui = Bukkit.createInventory(null, size, Component.text(GARRISON_GUI_TITLE));
@@ -257,7 +278,7 @@ public class GarrisonSpawnService {
 
         if (meta != null) {
             String regionName = getRegionDisplayName(garrison.regionId());
-            String variantText = garrison.variant() != null && !garrison.variant().equals("Barracks")
+            String variantText = garrison.variant() != null && !garrison.variant().equals("Basic Garrison")
                     ? " (" + garrison.variant() + ")" : "";
 
             meta.displayName(Component.text(regionName + variantText, NamedTextColor.GOLD)
@@ -295,7 +316,7 @@ public class GarrisonSpawnService {
 
             // Store garrison ID in PDC for click handling
             meta.getPersistentDataContainer().set(
-                    new NamespacedKey(plugin, "garrison_id"),
+                    GARRISON_ID_KEY,
                     PersistentDataType.INTEGER,
                     garrison.objectiveId()
             );
@@ -315,13 +336,13 @@ public class GarrisonSpawnService {
         }
 
         ItemMeta meta = clickedItem.getItemMeta();
-        if (!meta.getPersistentDataContainer().has(new NamespacedKey(plugin, "garrison_id"),
+        if (!meta.getPersistentDataContainer().has(GARRISON_ID_KEY,
                 PersistentDataType.INTEGER)) {
             return;
         }
 
         int garrisonId = meta.getPersistentDataContainer().get(
-                new NamespacedKey(plugin, "garrison_id"),
+                GARRISON_ID_KEY,
                 PersistentDataType.INTEGER
         );
 
@@ -461,20 +482,27 @@ public class GarrisonSpawnService {
      * Gets the teleport capacity for a garrison based on bed count.
      */
     private int getGarrisonCapacity(RegisteredBuilding garrison) {
-        // Base capacity from docs
-        // 3 beds = 3/min, 4-5 = 4/min, 6-8 = 5/min, 9+ = 6/min
-        // We approximate based on score - higher score = more beds
-        double score = garrison.signatureScore();
-        if (score >= 20) {
-            return 6; // 9+ beds
+        // Capacity tiers driven by actual bed count, not signatureScore
+        // (signatureScore bundles beds + storage and caps bed contribution at 12,
+        //  making tier thresholds unreliable for distinguishing 3-bed from 9-bed garrisons)
+        int beds = garrison.bedCount();
+        int base;
+        if (beds >= 9) {
+            base = 6;       // 9+ beds → 6/min
+        } else if (beds >= 6) {
+            base = 5;       // 6-8 beds → 5/min
+        } else if (beds >= 4) {
+            base = 4;       // 4-5 beds → 4/min
+        } else {
+            base = 3;       // 3 beds (minimum) → 3/min
         }
-        if (score >= 16) {
-            return 5; // 6-8 beds
+
+        // Supply Garrison grants +1 spawn capacity
+        if ("Supply Garrison".equals(garrison.variant())) {
+            base += 1;
         }
-        if (score >= 12) {
-            return 4; // 4-5 beds
-        }
-        return 3; // 3 beds
+
+        return base;
     }
 
     /**
@@ -482,7 +510,7 @@ public class GarrisonSpawnService {
      */
     private void applyGarrisonVariantBuffs(Player player, RegisteredBuilding garrison) {
         String variant = garrison.variant();
-        if (variant == null || variant.equals("Barracks")) {
+        if (variant == null || variant.equals("Basic Garrison")) {
             return; // No buffs for basic garrison
         }
 
@@ -594,8 +622,11 @@ public class GarrisonSpawnService {
                 continue;
             }
 
-            // Check distance
-            double distance = spawnLoc.distance(currentLoc);
+            // Check distance — 2D only (ignore Y) so a player moving vertically
+            // (e.g. dropping into a hole near spawn) doesn't lose the map
+            double dx = spawnLoc.getX() - currentLoc.getX();
+            double dz = spawnLoc.getZ() - currentLoc.getZ();
+            double distance = Math.sqrt(dx * dx + dz * dz);
             if (distance > SPAWN_MAP_DISTANCE_LIMIT) {
                 removeSpawnMap(player);
                 player.sendMessage(Component.text("Your Garrison Map has disappeared - you moved too far from spawn.",

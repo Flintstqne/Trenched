@@ -167,6 +167,12 @@ public class StatDb {
             // Verify tables exist
             logger.info("[Stats] Verifying tables...");
             verifyTablesExist(stmt);
+
+            // Migrate: add any StatCategory columns that are missing from existing tables.
+            // CREATE TABLE IF NOT EXISTS won't add new columns to a table that already
+            // exists, so we need ALTER TABLE for stats added after the initial DB creation
+            // (e.g. blocks_placed, blocks_broken).
+            migrateStatColumns(stmt);
         }
     }
 
@@ -180,6 +186,40 @@ public class StatDb {
             } catch (SQLException e) {
                 logger.severe("[Stats] Table missing or invalid: " + table + " - " + e.getMessage());
             }
+        }
+    }
+
+    /**
+     * Adds missing StatCategory columns to player_stats and round_player_stats.
+     * Safe to run every startup — only adds columns that don't already exist.
+     */
+    private void migrateStatColumns(Statement stmt) {
+        migrateTableColumns(stmt, "player_stats");
+        migrateTableColumns(stmt, "round_player_stats");
+    }
+
+    private void migrateTableColumns(Statement stmt, String tableName) {
+        try {
+            // Collect existing column names
+            Set<String> existing = new HashSet<>();
+            try (ResultSet rs = stmt.executeQuery("PRAGMA table_info(" + tableName + ")")) {
+                while (rs.next()) {
+                    existing.add(rs.getString("name").toLowerCase());
+                }
+            }
+
+            // Add any StatCategory columns that are missing
+            for (StatCategory cat : StatCategory.values()) {
+                if (!existing.contains(cat.getKey().toLowerCase())) {
+                    stmt.execute("ALTER TABLE " + tableName
+                            + " ADD COLUMN " + cat.getKey() + " REAL DEFAULT 0");
+                    logger.info("[Stats] Migrated: added column '"
+                            + cat.getKey() + "' to " + tableName);
+                }
+            }
+        } catch (SQLException e) {
+            logger.warning("[Stats] Column migration failed for "
+                    + tableName + ": " + e.getMessage());
         }
     }
 

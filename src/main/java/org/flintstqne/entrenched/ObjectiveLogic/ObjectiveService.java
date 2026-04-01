@@ -385,7 +385,7 @@ public interface ObjectiveService {
 
     @FunctionalInterface
     interface BuildingDestroyedCallback {
-        void onBuildingDestroyed(RegisteredBuilding building, String regionName);
+        void onBuildingDestroyed(RegisteredBuilding building, String regionName, BuildingDetectionResult detectionResult);
     }
 }
 

@@ -1,18 +1,25 @@
 package org.flintstqne.entrenched.StatLogic;
 
 import org.bukkit.Bukkit;
+import org.bukkit.Material;
+import org.bukkit.entity.AbstractArrow;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
+import org.bukkit.event.block.BlockBreakEvent;
+import org.bukkit.event.block.BlockPlaceEvent;
 import org.bukkit.event.entity.EntityDamageByEntityEvent;
 import org.bukkit.event.entity.PlayerDeathEvent;
+import org.bukkit.event.entity.ProjectileLaunchEvent;
+import org.bukkit.event.player.PlayerItemConsumeEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.inventory.meta.PotionMeta;
 import org.bukkit.plugin.java.JavaPlugin;
+import org.bukkit.potion.PotionEffectType;
 import org.bukkit.scheduler.BukkitTask;
 import org.flintstqne.entrenched.ConfigManager;
-import org.flintstqne.entrenched.DivisionLogic.Division;
 import org.flintstqne.entrenched.DivisionLogic.DivisionMember;
 import org.flintstqne.entrenched.DivisionLogic.DivisionRole;
 import org.flintstqne.entrenched.DivisionLogic.DivisionService;
@@ -214,6 +221,83 @@ public class StatListener implements Listener {
 
         DivisionMember member = membershipOpt.get();
         return member.role() == DivisionRole.COMMANDER || member.role() == DivisionRole.OFFICER;
+    }
+
+    // === HIGH-FREQUENCY EVENT LISTENERS ===
+    // These are safe to track on every event because incrementStat() is a
+    // lock-free enqueue into a ConcurrentLinkedQueue — zero DB I/O.
+    // The queue is flushed to the database in a single batch every 10 seconds.
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onProjectileLaunch(ProjectileLaunchEvent event) {
+        if (!(event.getEntity() instanceof AbstractArrow arrow)) return;
+        if (!(arrow.getShooter() instanceof Player player)) return;
+
+        int roundId = getCurrentRoundId();
+        if (roundId < 0) return;
+
+        statService.incrementStat(player.getUniqueId(), player.getName(),
+                StatCategory.BULLETS_SHOT, 1, roundId);
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onPlayerItemConsume(PlayerItemConsumeEvent event) {
+        if (event.getItem().getType() != Material.POTION) return;
+
+        Player player = event.getPlayer();
+        int roundId = getCurrentRoundId();
+        if (roundId < 0) return;
+
+        statService.incrementStat(player.getUniqueId(), player.getName(),
+                StatCategory.POTIONS_USED, 1, roundId);
+
+        // Detect healing potions
+        if (event.getItem().getItemMeta() instanceof PotionMeta meta) {
+            boolean isHealing = false;
+
+            // Check custom effects
+            if (meta.hasCustomEffects()) {
+                isHealing = meta.getCustomEffects().stream().anyMatch(e ->
+                        e.getType().equals(PotionEffectType.INSTANT_HEALTH) ||
+                        e.getType().equals(PotionEffectType.REGENERATION));
+            }
+
+            // Check base potion type
+            if (!isHealing) {
+                try {
+                    var baseType = meta.getBasePotionType();
+                    if (baseType != null) {
+                        String name = baseType.name().toUpperCase();
+                        isHealing = name.contains("HEAL") || name.contains("REGEN");
+                    }
+                } catch (Exception ignored) {}
+            }
+
+            if (isHealing) {
+                statService.incrementStat(player.getUniqueId(), player.getName(),
+                        StatCategory.HEALING_POTIONS_USED, 1, roundId);
+            }
+        }
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onBlockBreak(BlockBreakEvent event) {
+        Player player = event.getPlayer();
+        int roundId = getCurrentRoundId();
+        if (roundId < 0) return;
+
+        statService.incrementStat(player.getUniqueId(), player.getName(),
+                StatCategory.BLOCKS_BROKEN, 1, roundId);
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onBlockPlace(BlockPlaceEvent event) {
+        Player player = event.getPlayer();
+        int roundId = getCurrentRoundId();
+        if (roundId < 0) return;
+
+        statService.incrementStat(player.getUniqueId(), player.getName(),
+                StatCategory.BLOCKS_PLACED, 1, roundId);
     }
 
     /**
