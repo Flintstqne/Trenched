@@ -186,17 +186,20 @@ public interface RegionService {
      */
     List<String> getRegionsThatWouldBeCutOff(String regionId, String team);
 
-    // ==================== DEFENSE OPERATIONS ====================
+    // ==================== DEFENSE OPERATIONS (deprecated) ====================
 
     /**
      * Gets the total defense bonus for a region.
-     * Includes time-held bonus and structure bonus.
+     * @deprecated Defense bonuses removed — only fortification period provides protection.
      */
+    @Deprecated
     double getDefenseBonus(String regionId);
 
     /**
      * Updates defense structure count for a region.
+     * @deprecated Defense structures removed — method is a no-op.
      */
+    @Deprecated
     void updateDefenseStructures(String regionId, int count);
 
     // ==================== DECAY ====================

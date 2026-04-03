@@ -60,6 +60,8 @@ public final class BuildingDetector {
         }
     }
 
+    private static final int EXPANSION_SHELL_DEPTH = 8;
+
     public BuildingDetectionResult scan(World world, RegionObjective objective, BuildingType type, String team) {
         debug("=== SCAN START: %s in region %s ===", type.name(), objective.regionId());
 
@@ -68,7 +70,8 @@ public final class BuildingDetector {
             return invalid(type, "Objective is missing an anchor location.");
         }
 
-        int radius = config.getBuildingDetectionRadius();
+        int initialRadius = config.getBuildingDetectionRadius();
+        int maxExpansionRadius = config.getBuildingMaxExpansionRadius();
         int verticalRange = config.getBuildingDetectionVerticalRange();
 
         // Watchtowers need extended vertical range since they are tall structures
@@ -79,8 +82,6 @@ public final class BuildingDetector {
         int centerX = objective.locationX();
         int centerY = objective.locationY();
         int centerZ = objective.locationZ();
-
-        debug("Scanning at %d,%d,%d (radius=%d, vertical=%d)", centerX, centerY, centerZ, radius, verticalRange);
 
         // Determine if we should use player-placed block filtering
         boolean useTracking = config.isPlayerPlacedTrackingEnabled()
@@ -96,36 +97,54 @@ public final class BuildingDetector {
                     !config.isPlayerPlacedTrackingEnabled() ? "disabled" : "region not loaded");
         }
 
-        Map<BlockPos, Material> relevantBlocks = new HashMap<>();
         int minY = Math.max(world.getMinHeight(), centerY - verticalRange);
         int maxY = Math.min(world.getMaxHeight() - 1, centerY + verticalRange);
 
-        for (int x = centerX - radius; x <= centerX + radius; x++) {
-            for (int z = centerZ - radius; z <= centerZ + radius; z++) {
-                int dx = x - centerX;
-                int dz = z - centerZ;
-                if ((dx * dx) + (dz * dz) > radius * radius) {
-                    continue;
-                }
+        // ── Adaptive scan: start at initial radius, expand outward if blocks touch the edge ──
+        Map<BlockPos, Material> relevantBlocks = new HashMap<>();
+        int scannedRadius = 0;
+        int currentRadius = initialRadius;
 
-                for (int y = minY; y <= maxY; y++) {
-                    Material material = world.getBlockAt(x, y, z).getType();
-                    if (isRelevantMaterial(material, type)) {
-                        if (useTracking) {
-                            // Only count blocks that are inherently player-placed OR tracked as placed
-                            if (isInherentlyPlayerPlaced(material)
-                                    || (placedSet != null && placedSet.contains(PlacedBlockTracker.packCoord(x, y, z)))) {
-                                relevantBlocks.put(new BlockPos(x, y, z), material);
-                            }
-                        } else {
-                            // Fallback: material-based filtering (current behavior with LOG exclusion)
-                            relevantBlocks.put(new BlockPos(x, y, z), material);
-                        }
-                    }
+        while (currentRadius <= maxExpansionRadius) {
+            int before = relevantBlocks.size();
+            scanShell(world, type, centerX, centerZ, minY, maxY,
+                      scannedRadius, currentRadius, useTracking, placedSet, relevantBlocks);
+            int found = relevantBlocks.size() - before;
+
+            debug("Scan shell r=%d→%d: found %d new blocks (%d total)",
+                  scannedRadius, currentRadius, found, relevantBlocks.size());
+
+            // Check if any block is within 2 blocks of the current scan edge.
+            // If so, the building may extend beyond — expand.
+            int edgeThresholdSq = (currentRadius - 2) * (currentRadius - 2);
+            boolean hasEdgeBlocks = false;
+            for (BlockPos pos : relevantBlocks.keySet()) {
+                int dx = pos.x - centerX;
+                int dz = pos.z - centerZ;
+                if (dx * dx + dz * dz >= edgeThresholdSq) {
+                    hasEdgeBlocks = true;
+                    break;
                 }
             }
+
+            scannedRadius = currentRadius;
+
+            if (!hasEdgeBlocks) {
+                debug("No blocks near edge at r=%d — stopping expansion", currentRadius);
+                break;
+            }
+
+            if (currentRadius >= maxExpansionRadius) {
+                debug("Hit max expansion radius %d — stopping", maxExpansionRadius);
+                break;
+            }
+
+            // Expand
+            currentRadius = Math.min(currentRadius + EXPANSION_SHELL_DEPTH, maxExpansionRadius);
+            debug("Blocks near edge detected — expanding to r=%d", currentRadius);
         }
 
+        debug("Scanning at %d,%d,%d (effective radius=%d, vertical=%d)", centerX, centerY, centerZ, scannedRadius, verticalRange);
         debug("Found %d relevant blocks in scan area", relevantBlocks.size());
 
         if (relevantBlocks.isEmpty()) {
@@ -136,21 +155,27 @@ public final class BuildingDetector {
         List<Set<BlockPos>> components = splitIntoComponents(relevantBlocks.keySet());
 
         // Merge nearby components that are separated by natural terrain (sand, dirt, grass, etc.)
-        // Two components are merged if any of their blocks are within 2 blocks of each other
+        // Two components are merged if any of their blocks are within MERGE_DISTANCE blocks of each other
         components = mergeNearbyComponents(components);
 
-        int anchorRadius = Math.max(5, radius / 2);
+        // Use the actual scanned radius for anchoring — any block within the scan area is
+        // "near enough" to the objective.
+        int anchorRadius = scannedRadius;
+        int totalRelevantBlockCount = relevantBlocks.size();
 
         debug("Split into %d connected components (anchor radius=%d)", components.size(), anchorRadius);
 
-        BuildingDetectionResult best = invalid(type, "No structure is anchored close enough to the objective.");
-        int componentIndex = 0;
+        // Collect all anchored components and merge them into a single building.
+        // In the scan area around one objective, all player-placed blocks are almost
+        // certainly part of the same building, even if flood-fill couldn't connect them
+        // (e.g. rooms separated by natural ground floors, wide doorways, or hallways).
+        Set<BlockPos> mergedBuilding = new HashSet<>();
         int anchoredCount = 0;
+        int componentIndex = 0;
 
         for (Set<BlockPos> component : components) {
             componentIndex++;
 
-            // Debug: show Y range of this component
             int compMinY = component.stream().mapToInt(p -> p.y).min().orElse(0);
             int compMaxY = component.stream().mapToInt(p -> p.y).max().orElse(0);
             debug("Component #%d (%d blocks): Y range %d to %d (height span: %d)",
@@ -162,24 +187,67 @@ public final class BuildingDetector {
             }
 
             anchoredCount++;
-            debug("Component #%d (%d blocks): Anchored - evaluating...", componentIndex, component.size());
-
-            BuildingDetectionResult result = evaluateComponent(world, objective, type, team, component);
-            debug("Component #%d score: %.1f/%.1f (%s)",
-                componentIndex, result.totalScore(), result.requiredScore(),
-                result.valid() ? "VALID" : result.summary());
-
-            if (result.totalScore() > best.totalScore()) {
-                best = result;
-                debug("Component #%d is new best", componentIndex);
-            }
+            debug("Component #%d (%d blocks): Anchored — merging into building", componentIndex, component.size());
+            mergedBuilding.addAll(component);
         }
 
-        debug("RESULT: %d anchored components, best score=%.1f, valid=%s",
-            anchoredCount, best.totalScore(), best.valid());
+        if (mergedBuilding.isEmpty()) {
+            debug("RESULT: No anchored components found");
+            debug("=== SCAN END: %s ===", type.name());
+            return invalid(type, "No structure is anchored close enough to the objective.");
+        }
+
+        debug("Merged %d anchored components into single building (%d blocks)", anchoredCount, mergedBuilding.size());
+
+        ScanContext scanCtx = new ScanContext(components.size(), anchoredCount, totalRelevantBlockCount);
+        BuildingDetectionResult best = evaluateComponent(world, objective, type, team, mergedBuilding, useTracking, placedSet, scanCtx);
+
+        debug("RESULT: %d anchored components (%d blocks), score=%.1f, valid=%s",
+            anchoredCount, mergedBuilding.size(), best.totalScore(), best.valid());
         debug("=== SCAN END: %s ===", type.name());
 
         return best;
+    }
+
+    /**
+     * Scans a cylindrical shell between {@code innerRadius} (exclusive) and {@code outerRadius}
+     * (inclusive) around ({@code centerX}, {@code centerZ}), adding any relevant player-built
+     * blocks to {@code out}. On the first call pass {@code innerRadius = 0} to scan the full circle.
+     */
+    private void scanShell(World world, BuildingType type, int centerX, int centerZ,
+                           int minY, int maxY, int innerRadius, int outerRadius,
+                           boolean useTracking, Set<Long> placedSet,
+                           Map<BlockPos, Material> out) {
+        int innerSq = innerRadius * innerRadius;
+        int outerSq = outerRadius * outerRadius;
+
+        for (int x = centerX - outerRadius; x <= centerX + outerRadius; x++) {
+            for (int z = centerZ - outerRadius; z <= centerZ + outerRadius; z++) {
+                int dx = x - centerX;
+                int dz = z - centerZ;
+                int distSq = dx * dx + dz * dz;
+
+                // Only scan the shell (skip already-scanned interior)
+                if (distSq > outerSq || distSq <= innerSq) continue;
+
+                for (int y = minY; y <= maxY; y++) {
+                    Material material = world.getBlockAt(x, y, z).getType();
+                    if (!isRelevantMaterial(material, type)) continue;
+
+                    if (useTracking) {
+                        if (isInherentlyPlayerPlaced(material)
+                                || isProcessedConstruction(material)
+                                || (placedSet != null && placedSet.contains(PlacedBlockTracker.packCoord(x, y, z)))) {
+                            out.put(new BlockPos(x, y, z), material);
+                        }
+                    } else {
+                        if (isInherentlyPlayerPlaced(material) || isProcessedConstruction(material)) {
+                            out.put(new BlockPos(x, y, z), material);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     private List<Set<BlockPos>> splitIntoComponents(Set<BlockPos> positions) {
@@ -211,26 +279,29 @@ public final class BuildingDetector {
     }
 
     /**
-     * Merges components that are within 2 blocks of each other.
+     * Merges components that are within {@code MERGE_DISTANCE} blocks of each other.
      * This handles cases where natural terrain (sand, dirt, grass) breaks
      * flood-fill connectivity between walls, floors, and roofs.
      * For example: walls placed on sand don't connect to a placed floor
-     * because sand isn't a construction material.
+     * because sand isn't a construction material.  A distance of 3 covers
+     * 2-block-wide doorways and moderate hallway gaps between rooms.
      */
+    private static final int MERGE_DISTANCE = 3;
+
     private List<Set<BlockPos>> mergeNearbyComponents(List<Set<BlockPos>> components) {
         if (components.size() <= 1) return components;
 
         // Build a spatial index for fast proximity lookups.
-        // Key: raw block coordinate -> list of component indices whose blocks are within 2 of that position.
-        // Each block in component i is written to all positions in the ±2 neighbourhood around it.
+        // Key: raw block coordinate -> list of component indices whose blocks are within MERGE_DISTANCE of that position.
+        // Each block in component i is written to all positions in the ±MERGE_DISTANCE neighbourhood around it.
         // The query phase then does a single exact lookup of the query block's coordinate;
-        // if component i wrote to that coordinate, the two blocks are ≤2 apart.
+        // if component i wrote to that coordinate, the two blocks are ≤MERGE_DISTANCE apart (Chebyshev).
         Map<Long, List<Integer>> spatialIndex = new HashMap<>();
         for (int i = 0; i < components.size(); i++) {
             for (BlockPos pos : components.get(i)) {
-                for (int dx = -2; dx <= 2; dx++) {
-                    for (int dy = -2; dy <= 2; dy++) {
-                        for (int dz = -2; dz <= 2; dz++) {
+                for (int dx = -MERGE_DISTANCE; dx <= MERGE_DISTANCE; dx++) {
+                    for (int dy = -MERGE_DISTANCE; dy <= MERGE_DISTANCE; dy++) {
+                        for (int dz = -MERGE_DISTANCE; dz <= MERGE_DISTANCE; dz++) {
                             long key = packPos(pos.x + dx, pos.y + dy, pos.z + dz);
                             spatialIndex.computeIfAbsent(key, k -> new ArrayList<>()).add(i);
                         }
@@ -286,10 +357,14 @@ public final class BuildingDetector {
 
     private boolean isAnchoredNearObjective(Set<BlockPos> component, int centerX, int centerY, int centerZ, int anchorRadius) {
         int radiusSquared = anchorRadius * anchorRadius;
+        // Use a more generous vertical tolerance than the horizontal anchor radius.
+        // Objectives can end up slightly underground or at a different elevation
+        // than the player's build. Allow the full vertical scan range for matching.
+        int verticalTolerance = Math.max(anchorRadius, config.getBuildingDetectionVerticalRange());
         for (BlockPos pos : component) {
             int dx = pos.x - centerX;
             int dz = pos.z - centerZ;
-            if ((dx * dx) + (dz * dz) <= radiusSquared && Math.abs(pos.y - centerY) <= anchorRadius) {
+            if ((dx * dx) + (dz * dz) <= radiusSquared && Math.abs(pos.y - centerY) <= verticalTolerance) {
                 return true;
             }
         }
@@ -297,20 +372,21 @@ public final class BuildingDetector {
     }
 
     private BuildingDetectionResult evaluateComponent(World world, RegionObjective objective, BuildingType type,
-                                                      String team, Set<BlockPos> component) {
+                                                      String team, Set<BlockPos> component,
+                                                      boolean useTracking, Set<Long> placedSet, ScanContext scanCtx) {
         Bounds bounds = Bounds.from(component);
         ComponentStats stats = collectComponentStats(world, component, bounds, team);
-        InteriorStats interior = analyzeInterior(world, bounds);
+        InteriorStats interior = analyzeInterior(world, bounds, useTracking, placedSet);
 
         return switch (type) {
-            case OUTPOST -> scoreOutpost(world, objective, bounds, stats, interior);
-            case WATCHTOWER -> scoreWatchtower(world, objective, bounds, stats);
-            case GARRISON -> scoreGarrison(world, bounds, stats, interior, team);
+            case OUTPOST -> scoreOutpost(world, objective, bounds, stats, interior, scanCtx);
+            case WATCHTOWER -> scoreWatchtower(world, objective, bounds, stats, scanCtx);
+            case GARRISON -> scoreGarrison(world, bounds, stats, interior, team, scanCtx);
         };
     }
 
     private BuildingDetectionResult scoreOutpost(World world, RegionObjective objective, Bounds bounds,
-                                                 ComponentStats stats, InteriorStats interior) {
+                                                  ComponentStats stats, InteriorStats interior, ScanContext scanCtx) {
         debug("  [OUTPOST] Scoring component at bounds %d,%d,%d to %d,%d,%d",
             bounds.minX, bounds.minY, bounds.minZ, bounds.maxX, bounds.maxY, bounds.maxZ);
 
@@ -374,35 +450,38 @@ public final class BuildingDetector {
 
         return result(BuildingType.OUTPOST, valid, total, OUTPOST_REQUIRED_SCORE,
                 structureScore, interiorScore, accessScore, signatureScore, contextScore,
-                variant.variant, summary, stats.structuralBlocks, stats.footprint, 0, bounds);
+                variant.variant, summary, stats.structuralBlocks, stats.footprint, 0, bounds, scanCtx);
     }
 
     private BuildingDetectionResult scoreWatchtower(World world, RegionObjective objective, Bounds bounds,
-                                                    ComponentStats stats) {
+                                                    ComponentStats stats, ScanContext scanCtx) {
         debug("  [WATCHTOWER] Scoring component at bounds %d,%d,%d to %d,%d,%d",
             bounds.minX, bounds.minY, bounds.minZ, bounds.maxX, bounds.maxY, bounds.maxZ);
 
         TowerStats tower = analyzeTower(world, objective, stats, bounds);
 
-        debug("  [WATCHTOWER] Tower analysis: height=%d (need 14), platform=%d (need 4), base=%d (need 3)",
-            tower.height, tower.platformSize, tower.baseFootprint);
-        debug("  [WATCHTOWER] Tower ratios: access=%.0f%% (need 55%%), support=%.0f%% (need 65%%), openness=%.0f%% (need 35%%)",
-            tower.accessCoverage * 100, tower.supportStrength * 100, tower.openness * 100);
+        debug("  [WATCHTOWER] Tower analysis: height=%d (need 14), platform=%d (need 9), base=%d (need 9), structural=%d (need 40)",
+            tower.height, tower.platformSize, tower.baseFootprint, stats.structuralBlocks);
+        debug("  [WATCHTOWER] Tower ratios: access=%.0f%% (need 55%%), support=%.0f%% (need 65%%), openness=%.0f%% (need 35%%), bodyDensity=%.0f%% (need 30%%)",
+            tower.accessCoverage * 100, tower.supportStrength * 100, tower.openness * 100, tower.midSectionDensity * 100);
 
         boolean enoughHeight = tower.height >= 14;
-        boolean enoughPlatform = tower.platformSize >= 4;
+        boolean enoughPlatform = tower.platformSize >= 9;
         boolean enoughAccess = tower.accessCoverage >= 0.55;
         boolean enoughSupport = tower.supportStrength >= 0.65;
         boolean enoughOpenness = tower.openness >= 0.35;
-        boolean strongBase = tower.baseFootprint >= 3;
+        boolean strongBase = tower.baseFootprint >= 9;
+        boolean enoughStructure = stats.structuralBlocks >= 40;
+        boolean enoughBody = tower.midSectionDensity >= 0.30;
 
-        double structureScore = clamp((tower.height / 16.0) * 15.0
-                + (stats.structuralBlocks / 45.0) * 10.0
-                + (tower.baseFootprint / 5.0) * 10.0, 0.0, 35.0);
+        double structureScore = clamp((tower.height / 16.0) * 12.0
+                + (stats.structuralBlocks / 50.0) * 10.0
+                + (tower.baseFootprint / 12.0) * 8.0
+                + tower.midSectionDensity * 5.0, 0.0, 35.0);
         double interiorScore = clamp(tower.supportStrength * 15.0, 0.0, 15.0);
         double accessScore = clamp(tower.accessCoverage * 20.0
                 + Math.min(5.0, stats.entranceBlocks * 1.5), 0.0, 25.0);
-        double signatureScore = clamp((tower.platformSize / 6.0) * 15.0
+        double signatureScore = clamp((tower.platformSize / 12.0) * 15.0
                 + tower.openness * 10.0, 0.0, 25.0);
         double contextScore = clamp((tower.skyExposure * 10.0) + (tower.exposedTerrain ? 5.0 : 0.0), 0.0, 15.0);
 
@@ -413,31 +492,33 @@ public final class BuildingDetector {
         debug("  [WATCHTOWER] TOTAL: %.1f/%.1f (%.0f%%)", total, WATCHTOWER_REQUIRED_SCORE, (total / WATCHTOWER_REQUIRED_SCORE) * 100);
 
         List<String> failures = new ArrayList<>();
-        if (!enoughHeight) failures.add("more height");
-        if (!enoughPlatform) failures.add("a larger top platform");
-        if (!enoughAccess) failures.add("a climbable route");
-        if (!enoughSupport) failures.add("stronger support under the tower");
+        if (!enoughHeight) failures.add("more height (need 14+ blocks tall)");
+        if (!enoughPlatform) failures.add("a larger top platform (need 3x3 minimum)");
+        if (!enoughAccess) failures.add("a climbable route (ladder or stairs)");
+        if (!enoughSupport) failures.add("stronger structural support");
         if (!enoughOpenness) failures.add("clearer top visibility");
-        if (!strongBase) failures.add("a thicker base");
+        if (!strongBase) failures.add("a wider base (need 3x3 minimum footprint)");
+        if (!enoughStructure) failures.add("more structural blocks (walls, supports)");
+        if (!enoughBody) failures.add("a wider tower body (not just a column — add walls or supports through the midsection)");
         if (total < WATCHTOWER_REQUIRED_SCORE) failures.add("a more convincing tower shape");
 
         boolean valid = failures.isEmpty();
 
         if (!valid) {
             debug("  [WATCHTOWER] FAILING CHECKS: %s", String.join(", ", failures));
-            debug("  [WATCHTOWER] Check details: height=%b, platform=%b, access=%b, support=%b, openness=%b, base=%b, score=%b",
-                enoughHeight, enoughPlatform, enoughAccess, enoughSupport, enoughOpenness, strongBase, total >= WATCHTOWER_REQUIRED_SCORE);
+            debug("  [WATCHTOWER] Check details: height=%b, platform=%b, access=%b, support=%b, openness=%b, base=%b, structure=%b, body=%b, score=%b",
+                enoughHeight, enoughPlatform, enoughAccess, enoughSupport, enoughOpenness, strongBase, enoughStructure, enoughBody, total >= WATCHTOWER_REQUIRED_SCORE);
         }
 
         String summary = valid ? "Valid watchtower" : "Watchtower needs " + String.join(", ", failures) + ".";
 
         return result(BuildingType.WATCHTOWER, valid, total, WATCHTOWER_REQUIRED_SCORE,
                 structureScore, interiorScore, accessScore, signatureScore, contextScore,
-                "Watchtower", summary, stats.structuralBlocks, stats.footprint, 0, bounds);
+                "Watchtower", summary, stats.structuralBlocks, stats.footprint, 0, bounds, scanCtx);
     }
 
     private BuildingDetectionResult scoreGarrison(World world, Bounds bounds, ComponentStats stats,
-                                                  InteriorStats interior, String team) {
+                                                  InteriorStats interior, String team, ScanContext scanCtx) {
         debug("  [GARRISON] Scoring component at bounds %d,%d,%d to %d,%d,%d",
             bounds.minX, bounds.minY, bounds.minZ, bounds.maxX, bounds.maxY, bounds.maxZ);
 
@@ -502,12 +583,12 @@ public final class BuildingDetector {
 
         return result(BuildingType.GARRISON, valid, total, GARRISON_REQUIRED_SCORE,
                 structureScore, interiorScore, accessScore, signatureScore, contextScore,
-                variant.variant, summary, stats.structuralBlocks, stats.footprint, countedBeds, bounds);
+                variant.variant, summary, stats.structuralBlocks, stats.footprint, countedBeds, bounds, scanCtx);
     }
 
     private ComponentStats collectComponentStats(World world, Set<BlockPos> component, Bounds bounds, String team) {
         Set<String> footprint = new HashSet<>();
-        Set<Integer> baseFootprint = new HashSet<>();
+        Set<String> baseFootprint = new HashSet<>();
         Set<Integer> accessLevels = new HashSet<>();
         int structuralBlocks = 0;
         int storageBlocks = 0;
@@ -527,7 +608,7 @@ public final class BuildingDetector {
                 structuralBlocks++;
                 footprint.add(pos.x + ":" + pos.z);
                 if (pos.y <= bounds.minY + 2) {
-                    baseFootprint.add((pos.x << 16) ^ pos.z);
+                    baseFootprint.add(pos.x + ":" + pos.z);
                 }
             }
 
@@ -576,7 +657,7 @@ public final class BuildingDetector {
         );
     }
 
-    private InteriorStats analyzeInterior(World world, Bounds bounds) {
+    private InteriorStats analyzeInterior(World world, Bounds bounds, boolean useTracking, Set<Long> placedSet) {
         int usableCells = 0;
         int interiorCells = 0;
         int roofedCells = 0;
@@ -584,9 +665,16 @@ public final class BuildingDetector {
         int openings = 0;
         Set<String> floorArea = new HashSet<>();
 
-        for (int x = bounds.minX; x <= bounds.maxX; x++) {
-            for (int z = bounds.minZ; z <= bounds.maxZ; z++) {
-                for (int y = bounds.minY; y <= bounds.maxY; y++) {
+        // Expand scan area by 1 block in each direction so that standing spaces right
+        // at the edge of the component (e.g. next to a door) are still evaluated.
+        int scanMinX = bounds.minX - 1, scanMaxX = bounds.maxX + 1;
+        int scanMinZ = bounds.minZ - 1, scanMaxZ = bounds.maxZ + 1;
+        // Expand Y downward by 1 to catch standing positions whose floor is bounds.minY
+        int scanMinY = bounds.minY - 1, scanMaxY = bounds.maxY + 1;
+
+        for (int x = scanMinX; x <= scanMaxX; x++) {
+            for (int z = scanMinZ; z <= scanMaxZ; z++) {
+                for (int y = Math.max(world.getMinHeight(), scanMinY); y <= Math.min(world.getMaxHeight() - 2, scanMaxY); y++) {
                     Material feetBlock = world.getBlockAt(x, y, z).getType();
                     Material headBlock = world.getBlockAt(x, y + 1, z).getType();
 
@@ -595,15 +683,13 @@ public final class BuildingDetector {
                         continue;
                     }
 
-                    // Check for floor below (can be 1 or 2 blocks below for multi-level or raised buildings)
+                    // Check for floor below (can be 1 or 2 blocks below for multi-level or raised buildings).
+                    // Accept any solid block as floor — natural ground (dirt, grass, stone) is a
+                    // valid surface to stand on. The building quality comes from the walls & roof,
+                    // not from whether the player replaced the ground.
                     Material floor1 = world.getBlockAt(x, y - 1, z).getType();
                     Material floor2 = world.getBlockAt(x, y - 2, z).getType();
-                    boolean hasFloor = isConstructionMaterial(floor1)
-                                     || floor1.name().contains("SLAB")
-                                     || floor1.name().contains("STAIR")
-                                     || isConstructionMaterial(floor2)
-                                     || floor2.name().contains("SLAB")
-                                     || floor2.name().contains("STAIR");
+                    boolean hasFloor = isValidFloorBlock(floor1) || isValidFloorBlock(floor2);
 
                     if (!hasFloor) {
                         continue;
@@ -616,12 +702,16 @@ public final class BuildingDetector {
                     for (BlockPos neighbor : pos.horizontalNeighbors()) {
                         Material side = world.getBlockAt(neighbor.x, neighbor.y, neighbor.z).getType();
                         Material sideHead = world.getBlockAt(neighbor.x, neighbor.y + 1, neighbor.z).getType();
+                        String sideName = side.name();
+                        String sideHeadName = sideHead.name();
 
-                        // Count as wall if either level is blocked
+                        // Count as wall if either level is blocked.
+                        // Use endsWith("_WALL") / endsWith("_FENCE") to avoid matching
+                        // WALL_TORCH, WALL_SIGN, WALL_BANNER, etc.
                         boolean isWall = isConstructionMaterial(side) || isEntranceMaterial(side)
                                 || isConstructionMaterial(sideHead) || isEntranceMaterial(sideHead)
-                                || side.name().contains("FENCE") || side.name().contains("WALL")
-                                || sideHead.name().contains("FENCE") || sideHead.name().contains("WALL");
+                                || sideName.endsWith("_FENCE") || sideName.endsWith("_WALL")
+                                || sideHeadName.endsWith("_FENCE") || sideHeadName.endsWith("_WALL");
 
                         if (isWall) {
                             sideWalls++;
@@ -631,10 +721,12 @@ public final class BuildingDetector {
                     }
 
                     // Check for roof (extended range: 2-8 blocks above)
-                    boolean roof = hasRoofExtended(world, x, y, z);
+                    boolean roof = hasRoofExtended(world, x, y, z, useTracking, placedSet);
 
-                    // Only count as "usable" if it has EITHER a roof OR walls
-                    if (roof || sideWalls >= 1) {
+                    // Only count as "usable" if it has a roof OR is enclosed by 2+ walls.
+                    // Cells with just 1 wall (exterior face of the building) are typically
+                    // outdoor and should not inflate the denominator for roofCoverage.
+                    if (roof || sideWalls >= 2) {
                         usableCells++;
                     }
 
@@ -662,12 +754,28 @@ public final class BuildingDetector {
         return new InteriorStats(usableCells, interiorCells, roofedCells, floorArea.size(), roofCoverage, enclosureQuality, openings > 0);
     }
 
-    private boolean hasRoofExtended(World world, int x, int y, int z) {
+    /**
+     * Checks if a material is a valid floor surface for interior analysis.
+     * Accepts construction materials, slabs, stairs, AND natural solid ground.
+     * Natural ground (dirt, grass, stone) is a valid surface to stand on — the building
+     * quality comes from walls and roof, not from whether the player replaced the terrain.
+     */
+    private boolean isValidFloorBlock(Material material) {
+        if (material == null || material.isAir()) return false;
+        if (isConstructionMaterial(material)) return true;
+        String name = material.name();
+        if (name.contains("SLAB") || name.contains("STAIR")) return true;
+        // Accept any solid block as a floor surface (dirt, grass, stone, sand, etc.)
+        return material.isSolid();
+    }
+
+    private boolean hasRoofExtended(World world, int x, int y, int z, boolean useTracking, Set<Long> placedSet) {
         // y is the feet level where player stands (air)
         // y+1 is head level (also air for standing space)
         // Roof could be at y+2 (right above head) up to y+8 (tall ceiling)
         for (int dy = 2; dy <= 8; dy++) {
-            Material above = world.getBlockAt(x, y + dy, z).getType();
+            int roofY = y + dy;
+            Material above = world.getBlockAt(x, roofY, z).getType();
             if (above == null) continue;
 
             // Check if this is a roof-like material
@@ -676,8 +784,20 @@ public final class BuildingDetector {
 
             String name = above.name();
             if (name.contains("SLAB") || name.contains("STAIR") || name.contains("CARPET")
-                    || name.contains("GLASS") || name.contains("LEAVES")) {
+                    || name.contains("GLASS")) {
                 return true;
+            }
+
+            // Leaves only count as roof if player-placed (not natural trees).
+            // With tracking enabled: must be in the placed set.
+            // With tracking disabled: leaves are never counted (can't distinguish from trees).
+            if (name.contains("LEAVES")) {
+                if (useTracking && placedSet != null
+                        && placedSet.contains(PlacedBlockTracker.packCoord(x, roofY, z))) {
+                    return true;
+                }
+                // Natural leaves — don't count, but don't stop scanning either
+                // (there could be a real roof block above the tree canopy)
             }
         }
         return false;
@@ -687,6 +807,7 @@ public final class BuildingDetector {
         int objectiveBaseY = objective.locationY() == null ? bounds.minY : objective.locationY();
         int highestWalkableY = Integer.MIN_VALUE;
         Map<Integer, Integer> walkableByY = new HashMap<>();
+        Map<Integer, Integer> structuralByY = new HashMap<>(); // ALL construction blocks per Y level
         double exposedSides = 0.0;
         int exposedCount = 0;
         int skyVisibleCount = 0;
@@ -701,6 +822,10 @@ public final class BuildingDetector {
                     if (!isConstructionMaterial(current)) {
                         continue;
                     }
+
+                    // Count ALL structural blocks per Y for body density analysis
+                    structuralByY.merge(y, 1, Integer::sum);
+
                     Material above = world.getBlockAt(x, y + 1, z).getType();
                     // Use more lenient check - allow stairs/slabs/fences above for roofed platforms
                     if (!isWalkableAbove(above)) {
@@ -760,10 +885,29 @@ public final class BuildingDetector {
         boolean exposedTerrain = objective.locationY() != null
                 && objective.locationY() >= world.getSeaLevel() + 12;
 
-        debug("  [WATCHTOWER] Final: height=%d, platformSize=%d, openness=%.2f, access=%.2f, skyExposure=%.2f",
-              height, platformSize, openness, accessCoverage, skyExposure);
+        // Mid-section density: what fraction of body Y levels (between base+3 and platform-2)
+        // have at least 3 structural blocks? This prevents thin ladder-column cheats where
+        // only the base and top platform have any width.
+        int bodyStart = bounds.minY + 3;
+        int bodyEnd = highestWalkableY == Integer.MIN_VALUE ? bounds.minY : highestWalkableY - 2;
+        int bodyLevels = 0;
+        int denseBodyLevels = 0;
+        if (bodyEnd >= bodyStart) {
+            for (int y = bodyStart; y <= bodyEnd; y++) {
+                bodyLevels++;
+                if (structuralByY.getOrDefault(y, 0) >= 3) {
+                    denseBodyLevels++;
+                }
+            }
+        }
+        double midSectionDensity = bodyLevels <= 0 ? 0.0 : (double) denseBodyLevels / bodyLevels;
 
-        return new TowerStats(height, platformSize, openness, accessCoverage, stats.baseFootprint, supportStrength, skyExposure, exposedTerrain);
+        debug("  [WATCHTOWER] Final: height=%d, platformSize=%d, openness=%.2f, access=%.2f, skyExposure=%.2f, bodyDensity=%.0f%% (%d/%d levels)",
+              height, platformSize, openness, accessCoverage, skyExposure,
+              midSectionDensity * 100, denseBodyLevels, bodyLevels);
+
+        return new TowerStats(height, platformSize, openness, accessCoverage, stats.baseFootprint,
+                supportStrength, skyExposure, exposedTerrain, midSectionDensity);
     }
 
     private VariantScore detectOutpostVariant(World world, RegionObjective objective, Bounds bounds) {
@@ -851,66 +995,65 @@ public final class BuildingDetector {
         }
 
         // ===== Phase 3: Match variant with BOTH environment AND additional requirements =====
+        // Two-pass approach: first check for full matches (environment + items), then
+        // fall back to the best partial-match hint. This prevents a high-priority environment
+        // (e.g. water) from blocking a lower-priority but fully-matched variant (e.g. Farm).
 
-        // Fishing Outpost: Near water + Fishing Rod in chest
+        // --- Pass 1: Full matches (return immediately if found) ---
+        if (water >= 35 && hasFishingRod) {
+            return new VariantScore("Fishing Outpost", 5.0);
+        }
+        if (crops >= 18 && hasHoe) {
+            return new VariantScore("Farm Outpost", 5.0);
+        }
+        boolean isDesertEnv = sand >= 30 || biomeName.contains("DESERT") || biomeName.contains("BADLANDS");
+        if (isDesertEnv && cactusBlocks >= 3 && hasWaterBucket) {
+            return new VariantScore("Desert Outpost", 5.0);
+        }
+        boolean isMountainEnv = objective.locationY() != null && objective.locationY() >= world.getSeaLevel() + 22;
+        if (isMountainEnv && hasLadder && woolBlocks >= 3) {
+            return new VariantScore("Mountain Outpost", 5.0);
+        }
+        boolean isMiningEnv = ore >= 6 || (objective.locationY() != null && objective.locationY() <= world.getSeaLevel() - 10);
+        if (isMiningEnv && hasFurnace && hasPickaxe) {
+            return new VariantScore("Mining Outpost", 5.0);
+        }
+        boolean isForestEnv = (logs + leaves) >= 40 || biomeName.contains("FOREST") || biomeName.contains("TAIGA") || biomeName.contains("JUNGLE");
+        if (isForestEnv && logsInChests >= 10 && hasAxe) {
+            return new VariantScore("Forest Outpost", 5.0);
+        }
+
+        // --- Pass 2: No full match — show hint for the best partially-matched variant ---
         if (water >= 35) {
-            if (hasFishingRod) {
-                return new VariantScore("Fishing Outpost", 5.0);
-            }
             debug("  [VARIANT] Fishing environment detected but missing Fishing Rod in chest");
             return new VariantScore("Fishing Outpost (needs Fishing Rod in chest)", 3.0);
         }
-
-        // Farm Outpost: Crops nearby + Hoe in chest
         if (crops >= 18) {
-            if (hasHoe) {
-                return new VariantScore("Farm Outpost", 5.0);
-            }
             debug("  [VARIANT] Farm environment detected but missing Hoe in chest");
             return new VariantScore("Farm Outpost (needs Hoe in chest)", 3.0);
         }
-
-        // Desert Outpost: Desert biome/sand + 3+ cactus + Water Bucket in chest
-        if (sand >= 30 || biomeName.contains("DESERT") || biomeName.contains("BADLANDS")) {
-            if (cactusBlocks >= 3 && hasWaterBucket) {
-                return new VariantScore("Desert Outpost", 5.0);
-            }
+        if (isDesertEnv) {
             List<String> missing = new ArrayList<>();
             if (cactusBlocks < 3) missing.add("3+ Cactus blocks");
             if (!hasWaterBucket) missing.add("Water Bucket in chest");
             debug("  [VARIANT] Desert environment detected but missing: cactus=%d/3, waterBucket=%b", cactusBlocks, hasWaterBucket);
             return new VariantScore("Desert Outpost (needs " + String.join(", ", missing) + ")", 3.0);
         }
-
-        // Mountain Outpost: High elevation + Ladder access + 3+ wool blocks
-        if (objective.locationY() != null && objective.locationY() >= world.getSeaLevel() + 22) {
-            if (hasLadder && woolBlocks >= 3) {
-                return new VariantScore("Mountain Outpost", 5.0);
-            }
+        if (isMountainEnv) {
             List<String> missing = new ArrayList<>();
             if (!hasLadder) missing.add("Ladder");
             if (woolBlocks < 3) missing.add("3+ Wool blocks");
             debug("  [VARIANT] Mountain environment detected but missing: ladder=%b, wool=%d/3", hasLadder, woolBlocks);
             return new VariantScore("Mountain Outpost (needs " + String.join(", ", missing) + ")", 3.0);
         }
-
-        // Mining Outpost: Near ore/underground + Furnace + Pickaxe in chest
-        if (ore >= 6 || (objective.locationY() != null && objective.locationY() <= world.getSeaLevel() - 10)) {
-            if (hasFurnace && hasPickaxe) {
-                return new VariantScore("Mining Outpost", 5.0);
-            }
+        if (isMiningEnv) {
             List<String> missing = new ArrayList<>();
             if (!hasFurnace) missing.add("Furnace");
             if (!hasPickaxe) missing.add("Pickaxe in chest");
             debug("  [VARIANT] Mining environment detected but missing: furnace=%b, pickaxe=%b", hasFurnace, hasPickaxe);
             return new VariantScore("Mining Outpost (needs " + String.join(", ", missing) + ")", 3.0);
         }
-
-        // Forest Outpost: Forest biome/trees + 10+ logs in chest + Axe in chest
-        if ((logs + leaves) >= 40 || biomeName.contains("FOREST") || biomeName.contains("TAIGA") || biomeName.contains("JUNGLE")) {
-            if (logsInChests >= 10 && hasAxe) {
-                return new VariantScore("Forest Outpost", 5.0);
-            }
+        if (isForestEnv) {
             List<String> missing = new ArrayList<>();
             if (logsInChests < 10) missing.add("10+ Logs in chest");
             if (!hasAxe) missing.add("Axe in chest");
@@ -1043,10 +1186,13 @@ public final class BuildingDetector {
     }
 
 
+    private record ScanContext(int componentCount, int anchoredCount, int totalRelevantBlocks) {}
+
     private BuildingDetectionResult result(BuildingType type, boolean valid, double total, double required,
                                            double structureScore, double interiorScore, double accessScore,
                                            double signatureScore, double contextScore, String variant, String summary,
-                                           int structuralBlocks, int footprint, int bedCount, Bounds bounds) {
+                                           int structuralBlocks, int footprint, int bedCount, Bounds bounds,
+                                           ScanContext scanCtx) {
         double progressRatio = valid ? 1.0 : clamp(total / required, 0.0, 0.99);
         return new BuildingDetectionResult(
                 type,
@@ -1069,13 +1215,16 @@ public final class BuildingDetector {
                 bounds.maxX,
                 bounds.maxY,
                 bounds.maxZ,
-                bedCount
+                bedCount,
+                scanCtx.componentCount,
+                scanCtx.anchoredCount,
+                scanCtx.totalRelevantBlocks
         );
     }
 
     private BuildingDetectionResult invalid(BuildingType type, String summary) {
         return new BuildingDetectionResult(type, false, 0.0, 0.0, 100.0,
-                0.0, 0.0, 0.0, 0.0, 0.0, "None", summary, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+                0.0, 0.0, 0.0, 0.0, 0.0, "None", summary, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     }
 
     private boolean isRelevantMaterial(Material material, BuildingType type) {
@@ -1087,6 +1236,7 @@ public final class BuildingDetector {
                 || isAccessMaterial(material)
                 || isGeneralUtility(material)
                 || isMilitaryUtility(material)
+                || isDefensiveBlock(material)
                 || (type == BuildingType.WATCHTOWER && material == Material.CAMPFIRE);
     }
 
@@ -1111,13 +1261,110 @@ public final class BuildingDetector {
                     SMITHING_TABLE, GRINDSTONE, FLETCHING_TABLE,
                     BOOKSHELF, LANTERN, SOUL_LANTERN,
                     TORCH, WALL_TORCH, SOUL_TORCH, SOUL_WALL_TORCH,
-                    REDSTONE_TORCH, REDSTONE_WALL_TORCH -> true;
+                    REDSTONE_TORCH, REDSTONE_WALL_TORCH,
+                    // Glass blocks (never generate naturally)
+                    GLASS, GLASS_PANE, TINTED_GLASS,
+                    // Iron bars can generate in some structures but are overwhelmingly player-placed
+                    IRON_BARS -> true;
             default -> {
                 String name = material.name();
-                // Beds and banners are always player-placed
-                yield name.contains("_BED") || name.contains("_BANNER");
+                // Beds, banners, stained glass, stained glass panes, and carpet are always player-placed
+                yield name.contains("_BED") || name.contains("_BANNER")
+                        || name.contains("STAINED_GLASS")
+                        || name.contains("_CARPET");
             }
         };
+    }
+
+    /**
+     * Returns true for materials that require crafting or smelting — their presence
+     * proves intentional player construction even without placed-block tracking.
+     * Examples: planks (crafted from logs), bricks (smelted from clay), polished stone
+     * variants, concrete, cut sandstone, etc.
+     */
+    private boolean isProcessedConstruction(Material material) {
+        if (material == null) return false;
+        String name = material.name();
+
+        // Cobblestone (obtained by mining stone — never generates as natural terrain)
+        if (material == Material.COBBLESTONE || material == Material.MOSSY_COBBLESTONE
+                || material == Material.COBBLED_DEEPSLATE) {
+            return true;
+        }
+
+        // Sandstone / Red Sandstone (crafted from 4 sand)
+        if (material == Material.SANDSTONE || material == Material.RED_SANDSTONE) return true;
+
+        // Planks (crafted from logs)
+        if (name.endsWith("_PLANKS")) return true;
+
+        // Slabs and stairs (crafted from base materials)
+        if (name.contains("SLAB") || name.contains("STAIRS")) return true;
+
+        // Bricks (smelted/crafted)
+        if (material == Material.BRICKS || material == Material.BRICK_WALL
+                || material == Material.BRICK_SLAB || material == Material.BRICK_STAIRS
+                || material == Material.NETHER_BRICKS || material == Material.NETHER_BRICK_WALL
+                || material == Material.NETHER_BRICK_SLAB || material == Material.NETHER_BRICK_STAIRS
+                || material == Material.RED_NETHER_BRICKS || material == Material.RED_NETHER_BRICK_WALL
+                || material == Material.RED_NETHER_BRICK_SLAB || material == Material.RED_NETHER_BRICK_STAIRS) {
+            return true;
+        }
+
+        // Polished/cut/smooth variants (require stonecutting or smelting)
+        if (name.startsWith("POLISHED_") || name.startsWith("SMOOTH_")
+                || name.startsWith("CUT_") || name.startsWith("CHISELED_")) {
+            return true;
+        }
+
+        // Stone bricks (crafted from stone)
+        if (name.contains("STONE_BRICK")) return true;
+
+        // Concrete (formed from concrete powder + water)
+        if (name.endsWith("_CONCRETE") && !name.contains("POWDER")) return true;
+
+        // Terracotta (smelted from clay) — includes glazed and colored variants
+        if (name.contains("TERRACOTTA")) return true;
+
+        // Stripped logs/wood (player stripped)
+        if (name.contains("STRIPPED_")) return true;
+
+        // Quartz blocks (crafted from nether quartz)
+        if (name.contains("QUARTZ") && !name.equals("NETHER_QUARTZ_ORE")) return true;
+
+        // Prismarine variants (crafted)
+        if (material == Material.PRISMARINE_BRICKS || material == Material.DARK_PRISMARINE) return true;
+
+        // Purpur (crafted from chorus fruit)
+        if (name.contains("PURPUR")) return true;
+
+        // Glass (smelted from sand)
+        if (name.contains("GLASS")) return true;
+
+        // Wool (crafted/dyed)
+        if (name.contains("WOOL")) return true;
+
+        // Copper variants that are waxed or cut (player-processed)
+        if (name.startsWith("WAXED_") || name.startsWith("CUT_COPPER")) return true;
+
+        // Wall blocks — ALL wall-type blocks are crafted via stonecutter/crafting table
+        // Uses endsWith to avoid matching WALL_TORCH, WALL_SIGN, etc.
+        if (name.endsWith("_WALL")) return true;
+
+        // Fence blocks — ALL fences are crafted (OAK_FENCE, NETHER_BRICK_FENCE, etc.)
+        // Uses endsWith to avoid matching FENCE_GATE (entrance block)
+        if (name.endsWith("_FENCE")) return true;
+
+        // Metal/mineral blocks (crafted from 9 ingots/gems)
+        if (material == Material.IRON_BLOCK || material == Material.GOLD_BLOCK
+                || material == Material.DIAMOND_BLOCK || material == Material.EMERALD_BLOCK
+                || material == Material.LAPIS_BLOCK || material == Material.REDSTONE_BLOCK
+                || material == Material.COPPER_BLOCK || material == Material.RAW_IRON_BLOCK
+                || material == Material.RAW_GOLD_BLOCK || material == Material.RAW_COPPER_BLOCK) {
+            return true;
+        }
+
+        return false;
     }
 
     private boolean isConstructionMaterial(Material material) {
@@ -1356,7 +1603,8 @@ public final class BuildingDetector {
             int baseFootprint,
             double supportStrength,
             double skyExposure,
-            boolean exposedTerrain
+            boolean exposedTerrain,
+            double midSectionDensity
     ) {
     }
 

@@ -209,37 +209,40 @@ regions:
 
 ## 🗼 Watchtower
 
-**Objective:** Build a structure 15+ blocks tall with clear line of sight.
+**Objective:** Build a structure 14+ blocks tall with clear line of sight. Spawns on the surface at elevated terrain.
 
 ### Construction Requirements
 | Component | Quantity | Purpose |
 |-----------|----------|---------|
-| Height | 15+ blocks | Elevated vantage point |
-| Platform | 3x3 minimum | Standing area at top |
+| Height | 14+ blocks | Elevated vantage point |
+| Platform | 3x3 minimum (9 blocks) | Standing area at top |
+| Base | 3x3 minimum footprint | Stable foundation |
+| Structural Blocks | 40+ | Walls, supports, floors |
+| Body | 30%+ mid-levels with 3+ blocks | Prevents thin ladder-column cheats |
 | Ladder/Stairs | Required | Access to top |
 | Line of Sight | Required | Clear view of surroundings |
 
 ### Gameplay Benefits
 
-1. **Enemy Detection Radar**
-   - Players at top of watchtower get enhanced enemy detection
-   - Shows enemy players within range on compass/action bar
-   - Range scales with height
+1. **Spyglass Enemy Spotting**
+   - Players on the watchtower platform can use a **Spyglass** to spot enemies
+   - Spotted enemies receive the **Glowing** effect for 20 seconds (visible through walls to all players)
+   - 30-second cooldown between spots per player
+   - Detection range scales with tower height (64–160 blocks)
 
-2. **Map Reveal**
-   - Standing on watchtower reveals enemy positions in region
-   - Information shared with team members in same region
-   - Updates every 3 seconds while occupied
+2. **Team Alert on Spot**
+   - When a player spots an enemy through the spyglass, teammates **in the same region** are notified
+   - "[Watchtower] PlayerName spotted EnemyName in RegionName! [Glowing 20s]"
+   - The spotted enemy is also warned: "You've been spotted by a watchtower!"
 
-3. **Early Warning System**
-   - When enemies enter the region, team gets notification
-   - "⚠ Enemy spotted in [Region Name]!" message
-   - Only triggers when watchtower is occupied by a player
+3. **No Passive Radar**
+   - The watchtower does **not** automatically alert when enemies are nearby
+   - A player must actively use the spyglass to spot and alert — requires presence and effort
 
 ### Strategic Value
 - **Information warfare** - Knowledge of enemy positions is powerful
 - **Defensive structure** - Provides overwatch for defenders
-- **Requires presence** - Must have player stationed to be effective
+- **Requires active presence** - Must have player stationed and using spyglass to be effective
 
 ### Detection Mechanics (Score-Based System)
 
@@ -247,17 +250,17 @@ regions:
 
 | Category | Max Points | Requirements |
 |----------|------------|--------------|
-| Structure | 35 | Height (14+ blocks), structural blocks (45+), base footprint (3+) |
+| Structure | 35 | Height (14+ blocks), structural blocks (40+), base footprint (9+), body density (30%+) |
 | Interior | 15 | Support strength (65%+ structural support under tower) |
 | Access | 25 | Access coverage (55%+ climbable route via ladders/stairs) |
-| Signature | 25 | Platform size (4+ blocks at top), openness (35%+ clear visibility) |
+| Signature | 25 | Platform size (9+ blocks at top), openness (35%+ clear visibility) |
 | Context | 15 | Sky exposure, exposed terrain bonus |
 
 **Debug Output Example:**
 ```
 [Buildings] === SCAN START: WATCHTOWER in region A2 ===
-[Buildings]   [WATCHTOWER] Tower analysis: height=18 (need 14), platform=6 (need 4), base=4 (need 3)
-[Buildings]   [WATCHTOWER] Tower ratios: access=72% (need 55%), support=80% (need 65%), openness=55% (need 35%)
+[Buildings]   [WATCHTOWER] Tower analysis: height=18 (need 14), platform=16 (need 9), base=16 (need 9), structural=85 (need 40)
+[Buildings]   [WATCHTOWER] Tower ratios: access=72% (need 55%), support=80% (need 65%), openness=55% (need 35%), bodyDensity=67% (need 30%)
 [Buildings]   [WATCHTOWER] Scores: structure=32.0/35, interior=12.0/15, access=19.4/25, signature=22.5/25, context=11.0/15
 [Buildings]   [WATCHTOWER] TOTAL: 96.9/65.0 (149%)
 ```

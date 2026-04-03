@@ -18,6 +18,10 @@ world:
   # The name of the game world
   name: "world"
 
+  # World generator (e.g., "Terra:OVERWORLD" for Terra world generation)
+  # Leave empty or set to "" for vanilla generation
+  generator: "Terra:MAP"
+
   # World border size in blocks (diameter)
   border-size: 2048
 
@@ -126,11 +130,6 @@ parties:
     # Enable party chat (/pc)
     party-chat: true
 
-    # Compass points to nearest party member
-    compass-to-party: true
-
-    # Show party members on BlueMap
-    bluemap-markers: true
 
 # Division Depot Settings
 division-depots:
@@ -239,6 +238,8 @@ regions:
   defense:
     # Minutes region is immune after capture
     fortification-minutes: 10
+    # Influence points awarded for completing defense objectives
+    objective-reward: 75
 
   # Physical road supply line settings
   supply:
@@ -263,6 +264,13 @@ regions:
     # Enable gap detection (detect blown-up roads)
     # Disable this if you're having false positives from terrain blocks
     gap-detection-enabled: false
+    # Only count road blocks that were explicitly placed by players
+    # When true, village paths and other naturally-generated blocks are ignored for supply calculations
+    # The admin "register" scan still works but scanned blocks won't count for connectivity
+    require-player-placed-roads: true
+    # When true, regions MUST have a physical player-built road to get supply
+    # When false, contiguous owned territory without roads still gets PARTIAL supply
+    require-road-for-supply: true
     # Respawn delay penalties (in seconds)
     partial-supply-respawn-delay: 5     # Connected via regions but no road
     unsupplied-respawn-delay: 15        # No road connection to home
@@ -305,9 +313,11 @@ regions:
     hint-distance: 100
 
     resource-depot-radius: 16  # Horizontal radius from objective center
+    resource-depot-vertical-range: 16  # Vertical range for scanning resource depot containers
     resource-depot-min-containers: 4  # Number of stocked containers needed
     resource-depot-min-items-per-container: 500  # Items required per container
     building-detection-radius: 16
+    building-max-expansion-radius: 48  # Max radius the adaptive scan can grow to
     building-detection-vertical-range: 12
     building-detection-debounce-ticks: 20
     building-detection-debug: false  # Enable verbose building detection logging

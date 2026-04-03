@@ -48,7 +48,7 @@ public final class RegionNotificationManager {
     /**
      * Gets the display name for a region (e.g., "Shadowfen Valley" instead of "A1").
      */
-    private String getRegionDisplayName(String regionId) {
+    public String getRegionDisplayName(String regionId) {
         if (regionRenderer != null) {
             return regionRenderer.getRegionName(regionId).orElse(regionId);
         }

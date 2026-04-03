@@ -9,6 +9,9 @@ import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
 import org.bukkit.Sound;
 import org.bukkit.World;
+import org.bukkit.block.Block;
+import org.bukkit.block.BlockFace;
+import org.bukkit.block.data.type.Door;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
@@ -53,6 +56,7 @@ public class GarrisonSpawnService {
     private final NamespacedKey SPAWN_MAP_KEY;
     private final NamespacedKey SPAWN_LOCATION_KEY;
     private final NamespacedKey GARRISON_ID_KEY;
+    private final NamespacedKey HOME_SPAWN_KEY;
 
     // Track players with active spawn maps - playerId -> spawn location
     private final Map<UUID, Location> playersWithSpawnMaps = new ConcurrentHashMap<>();
@@ -87,6 +91,7 @@ public class GarrisonSpawnService {
         this.SPAWN_MAP_KEY = new NamespacedKey(plugin, "garrison_spawn_map");
         this.SPAWN_LOCATION_KEY = new NamespacedKey(plugin, "spawn_location");
         this.GARRISON_ID_KEY = new NamespacedKey(plugin, "garrison_id");
+        this.HOME_SPAWN_KEY = new NamespacedKey(plugin, "home_spawn");
     }
 
     /**
@@ -139,10 +144,8 @@ public class GarrisonSpawnService {
 
         // Check if there are any garrisons to teleport to
         List<RegisteredBuilding> garrisons = getTeamGarrisons(team);
-        if (garrisons.isEmpty()) {
-            return; // No garrisons available
-        }
 
+        // Always give the map — it shows the 4x4 region grid even with 0 garrisons
         // Create the spawn map item
         ItemStack spawnMap = createSpawnMapItem(team, garrisons.size());
 
@@ -161,9 +164,13 @@ public class GarrisonSpawnService {
         player.sendMessage(Component.text("[Garrison] ", NamedTextColor.GREEN)
                 .append(Component.text("You have a ", NamedTextColor.WHITE))
                 .append(Component.text("Garrison Map", NamedTextColor.GOLD).decorate(TextDecoration.BOLD))
-                .append(Component.text(". Right-click to teleport to a friendly garrison.", NamedTextColor.WHITE)));
+                .append(Component.text(". Right-click to view the region grid.", NamedTextColor.WHITE)));
         player.sendMessage(Component.text("  The map will disappear if you move " + SPAWN_MAP_DISTANCE_LIMIT + " blocks.",
                 NamedTextColor.GRAY));
+
+        if (garrisons.isEmpty()) {
+            player.sendMessage(Component.text("  ⚠ No garrisons available! Build a garrison to unlock spawning.", NamedTextColor.YELLOW));
+        }
 
         player.playSound(player.getLocation(), Sound.ITEM_BOOK_PAGE_TURN, 1.0f, 1.0f);
     }
@@ -227,10 +234,10 @@ public class GarrisonSpawnService {
         String team = teamOpt.get();
         List<RegisteredBuilding> garrisons = getTeamGarrisons(team);
 
-        if (garrisons.isEmpty()) {
-            player.sendMessage(Component.text("No garrisons available for your team!", NamedTextColor.RED));
-            removeSpawnMap(player);
-            return;
+        // Build a lookup: regionId -> garrison
+        Map<String, RegisteredBuilding> garrisonByRegion = new java.util.HashMap<>();
+        for (RegisteredBuilding g : garrisons) {
+            garrisonByRegion.put(g.regionId(), g);
         }
 
         // Refresh the lore on the held spawn map so the garrison count is current
@@ -252,79 +259,176 @@ public class GarrisonSpawnService {
             }
         }
 
-        // Create GUI - size based on number of garrisons (minimum 9, max 54)
-        int size = Math.min(54, Math.max(9, ((garrisons.size() / 9) + 1) * 9));
-        Inventory gui = Bukkit.createInventory(null, size, Component.text(GARRISON_GUI_TITLE));
+        // Check if the player's current region has a garrison
+        String playerRegion = regionService.getRegionIdForLocation(
+                player.getLocation().getBlockX(), player.getLocation().getBlockZ());
+        if (playerRegion != null && !garrisonByRegion.containsKey(playerRegion)) {
+            String regionName = getRegionDisplayName(playerRegion);
+            player.sendMessage(Component.text("⚠ ", NamedTextColor.YELLOW)
+                    .append(Component.text("No garrison in your region (", NamedTextColor.RED))
+                    .append(Component.text(regionName, NamedTextColor.GOLD))
+                    .append(Component.text(")! Build one to enable spawning here.", NamedTextColor.RED)));
+        }
 
-        // Add garrison items
-        for (int i = 0; i < garrisons.size() && i < size; i++) {
-            RegisteredBuilding garrison = garrisons.get(i);
-            ItemStack garrisonItem = createGarrisonMenuItem(garrison, team);
-            gui.setItem(i, garrisonItem);
+        // Create 4x4 grid GUI — 9 columns, we place the 4x4 grid in columns 1-4, rows 0-3
+        // Using a 36-slot (4 rows of 9) inventory with the grid placed in the center
+        // Row layout in inventory: slots 0-8 = row A, 9-17 = row B, 18-26 = row C, 27-35 = row D
+        // Place the 4x4 grid at columns 2-5 (center) of each row, with labels
+        Inventory gui = Bukkit.createInventory(null, 45, Component.text(GARRISON_GUI_TITLE));
+
+        // Column header labels (row 0: slots 0-8)
+        for (int col = 0; col < 4; col++) {
+            ItemStack label = new ItemStack(Material.PAPER);
+            ItemMeta labelMeta = label.getItemMeta();
+            if (labelMeta != null) {
+                labelMeta.displayName(Component.text("Column " + (col + 1), NamedTextColor.GRAY)
+                        .decoration(TextDecoration.ITALIC, false));
+                label.setItemMeta(labelMeta);
+            }
+            gui.setItem(col + 2, label); // slots 2,3,4,5
+        }
+
+        // Determine team home region
+        String homeRegion = team.equalsIgnoreCase("RED")
+                ? config.getRegionRedHome()
+                : config.getRegionBlueHome();
+
+        // Row labels + grid cells
+        for (int row = 0; row < 4; row++) {
+            char rowLabel = (char) ('A' + row);
+            int inventoryRow = row + 1; // offset by 1 for the header row
+
+            // Row label (column 0)
+            ItemStack rowLabelItem = new ItemStack(Material.PAPER);
+            ItemMeta rowLabelMeta = rowLabelItem.getItemMeta();
+            if (rowLabelMeta != null) {
+                rowLabelMeta.displayName(Component.text("Row " + rowLabel, NamedTextColor.GRAY)
+                        .decoration(TextDecoration.ITALIC, false));
+                rowLabelItem.setItemMeta(rowLabelMeta);
+            }
+            gui.setItem(inventoryRow * 9, rowLabelItem);
+
+            // Grid cells (columns 2-5)
+            for (int col = 0; col < 4; col++) {
+                String regionId = rowLabel + String.valueOf(col + 1);
+                int slot = inventoryRow * 9 + col + 2;
+
+                RegisteredBuilding garrison = garrisonByRegion.get(regionId);
+                boolean isHome = regionId.equalsIgnoreCase(homeRegion);
+                ItemStack cell;
+
+                if (garrison != null) {
+                    // Team garrison present — use team-colored stained glass
+                    Material glassMat = team.equalsIgnoreCase("RED")
+                            ? Material.RED_STAINED_GLASS_PANE
+                            : Material.BLUE_STAINED_GLASS_PANE;
+                    cell = new ItemStack(glassMat);
+                    ItemMeta meta = cell.getItemMeta();
+                    if (meta != null) {
+                        String regionName = getRegionDisplayName(regionId);
+                        String variantText = garrison.variant() != null && !garrison.variant().equals("Basic Garrison")
+                                ? " (" + garrison.variant() + ")" : "";
+                        String homeTag = isHome ? " \u2302" : ""; // ⌂
+
+                        meta.displayName(Component.text("⚑ " + regionName + variantText + homeTag, NamedTextColor.GOLD)
+                                .decorate(TextDecoration.BOLD)
+                                .decoration(TextDecoration.ITALIC, false));
+
+                        List<Component> lore = new ArrayList<>();
+                        lore.add(Component.text("Region: " + regionId, NamedTextColor.GRAY)
+                                .decoration(TextDecoration.ITALIC, false));
+                        lore.add(Component.text("Location: " + garrison.anchorX() + ", " + garrison.anchorY() + ", " + garrison.anchorZ(),
+                                        NamedTextColor.GRAY)
+                                .decoration(TextDecoration.ITALIC, false));
+
+                        // Show capacity
+                        int capacity = getGarrisonCapacity(garrison);
+                        int used = garrisonTeleportsThisMinute.getOrDefault(garrison.objectiveId(), 0);
+                        lore.add(Component.text("Capacity: ", NamedTextColor.GRAY)
+                                .append(Component.text(used + "/" + capacity + " this minute",
+                                        used >= capacity ? NamedTextColor.RED : NamedTextColor.GREEN))
+                                .decoration(TextDecoration.ITALIC, false));
+
+                        // Show variant bonuses
+                        List<String> bonuses = getGarrisonVariantBonuses(garrison.variant());
+                        if (!bonuses.isEmpty()) {
+                            lore.add(Component.empty());
+                            lore.add(Component.text("Bonuses:", NamedTextColor.YELLOW)
+                                    .decoration(TextDecoration.ITALIC, false));
+                            for (String bonus : bonuses) {
+                                lore.add(Component.text("  - " + bonus, NamedTextColor.AQUA)
+                                        .decoration(TextDecoration.ITALIC, false));
+                            }
+                        }
+
+                        lore.add(Component.empty());
+                        lore.add(Component.text("Click to teleport!", NamedTextColor.GREEN)
+                                .decoration(TextDecoration.ITALIC, false));
+
+                        meta.lore(lore);
+
+                        // Store garrison ID in PDC for click handling
+                        meta.getPersistentDataContainer().set(
+                                GARRISON_ID_KEY,
+                                PersistentDataType.INTEGER,
+                                garrison.objectiveId()
+                        );
+
+                        cell.setItemMeta(meta);
+                    }
+                } else if (isHome) {
+                    // Home region with no garrison — always spawnable (team-colored stained glass)
+                    Material homeGlass = team.equalsIgnoreCase("RED")
+                            ? Material.RED_STAINED_GLASS_PANE
+                            : Material.BLUE_STAINED_GLASS_PANE;
+                    cell = new ItemStack(homeGlass);
+                    ItemMeta meta = cell.getItemMeta();
+                    if (meta != null) {
+                        String regionName = getRegionDisplayName(regionId);
+                        meta.displayName(Component.text("\u2302 " + regionName + " (Home Base)", NamedTextColor.GREEN)
+                                .decorate(TextDecoration.BOLD)
+                                .decoration(TextDecoration.ITALIC, false));
+
+                        List<Component> lore = new ArrayList<>();
+                        lore.add(Component.text("Region: " + regionId, NamedTextColor.GRAY)
+                                .decoration(TextDecoration.ITALIC, false));
+                        lore.add(Component.text("Your team's home region", NamedTextColor.GREEN)
+                                .decoration(TextDecoration.ITALIC, false));
+                        lore.add(Component.empty());
+                        lore.add(Component.text("Click to spawn at home base!", NamedTextColor.GREEN)
+                                .decoration(TextDecoration.ITALIC, false));
+                        meta.lore(lore);
+
+                        // Mark as home spawn in PDC
+                        meta.getPersistentDataContainer().set(
+                                HOME_SPAWN_KEY, PersistentDataType.BYTE, (byte) 1);
+
+                        cell.setItemMeta(meta);
+                    }
+                } else {
+                    // No garrison — white stained glass (empty region)
+                    cell = new ItemStack(Material.WHITE_STAINED_GLASS_PANE);
+                    ItemMeta meta = cell.getItemMeta();
+                    if (meta != null) {
+                        String regionName = getRegionDisplayName(regionId);
+                        meta.displayName(Component.text(regionName + " (" + regionId + ")", NamedTextColor.GRAY)
+                                .decoration(TextDecoration.ITALIC, false));
+
+                        List<Component> lore = new ArrayList<>();
+                        lore.add(Component.text("No garrison in this region", NamedTextColor.DARK_GRAY)
+                                .decoration(TextDecoration.ITALIC, false));
+                        meta.lore(lore);
+
+                        cell.setItemMeta(meta);
+                    }
+                }
+
+                gui.setItem(slot, cell);
+            }
         }
 
         player.openInventory(gui);
         player.playSound(player.getLocation(), Sound.BLOCK_ENDER_CHEST_OPEN, 0.5f, 1.2f);
-    }
-
-    /**
-     * Creates a menu item for a garrison.
-     */
-    private ItemStack createGarrisonMenuItem(RegisteredBuilding garrison, String team) {
-        // Use team-colored bed as icon
-        Material bedMaterial = team.equalsIgnoreCase("RED") ? Material.RED_BED : Material.BLUE_BED;
-        ItemStack item = new ItemStack(bedMaterial);
-        ItemMeta meta = item.getItemMeta();
-
-        if (meta != null) {
-            String regionName = getRegionDisplayName(garrison.regionId());
-            String variantText = garrison.variant() != null && !garrison.variant().equals("Basic Garrison")
-                    ? " (" + garrison.variant() + ")" : "";
-
-            meta.displayName(Component.text(regionName + variantText, NamedTextColor.GOLD)
-                    .decorate(TextDecoration.BOLD)
-                    .decoration(TextDecoration.ITALIC, false));
-
-            List<Component> lore = new ArrayList<>();
-            lore.add(Component.text("Location: ", NamedTextColor.GRAY)
-                    .append(Component.text(garrison.anchorX() + ", " + garrison.anchorY() + ", " + garrison.anchorZ(),
-                            NamedTextColor.WHITE))
-                    .decoration(TextDecoration.ITALIC, false));
-
-            // Show capacity
-            int capacity = getGarrisonCapacity(garrison);
-            int used = garrisonTeleportsThisMinute.getOrDefault(garrison.objectiveId(), 0);
-            lore.add(Component.text("Capacity: ", NamedTextColor.GRAY)
-                    .append(Component.text(used + "/" + capacity + " this minute",
-                            used >= capacity ? NamedTextColor.RED : NamedTextColor.GREEN))
-                    .decoration(TextDecoration.ITALIC, false));
-
-            // Show variant bonuses
-            List<String> bonuses = getGarrisonVariantBonuses(garrison.variant());
-            if (!bonuses.isEmpty()) {
-                lore.add(Component.empty());
-                lore.add(Component.text("Bonuses:", NamedTextColor.YELLOW).decoration(TextDecoration.ITALIC, false));
-                for (String bonus : bonuses) {
-                    lore.add(Component.text("  - " + bonus, NamedTextColor.AQUA).decoration(TextDecoration.ITALIC, false));
-                }
-            }
-
-            lore.add(Component.empty());
-            lore.add(Component.text("Click to teleport!", NamedTextColor.GREEN).decoration(TextDecoration.ITALIC, false));
-
-            meta.lore(lore);
-
-            // Store garrison ID in PDC for click handling
-            meta.getPersistentDataContainer().set(
-                    GARRISON_ID_KEY,
-                    PersistentDataType.INTEGER,
-                    garrison.objectiveId()
-            );
-
-            item.setItemMeta(meta);
-        }
-
-        return item;
     }
 
     /**
@@ -336,6 +440,14 @@ public class GarrisonSpawnService {
         }
 
         ItemMeta meta = clickedItem.getItemMeta();
+
+        // Check if this is a home spawn click
+        if (meta.getPersistentDataContainer().has(HOME_SPAWN_KEY, PersistentDataType.BYTE)) {
+            player.closeInventory();
+            teleportToHomeSpawn(player);
+            return;
+        }
+
         if (!meta.getPersistentDataContainer().has(GARRISON_ID_KEY,
                 PersistentDataType.INTEGER)) {
             return;
@@ -439,29 +551,199 @@ public class GarrisonSpawnService {
     }
 
     /**
-     * Finds a safe teleport location near a garrison.
+     * Teleports a player to their team's home spawn point.
+     */
+    private void teleportToHomeSpawn(Player player) {
+        Optional<String> teamOpt = teamService.getPlayerTeam(player.getUniqueId());
+        if (teamOpt.isEmpty()) {
+            player.sendMessage(Component.text("You must be on a team!", NamedTextColor.RED));
+            return;
+        }
+
+        String team = teamOpt.get();
+        Optional<Location> spawnOpt = teamService.getTeamSpawn(team);
+        if (spawnOpt.isEmpty()) {
+            player.sendMessage(Component.text("Could not find home spawn!", NamedTextColor.RED));
+            return;
+        }
+
+        Location spawn = spawnOpt.get();
+        player.teleport(spawn);
+
+        // Remove spawn map
+        removeSpawnMap(player);
+
+        // Notify
+        String homeRegion = team.equalsIgnoreCase("RED")
+                ? config.getRegionRedHome()
+                : config.getRegionBlueHome();
+        String regionName = getRegionDisplayName(homeRegion);
+        player.sendMessage(Component.text("[Garrison] ", NamedTextColor.GREEN)
+                .append(Component.text("Teleported to home base in ", NamedTextColor.WHITE))
+                .append(Component.text(regionName, NamedTextColor.GOLD)));
+
+        player.playSound(player.getLocation(), Sound.ENTITY_ENDERMAN_TELEPORT, 1.0f, 1.0f);
+    }
+
+    /**
+     * Finds a safe teleport location just outside the garrison door.
+     * Priority: door → fence gate → building exterior edge → anchor fallback.
      */
     private Location findSafeTeleportLocation(World world, RegisteredBuilding garrison) {
-        int centerX = garrison.anchorX();
-        int centerY = garrison.anchorY();
-        int centerZ = garrison.anchorZ();
+        // 1. Try to find a door and spawn just outside it
+        Location doorSpawn = findSpawnOutsideDoor(world, garrison);
+        if (doorSpawn != null) return doorSpawn;
 
-        // Try to find a safe spot near the garrison
-        for (int dx = -3; dx <= 3; dx++) {
-            for (int dz = -3; dz <= 3; dz++) {
-                int x = centerX + dx;
-                int z = centerZ + dz;
+        // 2. Fallback: find a safe spot just outside the building bounds
+        Location edgeSpawn = findSpawnAtBuildingEdge(world, garrison);
+        if (edgeSpawn != null) return edgeSpawn;
 
-                // Find ground level
-                for (int y = centerY + 5; y >= centerY - 5; y--) {
-                    Location loc = new Location(world, x + 0.5, y, z + 0.5);
-                    if (isSafeLocation(world, x, y, z)) {
-                        return loc;
+        // 3. Last resort: search near anchor
+        int cx = garrison.anchorX(), cy = garrison.anchorY(), cz = garrison.anchorZ();
+        for (int dx = -5; dx <= 5; dx++) {
+            for (int dz = -5; dz <= 5; dz++) {
+                for (int y = cy + 5; y >= cy - 5; y--) {
+                    if (isSafeLocation(world, cx + dx, y, cz + dz)) {
+                        return new Location(world, cx + dx + 0.5, y, cz + dz + 0.5);
                     }
                 }
             }
         }
+        return null;
+    }
 
+    /**
+     * Scans the garrison bounds for a door (or fence gate) and returns a safe
+     * location 1-2 blocks outside the door on its facing side.
+     */
+    private Location findSpawnOutsideDoor(World world, RegisteredBuilding garrison) {
+        // Scan for door blocks first, then fence gates
+        int[][] doorBlock = findDoorBlock(world, garrison);
+        if (doorBlock == null) return null;
+
+        int dx = doorBlock[0][0], dy = doorBlock[0][1], dz = doorBlock[0][2];
+        BlockFace facing = doorBlock[1] != null ? toBlockFace(doorBlock[1]) : null;
+
+        // If we got a facing direction from door data, try that first
+        if (facing != null) {
+            Location loc = trySpawnInDirection(world, dx, dy, dz, facing);
+            if (loc != null) return loc;
+        }
+
+        // Try all four cardinal directions, preferring ones that point outside the building
+        int midX = (garrison.minX() + garrison.maxX()) / 2;
+        int midZ = (garrison.minZ() + garrison.maxZ()) / 2;
+
+        // Sort directions so we try the ones pointing away from building center first
+        BlockFace[] faces = {BlockFace.NORTH, BlockFace.SOUTH, BlockFace.EAST, BlockFace.WEST};
+        java.util.Arrays.sort(faces, (a, b) -> {
+            int awayA = (dx + a.getModX() - midX) * (dx + a.getModX() - midX)
+                    + (dz + a.getModZ() - midZ) * (dz + a.getModZ() - midZ);
+            int awayB = (dx + b.getModX() - midX) * (dx + b.getModX() - midX)
+                    + (dz + b.getModZ() - midZ) * (dz + b.getModZ() - midZ);
+            return Integer.compare(awayB, awayA); // farther from center first
+        });
+
+        for (BlockFace f : faces) {
+            if (f == facing) continue; // already tried
+            Location loc = trySpawnInDirection(world, dx, dy, dz, f);
+            if (loc != null) return loc;
+        }
+
+        return null;
+    }
+
+    /**
+     * Finds a door or fence gate block in the garrison bounds.
+     * Returns int[2][] where [0]={x,y,z} and [1]={modX,0,modZ} facing direction (nullable).
+     */
+    private int[][] findDoorBlock(World world, RegisteredBuilding garrison) {
+        // Pass 1: actual door blocks (not trapdoors)
+        for (int y = garrison.minY(); y <= garrison.maxY(); y++) {
+            for (int x = garrison.minX(); x <= garrison.maxX(); x++) {
+                for (int z = garrison.minZ(); z <= garrison.maxZ(); z++) {
+                    Block block = world.getBlockAt(x, y, z);
+                    String name = block.getType().name();
+                    if (name.contains("DOOR") && !name.contains("TRAPDOOR")) {
+                        int[] facing = null;
+                        if (block.getBlockData() instanceof Door door) {
+                            BlockFace f = door.getFacing();
+                            facing = new int[]{f.getModX(), 0, f.getModZ()};
+                        }
+                        return new int[][]{new int[]{x, y, z}, facing};
+                    }
+                }
+            }
+        }
+        // Pass 2: fence gates
+        for (int y = garrison.minY(); y <= garrison.maxY(); y++) {
+            for (int x = garrison.minX(); x <= garrison.maxX(); x++) {
+                for (int z = garrison.minZ(); z <= garrison.maxZ(); z++) {
+                    Block block = world.getBlockAt(x, y, z);
+                    if (block.getType().name().contains("FENCE_GATE")) {
+                        return new int[][]{new int[]{x, y, z}, null};
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Tries to find a safe spawn location 1-2 blocks from the door in the given direction.
+     */
+    private Location trySpawnInDirection(World world, int doorX, int doorY, int doorZ, BlockFace dir) {
+        for (int dist = 1; dist <= 2; dist++) {
+            int tx = doorX + dir.getModX() * dist;
+            int tz = doorZ + dir.getModZ() * dist;
+            // Check a few Y levels around the door
+            for (int dy = 0; dy >= -2; dy--) {
+                int ty = doorY + dy;
+                if (isSafeLocation(world, tx, ty, tz)) {
+                    return new Location(world, tx + 0.5, ty, tz + 0.5);
+                }
+            }
+            for (int dy = 1; dy <= 2; dy++) {
+                int ty = doorY + dy;
+                if (isSafeLocation(world, tx, ty, tz)) {
+                    return new Location(world, tx + 0.5, ty, tz + 0.5);
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Finds a safe spawn location along the exterior edges of the building.
+     */
+    private Location findSpawnAtBuildingEdge(World world, RegisteredBuilding garrison) {
+        int minX = garrison.minX() - 2, maxX = garrison.maxX() + 2;
+        int minZ = garrison.minZ() - 2, maxZ = garrison.maxZ() + 2;
+        int baseY = garrison.minY();
+
+        // Walk the perimeter 1-2 blocks outside the building
+        for (int x = minX; x <= maxX; x++) {
+            for (int z = minZ; z <= maxZ; z++) {
+                // Only check the outer ring, not interior
+                boolean isEdge = x == minX || x == maxX || z == minZ || z == maxZ;
+                if (!isEdge) continue;
+
+                for (int y = baseY + 5; y >= baseY - 3; y--) {
+                    if (isSafeLocation(world, x, y, z)) {
+                        return new Location(world, x + 0.5, y, z + 0.5);
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    private BlockFace toBlockFace(int[] dir) {
+        if (dir == null) return null;
+        if (dir[0] == 0 && dir[2] == -1) return BlockFace.NORTH;
+        if (dir[0] == 0 && dir[2] == 1) return BlockFace.SOUTH;
+        if (dir[0] == 1 && dir[2] == 0) return BlockFace.EAST;
+        if (dir[0] == -1 && dir[2] == 0) return BlockFace.WEST;
         return null;
     }
 

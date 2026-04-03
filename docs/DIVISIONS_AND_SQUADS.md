@@ -497,8 +497,6 @@ parties:
     party-chat: true
     see-through-walls: true        # See nameplates through blocks
     see-through-walls-range: 30    # Block range
-    compass-to-party: true         # Compass points to party members
-    bluemap-markers: true          # Show party on BlueMap
 
 # Chat channel prefixes
 chat:

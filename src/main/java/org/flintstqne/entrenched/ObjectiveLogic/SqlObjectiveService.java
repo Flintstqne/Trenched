@@ -94,6 +94,10 @@ public class SqlObjectiveService implements ObjectiveService {
     private final Map<Integer, Integer> buildingFailureCount = new ConcurrentHashMap<>();
     private static final int REQUIRED_FAILURE_COUNT = 3; // Consecutive failures before invalidation
 
+    // Track which attackers currently have hold ground progress (for reset on zone leave)
+    // objectiveId -> Set of player UUIDs with active progress
+    private final Map<Integer, Set<UUID>> holdGroundActivePlayers = new ConcurrentHashMap<>();
+
     // Cache for tickStructureObjectives — avoids full DB scans every second.
     // Lists are refreshed at most once per STRUCTURE_CACHE_REFRESH_INTERVAL_MS.
     private volatile List<RegionObjective>     cachedStructureObjectives = Collections.emptyList();
@@ -422,6 +426,44 @@ public class SqlObjectiveService implements ObjectiveService {
                 } else if (type == ObjectiveType.SETTLEMENT_RESOURCE_DEPOT) {
                     // Supply depot must spawn on the open surface — not inside player-dug mines.
                     // Use extra attempts with sky-light validation.
+                    int offsetRange = config.getRegionSize() / 4;
+                    for (int attempt = 0; attempt < 15 && locX == null; attempt++) {
+                        int tryX = center[0] + ThreadLocalRandom.current().nextInt(-offsetRange, offsetRange);
+                        int tryZ = center[1] + ThreadLocalRandom.current().nextInt(-offsetRange, offsetRange);
+                        int[] surfaceLoc = findSurfaceSpawnLocation(world, tryX, tryZ);
+                        if (surfaceLoc != null) {
+                            locX = surfaceLoc[0];
+                            locY = surfaceLoc[1];
+                            locZ = surfaceLoc[2];
+                        }
+                    }
+                } else if (type == ObjectiveType.SETTLEMENT_WATCHTOWER) {
+                    // Watchtower must spawn on the surface (not underground) and prefers
+                    // elevated terrain so the player builds on a hill / ridge.
+                    // Sample 20 surface locations and pick the one with the highest Y.
+                    int offsetRange = config.getRegionSize() / 4;
+                    int[] bestLoc = null;
+                    for (int attempt = 0; attempt < 20; attempt++) {
+                        int tryX = center[0] + ThreadLocalRandom.current().nextInt(-offsetRange, offsetRange);
+                        int tryZ = center[1] + ThreadLocalRandom.current().nextInt(-offsetRange, offsetRange);
+                        int[] surfaceLoc = findSurfaceSpawnLocation(world, tryX, tryZ);
+                        if (surfaceLoc != null) {
+                            if (bestLoc == null || surfaceLoc[1] > bestLoc[1]) {
+                                bestLoc = surfaceLoc;
+                            }
+                        }
+                    }
+                    if (bestLoc != null) {
+                        locX = bestLoc[0];
+                        locY = bestLoc[1];
+                        locZ = bestLoc[2];
+                        plugin.getLogger().info("[Objectives] Spawning Watchtower at elevated surface in " +
+                                regionId + " (" + locX + "," + locY + "," + locZ + ")");
+                    }
+                } else if (type == ObjectiveType.SETTLEMENT_SECURE_PERIMETER
+                        || type == ObjectiveType.SETTLEMENT_GARRISON_QUARTERS) {
+                    // Perimeter and garrison objectives must spawn above ground, exposed
+                    // to sunlight.  Use findSurfaceSpawnLocation which validates sky-light ≥ 12.
                     int offsetRange = config.getRegionSize() / 4;
                     for (int attempt = 0; attempt < 15 && locX == null; attempt++) {
                         int tryX = center[0] + ThreadLocalRandom.current().nextInt(-offsetRange, offsetRange);
@@ -922,42 +964,42 @@ public class SqlObjectiveService implements ObjectiveService {
     public void refreshAllObjectives() {
         Optional<Integer> roundIdOpt = getCurrentRoundId();
         if (roundIdOpt.isEmpty()) {
-            plugin.getLogger().warning("[Objectives] refreshAllObjectives: No active round, skipping");
+            //plugin.getLogger().warning("[Objectives] refreshAllObjectives: No active round, skipping");
             return;
         }
 
-        plugin.getLogger().info("[Objectives] Refreshing objectives for all regions...");
+        //plugin.getLogger().info("[Objectives] Refreshing objectives for all regions...");
 
         // Get all regions and spawn objectives as needed
         List<RegionStatus> allStatuses = regionService.getAllRegionStatuses();
-        plugin.getLogger().info("[Objectives] Found " + allStatuses.size() + " regions to check");
+        //plugin.getLogger().info("[Objectives] Found " + allStatuses.size() + " regions to check");
 
         for (RegionStatus status : allStatuses) {
             // Skip protected regions (home regions)
             if (status.state() == RegionState.PROTECTED) {
-                plugin.getLogger().fine("[Objectives] Skipping " + status.regionId() + " - PROTECTED");
+               // plugin.getLogger().fine("[Objectives] Skipping " + status.regionId() + " - PROTECTED");
                 continue;
             }
 
             // Skip fortified regions
             if (status.state() == RegionState.FORTIFIED) {
-                plugin.getLogger().fine("[Objectives] Skipping " + status.regionId() + " - FORTIFIED");
+                //plugin.getLogger().fine("[Objectives] Skipping " + status.regionId() + " - FORTIFIED");
                 continue;
             }
 
             int activeCount = countActiveObjectives(status.regionId());
             int maxObjectives = config.getObjectivesPerRegion();
 
-            plugin.getLogger().info("[Objectives] Region " + status.regionId() +
-                    " (state=" + status.state() + "): " + activeCount + "/" + maxObjectives + " active objectives");
+            //plugin.getLogger().info("[Objectives] Region " + status.regionId() +
+             //       " (state=" + status.state() + "): " + activeCount + "/" + maxObjectives + " active objectives");
 
             // Spawn objectives if below max
-            if (activeCount < maxObjectives) {
-                plugin.getLogger().info("[Objectives] Region " + status.regionId() +
-                        " has " + activeCount + "/" + maxObjectives + " objectives, spawning more...");
-                SpawnResult result = spawnObjectivesForRegion(status.regionId());
-                plugin.getLogger().info("[Objectives] Spawn result for " + status.regionId() + ": " + result);
-            }
+           // if (activeCount < maxObjectives) {
+                //plugin.getLogger().info("[Objectives] Region " + status.regionId() +
+                       // " has " + activeCount + "/" + maxObjectives + " objectives, spawning more...");
+                // SpawnResult result = spawnObjectivesForRegion(status.regionId());
+               //  plugin.getLogger().info("[Objectives] Spawn result for " + status.regionId() + ": " + result);
+           // }
         }
     }
 
@@ -1179,7 +1221,10 @@ public class SqlObjectiveService implements ObjectiveService {
     }
 
     private boolean isWithinStructureDetectionRange(RegionObjective objective, int x, int y, int z) {
-        int radius = config.getBuildingDetectionRadius();
+        // Use the maximum expansion radius so that blocks placed in expanded rooms
+        // still trigger rescans.  The adaptive scan in BuildingDetector will decide
+        // how far to actually expand during evaluation.
+        int radius = config.getBuildingMaxExpansionRadius();
         int vertical = config.getBuildingDetectionVerticalRange();
 
         // Watchtowers need extended vertical range since they are tall structures
@@ -1340,14 +1385,73 @@ public class SqlObjectiveService implements ObjectiveService {
         }
     }
 
+    private void sendGarrisonDebug(int objectiveId, String message) {
+        UUID actor = pendingStructureActors.get(objectiveId);
+        if (actor == null) return;
+        org.bukkit.entity.Player p = plugin.getServer().getPlayer(actor);
+        if (p != null && p.isOnline()) {
+            p.sendMessage(org.bukkit.ChatColor.DARK_GRAY + "[" + org.bukkit.ChatColor.GOLD + "GarrisonDebug"
+                    + org.bukkit.ChatColor.DARK_GRAY + "] " + org.bukkit.ChatColor.GRAY + message);
+        }
+    }
+
     private void handleActiveStructureObjective(RegionObjective objective, BuildingDetectionResult result) {
+        boolean isGarrison = objective.type() == ObjectiveType.SETTLEMENT_GARRISON_QUARTERS;
+
         if (!result.valid()) {
             firstValidStructureSeenAt.remove(objective.id());
             updateProgress(objective.id(), result.progressRatio());
+            if (isGarrison) {
+                sendGarrisonDebug(objective.id(), org.bukkit.ChatColor.RED + "NOT VALID" + org.bukkit.ChatColor.GRAY
+                        + " | Score: " + org.bukkit.ChatColor.WHITE + String.format("%.1f/%.1f (%.0f%%)",
+                        result.totalScore(), result.requiredScore(), result.progressRatio() * 100)
+                        + org.bukkit.ChatColor.GRAY + " | " + result.summary());
+                sendGarrisonDebug(objective.id(), "  Struct=" + org.bukkit.ChatColor.YELLOW + String.format("%.1f", result.structureScore())
+                        + org.bukkit.ChatColor.GRAY + "/30 Interior=" + org.bukkit.ChatColor.YELLOW + String.format("%.1f", result.interiorScore())
+                        + org.bukkit.ChatColor.GRAY + "/25 Access=" + org.bukkit.ChatColor.YELLOW + String.format("%.1f", result.accessScore())
+                        + org.bukkit.ChatColor.GRAY + "/15 Sig=" + org.bukkit.ChatColor.YELLOW + String.format("%.1f", result.signatureScore())
+                        + org.bukkit.ChatColor.GRAY + "/20 Ctx=" + org.bukkit.ChatColor.YELLOW + String.format("%.1f", result.contextScore())
+                        + org.bukkit.ChatColor.GRAY + "/10");
+                sendGarrisonDebug(objective.id(), "  Variant: " + org.bukkit.ChatColor.AQUA + result.variant()
+                        + org.bukkit.ChatColor.GRAY + " | Blocks: " + result.structuralBlocks()
+                        + " | Footprint: " + result.footprint() + " | Beds: " + result.bedCount());
+                sendGarrisonDebug(objective.id(), "  Bounds: " + org.bukkit.ChatColor.WHITE
+                        + result.minX() + "," + result.minY() + "," + result.minZ()
+                        + org.bukkit.ChatColor.GRAY + " → " + org.bukkit.ChatColor.WHITE
+                        + result.maxX() + "," + result.maxY() + "," + result.maxZ()
+                        + org.bukkit.ChatColor.GRAY + " | Components: " + result.componentCount()
+                        + " (anchored: " + result.anchoredCount() + ")"
+                        + " | Total scanned: " + result.totalRelevantBlocks()
+                        + " | Anchor: " + objective.locationX() + "," + objective.locationY() + "," + objective.locationZ());
+            }
             return;
         }
 
         updateProgress(objective.id(), Math.min(0.99, result.progressRatio()));
+
+        if (isGarrison) {
+            sendGarrisonDebug(objective.id(), org.bukkit.ChatColor.GREEN + "VALID" + org.bukkit.ChatColor.GRAY
+                    + " | Score: " + org.bukkit.ChatColor.WHITE + String.format("%.1f/%.1f (%.0f%%)",
+                    result.totalScore(), result.requiredScore(), result.progressRatio() * 100)
+                    + org.bukkit.ChatColor.GRAY + " | " + result.summary());
+            sendGarrisonDebug(objective.id(), "  Struct=" + org.bukkit.ChatColor.YELLOW + String.format("%.1f", result.structureScore())
+                    + org.bukkit.ChatColor.GRAY + "/30 Interior=" + org.bukkit.ChatColor.YELLOW + String.format("%.1f", result.interiorScore())
+                    + org.bukkit.ChatColor.GRAY + "/25 Access=" + org.bukkit.ChatColor.YELLOW + String.format("%.1f", result.accessScore())
+                    + org.bukkit.ChatColor.GRAY + "/15 Sig=" + org.bukkit.ChatColor.YELLOW + String.format("%.1f", result.signatureScore())
+                    + org.bukkit.ChatColor.GRAY + "/20 Ctx=" + org.bukkit.ChatColor.YELLOW + String.format("%.1f", result.contextScore())
+                    + org.bukkit.ChatColor.GRAY + "/10");
+            sendGarrisonDebug(objective.id(), "  Variant: " + org.bukkit.ChatColor.AQUA + result.variant()
+                    + org.bukkit.ChatColor.GRAY + " | Blocks: " + result.structuralBlocks()
+                    + " | Footprint: " + result.footprint() + " | Beds: " + result.bedCount());
+            sendGarrisonDebug(objective.id(), "  Bounds: " + org.bukkit.ChatColor.WHITE
+                    + result.minX() + "," + result.minY() + "," + result.minZ()
+                    + org.bukkit.ChatColor.GRAY + " → " + org.bukkit.ChatColor.WHITE
+                    + result.maxX() + "," + result.maxY() + "," + result.maxZ()
+                    + org.bukkit.ChatColor.GRAY + " | Components: " + result.componentCount()
+                    + " (anchored: " + result.anchoredCount() + ")"
+                    + " | Total scanned: " + result.totalRelevantBlocks()
+                    + " | Anchor: " + objective.locationX() + "," + objective.locationY() + "," + objective.locationZ());
+        }
 
         long now = System.currentTimeMillis();
         long validationMs = config.getBuildingValidationSeconds() * 1000L;
@@ -1356,13 +1460,28 @@ public class SqlObjectiveService implements ObjectiveService {
         UUID actor = pendingStructureActors.get(objective.id());
         String team = pendingStructureTeams.get(objective.id());
         if (actor == null || team == null || team.isBlank()) {
+            if (isGarrison) {
+                sendGarrisonDebug(objective.id(), org.bukkit.ChatColor.YELLOW + "Waiting for actor/team assignment..."
+                        + org.bukkit.ChatColor.GRAY + " (actor=" + actor + ", team=" + team + ")");
+            }
             scheduleStructureRescan(objective.id(), null, null, 20L);
             return;
         }
 
         if ((now - firstValidAt) < validationMs) {
+            if (isGarrison) {
+                long remaining = validationMs - (now - firstValidAt);
+                sendGarrisonDebug(objective.id(), org.bukkit.ChatColor.YELLOW + "Validation timer: "
+                        + org.bukkit.ChatColor.WHITE + String.format("%.1fs", remaining / 1000.0)
+                        + org.bukkit.ChatColor.YELLOW + " remaining (need " + config.getBuildingValidationSeconds() + "s stable)");
+            }
             scheduleStructureRescan(objective.id(), actor, team, 20L);
             return;
+        }
+
+        if (isGarrison) {
+            sendGarrisonDebug(objective.id(), org.bukkit.ChatColor.GREEN + "Validation passed! "
+                    + org.bukkit.ChatColor.GRAY + "Checking building limits...");
         }
 
         // Check building limits before registration
@@ -1373,6 +1492,11 @@ public class SqlObjectiveService implements ObjectiveService {
                 // Limit reached - don't complete the objective, but keep it at 99%
                 plugin.getLogger().info("[Objectives] Building limit reached for " + buildingType.getDisplayName() +
                         " in " + objective.regionId() + " for team " + team + " - not registering");
+
+                if (isGarrison) {
+                    sendGarrisonDebug(objective.id(), org.bukkit.ChatColor.RED + "BLOCKED: Building limit reached for "
+                            + buildingType.getDisplayName() + " in region " + objective.regionId());
+                }
 
                 // Notify the player
                 org.bukkit.entity.Player actorPlayer = plugin.getServer().getPlayer(actor);
@@ -1389,9 +1513,27 @@ public class SqlObjectiveService implements ObjectiveService {
             }
         }
 
+        if (isGarrison) {
+            sendGarrisonDebug(objective.id(), org.bukkit.ChatColor.GREEN + "Completing objective! "
+                    + org.bukkit.ChatColor.GRAY + "actor=" + actor + " team=" + team);
+        }
+
         CompleteResult completion = completeObjective(objective.id(), actor, team);
+
+        if (isGarrison) {
+            sendGarrisonDebug(objective.id(), "CompleteResult: " + org.bukkit.ChatColor.WHITE + completion.name());
+        }
+
         if (completion == CompleteResult.SUCCESS || completion == CompleteResult.ALREADY_COMPLETED) {
             db.upsertRegisteredBuilding(objective, result, team, RegisteredBuildingStatus.ACTIVE, now);
+
+            if (isGarrison) {
+                sendGarrisonDebug(objective.id(), org.bukkit.ChatColor.GREEN + "✔ Garrison registered! "
+                        + org.bukkit.ChatColor.GRAY + "Variant: " + org.bukkit.ChatColor.AQUA + result.variant()
+                        + org.bukkit.ChatColor.GRAY + " | Bounds: "
+                        + result.minX() + "," + result.minY() + "," + result.minZ()
+                        + " to " + result.maxX() + "," + result.maxY() + "," + result.maxZ());
+            }
 
             // Broadcast building construction to players in the region
             if (completion == CompleteResult.SUCCESS) {
@@ -1408,6 +1550,8 @@ public class SqlObjectiveService implements ObjectiveService {
                 String buildingTypeName = objective.type().getDisplayName();
                 statListener.recordBuildingConstructed(actor, actorName, buildingTypeName);
             }
+        } else if (isGarrison) {
+            sendGarrisonDebug(objective.id(), org.bukkit.ChatColor.RED + "✘ Completion failed: " + completion.name());
         }
         firstValidStructureSeenAt.remove(objective.id());
     }
@@ -1621,6 +1765,12 @@ public class SqlObjectiveService implements ObjectiveService {
         // Check for raid objectives (sabotage)
         for (RegionObjective obj : getActiveObjectives(regionId, ObjectiveCategory.RAID)) {
             if (obj.type() == ObjectiveType.RAID_SABOTAGE_DEFENSES) {
+                // Verify player is an attacker (not the defender/owner)
+                Optional<RegionStatus> statusOpt = regionService.getRegionStatus(regionId);
+                if (statusOpt.isEmpty()) continue;
+                String defenderTeam = statusOpt.get().ownerTeam();
+                if (defenderTeam != null && defenderTeam.equalsIgnoreCase(team)) continue;
+
                 // Check if this block position already earned progress (anti-cheese)
                 String trackingKey = regionId + ":SABOTAGE_DEFENSES";
                 Set<String> trackedBlocks = objectiveBlocksTracking.computeIfAbsent(trackingKey, k -> ConcurrentHashMap.newKeySet());
@@ -1715,6 +1865,18 @@ public class SqlObjectiveService implements ObjectiveService {
                 case SETTLEMENT_SECURE_PERIMETER -> {
                     // Check if it's a wall-like block
                     if (isWallBlock(blockType)) {
+                        // Only count blocks within a reasonable distance of the perimeter
+                        // objective anchor — blocks placed 200m away at another objective
+                        // should not contribute.
+                        if (obj.hasLocation()) {
+                            int dx = x - obj.locationX();
+                            int dz = z - obj.locationZ();
+                            int perimeterRadius = 64; // Max distance from anchor to count
+                            if (dx * dx + dz * dz > perimeterRadius * perimeterRadius) {
+                                continue; // Too far from this perimeter objective
+                            }
+                        }
+
                         // Check if this block position already earned progress
                         String trackingKey = regionId + ":SECURE_PERIMETER";
                         Set<String> trackedBlocks = objectiveBlocksTracking.computeIfAbsent(trackingKey, k -> ConcurrentHashMap.newKeySet());
@@ -1933,6 +2095,10 @@ public class SqlObjectiveService implements ObjectiveService {
                         if (victimProgress > 0) {
                             // Clear their progress
                             db.clearHoldGroundProgressForPlayer(obj.id(), victimUuid);
+
+                            // Also remove from active tracking
+                            Set<UUID> active = holdGroundActivePlayers.get(obj.id());
+                            if (active != null) active.remove(victimUuid);
 
                             // Reduce enemy influence for successful defense
                             double defenseReward = config.getDefenseObjectiveReward() * (victimProgress / 60.0);
@@ -2282,7 +2448,8 @@ public class SqlObjectiveService implements ObjectiveService {
 
     @Override
     public void tickHoldGroundObjectives(Map<UUID, HoldGroundPlayerData> playerData) {
-        if (playerData.isEmpty()) return;
+        // Note: don't return early on empty playerData — we still need to reset
+        // progress for players who disconnected or left the game world.
 
         // Get all regions with active hold ground objectives
         for (RegionStatus status : regionService.getAllRegionStatuses()) {
@@ -2312,6 +2479,11 @@ public class SqlObjectiveService implements ObjectiveService {
             int holdRadius = config.getRegionSize() / 8; // Hold zone is 1/8 of region size
             String defenderTeam = status.ownerTeam();
 
+            // Track who is in the zone THIS tick
+            Set<UUID> inZoneThisTick = new HashSet<>();
+            double maxProgress = 0;
+            boolean completed = false;
+
             // Check each player
             for (Map.Entry<UUID, HoldGroundPlayerData> entry : playerData.entrySet()) {
                 UUID playerId = entry.getKey();
@@ -2330,6 +2502,8 @@ public class SqlObjectiveService implements ObjectiveService {
                 );
 
                 if (distance <= holdRadius) {
+                    inZoneThisTick.add(playerId);
+
                     // Player is in hold zone - add progress
                     int currentSeconds = db.getHoldGroundProgress(holdGroundObj.id(), playerId);
                     int newSeconds = currentSeconds + 1;
@@ -2339,14 +2513,45 @@ public class SqlObjectiveService implements ObjectiveService {
                     if (newSeconds >= 60) {
                         completeObjective(holdGroundObj.id(), playerId, data.team());
                         db.clearHoldGroundProgress(holdGroundObj.id());
+                        holdGroundActivePlayers.remove(holdGroundObj.id());
+                        completed = true;
                         plugin.getLogger().info("[Objectives] Hold Ground completed by " + playerId +
                                 " in " + regionId + " after " + newSeconds + " seconds");
+                        break; // Objective completed, stop processing players
                     } else {
-                        // Update objective progress for UI
                         double progress = newSeconds / 60.0;
-                        updateProgress(holdGroundObj.id(), progress);
+                        maxProgress = Math.max(maxProgress, progress);
                     }
                 }
+            }
+
+            if (completed) continue;
+
+            // Reset progress for players who LEFT the zone (prevents dip-in/dip-out cheese)
+            Set<UUID> previouslyActive = holdGroundActivePlayers.get(holdGroundObj.id());
+            if (previouslyActive != null) {
+                for (UUID prevPlayer : previouslyActive) {
+                    if (!inZoneThisTick.contains(prevPlayer)) {
+                        db.clearHoldGroundProgressForPlayer(holdGroundObj.id(), prevPlayer);
+                        plugin.getLogger().fine("[Objectives] Reset hold ground progress for " +
+                                prevPlayer + " — left zone in " + regionId);
+                    }
+                }
+            }
+
+            // Update active player tracking
+            if (inZoneThisTick.isEmpty()) {
+                holdGroundActivePlayers.remove(holdGroundObj.id());
+            } else {
+                holdGroundActivePlayers.put(holdGroundObj.id(), inZoneThisTick);
+            }
+
+            // Update objective progress display with the HIGHEST attacker's progress
+            if (maxProgress > 0) {
+                updateProgress(holdGroundObj.id(), maxProgress);
+            } else if (inZoneThisTick.isEmpty()) {
+                // No attackers in zone — reset display to 0
+                updateProgress(holdGroundObj.id(), 0.0);
             }
         }
     }
@@ -2480,6 +2685,7 @@ public class SqlObjectiveService implements ObjectiveService {
         resourceDepotLastCounts.clear();
         resourceDepotLastUpdate.clear();
         containerPlacementCooldowns.clear();
+        holdGroundActivePlayers.clear();
         firstValidStructureSeenAt.clear();
         lastStructureIntegrityCheck.clear();
         lastStructureDetections.clear();

@@ -2,8 +2,8 @@ name: Trenched
 version: '1'
 main: org.flintstqne.entrenched.Trenched
 api-version: '1.21'
-depend: [BlueMap, InventoryFramework]
-softdepend: [PlaceholderAPI]
+depend: [InventoryFramework]
+softdepend: [PlaceholderAPI, BlueMap]
 commands:
   team:
     description: Team commands
@@ -88,6 +88,10 @@ commands:
   unlink:
     description: Remove your Discord account link
     usage: /unlink
+  settings:
+    description: Toggle per-player settings (particles, etc.)
+    usage: /settings [particles]
+    aliases: [prefs]
 
 permissions:
   entrenched.admin:

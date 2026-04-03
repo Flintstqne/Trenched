@@ -580,10 +580,57 @@ public class ObjectiveCommand implements CommandExecutor, TabCompleter {
             }
 
             player.sendMessage(line);
+
+            // For garrison buildings, show the variant upgrade path
+            if (building.type() == BuildingType.GARRISON) {
+                showGarrisonVariantGuide(player, building);
+            }
         }
 
         player.sendMessage(Component.text("─────────────────────────────")
                 .color(NamedTextColor.DARK_GRAY));
+    }
+
+    /**
+     * Shows the garrison variant upgrade guide under a registered garrison building.
+     * Highlights the current variant and shows what's needed for each tier.
+     */
+    private void showGarrisonVariantGuide(Player player, RegisteredBuilding building) {
+        String current = building.variant() != null ? building.variant() : "Basic Garrison";
+        // Strip "(needs ...)" suffix to get the base variant name
+        String currentBase = current.contains("(needs")
+                ? current.substring(0, current.indexOf(" (needs")).trim()
+                : current;
+
+        var serializer = net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer.legacySection();
+
+        player.sendMessage(serializer.deserialize("    §6─── Upgrade Paths ───"));
+
+        // Define variants in priority order (highest first)
+        record VariantInfo(String name, String requirements, String reward) {}
+        List<VariantInfo> variants = List.of(
+                new VariantInfo("Fortified",  "20+ wall/fence blocks",                          "§9Resistance II§7 (15s on arrival)"),
+                new VariantInfo("Command",    "2+ Lecterns or Banners",                         "§cStrength I§7 (30s on arrival)"),
+                new VariantInfo("Supply",     "4+ chests + 64+ items total",                    "§6Saturation§7 (60s) + §a+1 spawn"),
+                new VariantInfo("Armory",     "Anvil/Smithing + chest + 5 iron ingots",         "§bResistance I§7 (30s on arrival)"),
+                new VariantInfo("Medical",    "Brewing Stand + chest + 3 healing potions",      "§dRegen I§7 (30s on arrival)"),
+                new VariantInfo("Basic",      "3+ team beds (default)",                         "§7Spawn point")
+        );
+
+        for (VariantInfo v : variants) {
+            boolean isActive = currentBase.contains(v.name);
+            String prefix;
+            String nameColor;
+            if (isActive) {
+                prefix = "    §a✓ ";
+                nameColor = "§a";
+            } else {
+                prefix = "    §7  ";
+                nameColor = "§7";
+            }
+            player.sendMessage(serializer.deserialize(
+                    prefix + nameColor + v.name + "§8: §f" + v.requirements + " §8→ " + v.reward));
+        }
     }
 
     /**

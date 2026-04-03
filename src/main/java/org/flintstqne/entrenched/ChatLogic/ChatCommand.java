@@ -127,10 +127,7 @@ public final class ChatCommand implements CommandExecutor {
                 }
             }
             case REGION -> {
-                // Region chat is always available if regionRenderer exists
-                if (regionRenderer == null) {
-                    return "Region chat is not available.";
-                }
+                // Region chat is always available (uses grid math, not BlueMap)
             }
             case GENERAL -> {
                 // General is always available
@@ -140,10 +137,9 @@ public final class ChatCommand implements CommandExecutor {
     }
 
     /**
-     * Gets the region ID for a location.
+     * Gets the region ID for a location (pure grid math, no BlueMap dependency).
      */
     private String getRegionId(Location location) {
-        if (regionRenderer == null) return null;
 
         int blockX = location.getBlockX();
         int blockZ = location.getBlockZ();
@@ -168,8 +164,15 @@ public final class ChatCommand implements CommandExecutor {
      * Gets the region name for a location.
      */
     private String getRegionName(Location location) {
-        if (regionRenderer == null) return "Unknown";
-        return regionRenderer.getRegionNameForBlock(location.getBlockX(), location.getBlockZ()).orElse("Unknown");
+        if (regionRenderer != null) {
+            return regionRenderer.getRegionNameForBlock(location.getBlockX(), location.getBlockZ()).orElseGet(() -> {
+                String id = getRegionId(location);
+                return id != null ? id : "Unknown";
+            });
+        }
+        // Fallback to region ID when BlueMap is not available
+        String id = getRegionId(location);
+        return id != null ? id : "Unknown";
     }
 
     /**

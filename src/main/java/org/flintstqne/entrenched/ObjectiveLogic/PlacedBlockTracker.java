@@ -226,7 +226,7 @@ public class PlacedBlockTracker {
         }
 
         long elapsed = System.currentTimeMillis() - startMs;
-        logger.info("[PlacedBlocks] Flush: " + writes.size() + " writes, " + deletes.size() + " deletes in " + elapsed + "ms");
+        //logger.info("[PlacedBlocks] Flush: " + writes.size() + " writes, " + deletes.size() + " deletes in " + elapsed + "ms");
     }
 
     // ==================== CLEANUP ====================

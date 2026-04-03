@@ -62,6 +62,9 @@ public class BuildingBenefitManager implements Listener {
 
     // Optional reference to DeathListener - used to suppress exit buffs on death
     private DeathListener deathListener;
+
+    // Optional reference to SettingsCommand - used to check particle toggle
+    private org.flintstqne.entrenched.Utils.SettingsCommand settingsCommand;
     // Tasks
     private BukkitTask benefitTickTask;
     private BukkitTask particleTask;
@@ -71,10 +74,6 @@ public class BuildingBenefitManager implements Listener {
 
     // Track watchtower occupants - buildingId -> set of player UUIDs on platform
     private final Map<Integer, Set<UUID>> watchtowerOccupants = new ConcurrentHashMap<>();
-
-    // Track last enemy alert time per region to prevent spam - regionId -> timestamp
-    private final Map<String, Long> lastEnemyAlert = new ConcurrentHashMap<>();
-    private static final long ENEMY_ALERT_COOLDOWN_MS = 30000; // 30 seconds
 
     // Track players with active outpost buffs - playerId -> (variantName -> expiry timestamp)
     // Keyed per-variant so different outpost types each have their own independent cooldown.
@@ -93,7 +92,7 @@ public class BuildingBenefitManager implements Listener {
 
     // Per-spotter cooldown to prevent spam — UUID → cooldown-expiry timestamp ms
     private final Map<UUID, Long> spyglassCooldowns = new ConcurrentHashMap<>();
-    private static final long SPYGLASS_COOLDOWN_MS = 5_000L; // 5 seconds between spots
+    private static final long SPYGLASS_COOLDOWN_MS = 30_000L; // 30 seconds between spots
 
     // Counter for ambient sound (plays every 6th particle tick = ~3 seconds)
     private int ambientSoundCounter = 0;
@@ -115,6 +114,13 @@ public class BuildingBenefitManager implements Listener {
      */
     public void setRegionRenderer(RegionRenderer regionRenderer) {
         this.regionRenderer = regionRenderer;
+    }
+
+    /**
+     * Sets the settings command for per-player particle toggle checks.
+     */
+    public void setSettingsCommand(org.flintstqne.entrenched.Utils.SettingsCommand settingsCommand) {
+        this.settingsCommand = settingsCommand;
     }
 
     /**
@@ -182,8 +188,8 @@ public class BuildingBenefitManager implements Listener {
     public void clearTrackedData() {
         playersInBuildings.clear();
         watchtowerOccupants.clear();
-        lastEnemyAlert.clear();
         outpostBuffExpiry.clear();
+        garrisonDoorCache.clear();
         cachedBuildings = Collections.emptyList();
         lastBuildingCacheRefreshMs = 0L;
 
@@ -405,9 +411,12 @@ public class BuildingBenefitManager implements Listener {
     // ==================== WATCHTOWER DETECTION ====================
 
     /**
-     * Processes watchtower passive range-awareness for a player on the platform.
-     * Enemies entering detection range still trigger a team alert, but actual spotting
-     * (Glowing) requires the player to actively aim through a spyglass — see onSpyglassUse().
+     * Tracks watchtower platform occupancy for a player.
+     * Occupant tracking is required so that {@link #onSpyglassUse(PlayerInteractEvent)}
+     * can verify the spotter is on a friendly watchtower platform.
+     * <p>
+     * No passive "radar" alerts are sent — the team is only notified when a player
+     * actively spots an enemy through the spyglass.
      */
     private void tickWatchtowerDetection(Player occupant, String occupantTeam, RegisteredBuilding watchtower, World world) {
         // Check if player is on the watchtower platform
@@ -420,39 +429,9 @@ public class BuildingBenefitManager implements Listener {
             return;
         }
 
-        // Add to occupants
+        // Add to occupants — used by spyglass spotting to verify platform presence
         watchtowerOccupants.computeIfAbsent(watchtower.objectiveId(), k -> ConcurrentHashMap.newKeySet())
                 .add(occupant.getUniqueId());
-
-        // Calculate detection range based on tower height
-        int towerHeight = watchtower.maxY() - watchtower.minY();
-        int detectionRange = calculateDetectionRange(towerHeight);
-        double detectionRangeSquared = detectionRange * detectionRange;
-
-        // Find enemies within range — only used to trigger the passive alert message
-        Location towerTop = new Location(world, watchtower.anchorX(), watchtower.maxY(), watchtower.anchorZ());
-        String regionId = watchtower.regionId();
-
-        boolean enemyNearby = false;
-        for (Player target : world.getPlayers()) {
-            if (target.getUniqueId().equals(occupant.getUniqueId())) continue;
-
-            Optional<String> targetTeamOpt = teamService.getPlayerTeam(target.getUniqueId());
-            if (targetTeamOpt.isEmpty()) continue;
-
-            String targetTeam = targetTeamOpt.get();
-            if (targetTeam.equalsIgnoreCase(occupantTeam)) continue; // Same team
-
-            if (target.getLocation().distanceSquared(towerTop) <= detectionRangeSquared) {
-                enemyNearby = true;
-                break; // One is enough to trigger the alert
-            }
-        }
-
-        // Send passive range alert if enemies are nearby (throttled by cooldown)
-        if (enemyNearby) {
-            sendEnemyAlert(occupantTeam, regionId, watchtower);
-        }
     }
 
     /**
@@ -524,34 +503,42 @@ public class BuildingBenefitManager implements Listener {
         // Step 1: Entity-only raytrace to find who the player is aiming at.
         // This ignores blocks entirely so the watchtower's own fences/walls/slabs
         // cannot prevent the spotter from acquiring a target.
+        // raySize=1.0 expands each entity's bounding box by 1 block in all
+        // directions so aiming through the spyglass zoom at long range (128+ blocks)
+        // feels natural — the enemy just needs to be near the crosshair, not dead-centre.
         RayTraceResult entityResult = spotter.getWorld().rayTraceEntities(
                 spotter.getEyeLocation(),
                 spotter.getEyeLocation().getDirection(),
                 detectionRange,
-                0.3,    // small hitbox expansion for comfortable aiming
+                1.0,
                 entity -> entity instanceof Player p && !p.getUniqueId().equals(spotter.getUniqueId())
         );
 
+        //if (entityResult == null || !(entityResult.getHitEntity() instanceof Player enemy)) {
+            //spotter.sendMessage(Component.text("No target in sight.")
+                    //       .color(NamedTextColor.GRAY));
+            //return;
+            //}
+
+        // Extract the enemy from the entity raytrace result — bail if no player found
         if (entityResult == null || !(entityResult.getHitEntity() instanceof Player enemy)) {
             spotter.sendMessage(Component.text("No target in sight.")
                     .color(NamedTextColor.GRAY));
             return;
         }
-
-        // Step 2: Verify genuine line-of-sight via block raytrace, but skip any
         // block that falls inside the watchtower's own bounding box.  Without this,
         // the tower's platform fences/walls block the ray before it leaves the
         // structure, making it impossible to spot anyone.
-        if (!hasLineOfSightPastWatchtower(spotter, enemy, watchtower)) {
-            spotter.sendMessage(Component.text("No target in sight — view obstructed.")
-                    .color(NamedTextColor.GRAY));
-            return;
-        }
+        // if (!hasLineOfSightPastWatchtower(spotter, enemy, watchtower)) {
+        //    spotter.sendMessage(Component.text("No target in sight — view obstructed.")
+        //           .color(NamedTextColor.GRAY));
+        //    return;
+        //}
 
         // ── Verify the hit entity is an enemy ────────────────────────────────────
-        Optional<String> enemyTeamOpt = teamService.getPlayerTeam(enemy.getUniqueId());
-        if (enemyTeamOpt.isEmpty() || enemyTeamOpt.get().equalsIgnoreCase(spotterTeam)) {
-            spotter.sendMessage(Component.text("No enemy in crosshair.")
+         Optional<String> enemyTeamOpt = teamService.getPlayerTeam(enemy.getUniqueId());
+         if (enemyTeamOpt.isEmpty() || enemyTeamOpt.get().equalsIgnoreCase(spotterTeam)) {
+             spotter.sendMessage(Component.text("No enemy in crosshair.")
                     .color(NamedTextColor.GRAY));
             return;
         }
@@ -660,8 +647,9 @@ public class BuildingBenefitManager implements Listener {
         Location current = start.clone();
         double remaining = totalDistance;
 
-        // Safety cap — a watchtower platform is at most a few blocks thick
-        for (int i = 0; i < 10 && remaining > 0.5; i++) {
+        // Safety cap — 20 iterations handles thick multi-layer platforms
+        // (fences + walls + slabs).  Each iteration advances past one tower block.
+        for (int i = 0; i < 20 && remaining > 0.5; i++) {
             RayTraceResult blockHit = spotter.getWorld().rayTraceBlocks(
                     current, direction, remaining,
                     FluidCollisionMode.NEVER,
@@ -684,9 +672,12 @@ public class BuildingBenefitManager implements Listener {
             if (bx >= watchtower.minX() && bx <= watchtower.maxX() &&
                 by >= watchtower.minY() && by <= watchtower.maxY() &&
                 bz >= watchtower.minZ() && bz <= watchtower.maxZ()) {
-                // Advance 0.15 blocks past the hit point so we don't re-hit the same face
+                // Advance 1.0 block past the hit point to reliably clear the block.
+                // A full block advance prevents the ray from re-hitting the same face
+                // or getting stuck in a corner, especially with non-full blocks like
+                // fences and walls that have complex collision shapes.
                 double hitDist = blockHit.getHitPosition().distance(current.toVector());
-                double advance = hitDist + 0.15;
+                double advance = hitDist + 1.0;
                 current = current.clone().add(direction.clone().multiply(advance));
                 remaining -= advance;
                 continue;
@@ -710,40 +701,6 @@ public class BuildingBenefitManager implements Listener {
         spyglassCooldowns.entrySet().removeIf(entry -> entry.getValue() < now);
     }
 
-    /**
-     * Sends enemy detection alert to team.
-     */
-    private void sendEnemyAlert(String team, String regionId, RegisteredBuilding watchtower) {
-        String alertKey = team + ":" + regionId;
-        long now = System.currentTimeMillis();
-        Long lastAlert = lastEnemyAlert.get(alertKey);
-
-        if (lastAlert != null && (now - lastAlert) < ENEMY_ALERT_COOLDOWN_MS) {
-            return; // On cooldown
-        }
-
-        lastEnemyAlert.put(alertKey, now);
-
-        String regionName = getRegionDisplayName(regionId);
-
-        // Alert team members in the game world only — not lobby/spectator players
-        World gameWorld = roundService.getGameWorld().orElse(null);
-        if (gameWorld == null) return;
-
-        for (Player player : gameWorld.getPlayers()) {
-            Optional<String> playerTeam = teamService.getPlayerTeam(player.getUniqueId());
-            if (playerTeam.isEmpty() || !playerTeam.get().equalsIgnoreCase(team)) continue;
-            // Only alert players who are actually in the same region
-            String playerRegion = regionService.getRegionIdForLocation(
-                    player.getLocation().getBlockX(), player.getLocation().getBlockZ());
-            if (!regionId.equals(playerRegion)) continue;
-            player.sendMessage(Component.text("[Watchtower] ", NamedTextColor.YELLOW)
-                    .append(Component.text("Enemy spotted in ", NamedTextColor.WHITE))
-                    .append(Component.text(regionName, NamedTextColor.GOLD))
-                    .append(Component.text("!", NamedTextColor.WHITE)));
-            player.playSound(player.getLocation(), Sound.BLOCK_NOTE_BLOCK_BELL, 1.0f, 1.0f);
-        }
-    }
 
     private void pruneTrackedPlayers(List<RegisteredBuilding> buildings, World gameWorld) {
         List<UUID> staleTrackedPlayers = new ArrayList<>();
@@ -880,6 +837,11 @@ public class BuildingBenefitManager implements Listener {
                     continue; // Only show to team members
                 }
 
+                // Respect per-player particle toggle
+                if (settingsCommand != null && !settingsCommand.areParticlesEnabled(player.getUniqueId())) {
+                    continue;
+                }
+
                 spawnBuildingParticles(player, building, gameWorld);
 
                 // Play subtle ambient sound every ~3 seconds for nearby players (within 16 blocks)
@@ -914,20 +876,28 @@ public class BuildingBenefitManager implements Listener {
                 count = 3;
             }
             case WATCHTOWER -> {
-                // Blue beacon-like particles at platform level
-                particleLoc = new Location(world,
-                        building.anchorX() + 0.5,
-                        building.maxY() + 0.5,
-                        building.anchorZ() + 0.5);
+                // Blue beacon-like particles on a solid block at the tower top.
+                // Scan the platform area for a solid block to avoid floating particles.
+                Location solidTop = findSolidTopBlock(world, building);
+                if (solidTop == null) {
+                    return; // No solid block found — skip particles this tick
+                }
+                particleLoc = solidTop;
                 particleType = Particle.SOUL_FIRE_FLAME;
                 count = 5;
             }
             case GARRISON -> {
-                // Team-colored flames
-                particleLoc = new Location(world,
-                        building.anchorX() + 0.5,
-                        building.anchorY() + 0.5,
-                        building.anchorZ() + 0.5);
+                // Team-colored flames at the garrison door (entrance)
+                Location doorLoc = findGarrisonDoor(world, building);
+                if (doorLoc == null) {
+                    // Fallback to center if no door found
+                    particleLoc = new Location(world,
+                            building.anchorX() + 0.5,
+                            building.anchorY() + 0.5,
+                            building.anchorZ() + 0.5);
+                } else {
+                    particleLoc = doorLoc;
+                }
                 particleType = building.team().equalsIgnoreCase("RED") ?
                         Particle.FLAME : Particle.SOUL_FIRE_FLAME;
                 count = 4;
@@ -943,6 +913,96 @@ public class BuildingBenefitManager implements Listener {
         particleLoc.add(offsetX, Math.random() * 0.5, offsetZ);
 
         viewer.spawnParticle(particleType, particleLoc, count, 0.1, 0.2, 0.1, 0.01);
+    }
+
+    /**
+     * Finds a random solid block at the top of a watchtower to spawn particles on.
+     * Scans from maxY downward within the tower footprint, picks a random solid
+     * surface block, and returns a location just above it.
+     *
+     * @return Location on top of a solid block, or null if none found
+     */
+    private Location findSolidTopBlock(World world, RegisteredBuilding building) {
+        // Collect solid surface candidates in the top few layers of the tower
+        List<Block> candidates = new ArrayList<>();
+        int scanDepth = 3; // Check the top 3 Y layers for solid blocks
+
+        for (int y = building.maxY(); y >= building.maxY() - scanDepth && y >= building.minY(); y--) {
+            for (int x = building.minX(); x <= building.maxX(); x++) {
+                for (int z = building.minZ(); z <= building.maxZ(); z++) {
+                    Block block = world.getBlockAt(x, y, z);
+                    if (block.getType().isSolid()) {
+                        // Only count as a surface block if the block above is air/passable
+                        Block above = world.getBlockAt(x, y + 1, z);
+                        if (!above.getType().isSolid()) {
+                            candidates.add(block);
+                        }
+                    }
+                }
+            }
+            // Once we find at least one candidate in a layer, stop scanning deeper
+            if (!candidates.isEmpty()) break;
+        }
+
+        if (candidates.isEmpty()) {
+            return null;
+        }
+
+        // Pick a random solid block each tick for a distributed particle effect
+        Block chosen = candidates.get((int) (Math.random() * candidates.size()));
+        return new Location(world, chosen.getX() + 0.5, chosen.getY() + 1.0, chosen.getZ() + 0.5);
+    }
+
+    /**
+     * Finds a door block in a garrison building and returns a location at the door
+     * for particle effects. Scans the building bounds for door materials and returns
+     * a location just in front of the door (on the outside face).
+     *
+     * Uses a per-building cache to avoid rescanning every tick.
+     *
+     * @return Location at the door, or null if no door found
+     */
+    private final Map<Integer, Location> garrisonDoorCache = new ConcurrentHashMap<>();
+
+    private Location findGarrisonDoor(World world, RegisteredBuilding building) {
+        // Check cache first
+        Location cached = garrisonDoorCache.get(building.objectiveId());
+        if (cached != null) {
+            return cached.clone();
+        }
+
+        // Scan the building bounds for door blocks
+        for (int y = building.minY(); y <= building.maxY(); y++) {
+            for (int x = building.minX(); x <= building.maxX(); x++) {
+                for (int z = building.minZ(); z <= building.maxZ(); z++) {
+                    Block block = world.getBlockAt(x, y, z);
+                    String name = block.getType().name();
+                    // Match door blocks but not trapdoors
+                    if (name.contains("DOOR") && !name.contains("TRAPDOOR")) {
+                        // Found a door — place particles at the door block
+                        Location doorLoc = new Location(world, x + 0.5, y + 0.1, z + 0.5);
+                        garrisonDoorCache.put(building.objectiveId(), doorLoc);
+                        return doorLoc.clone();
+                    }
+                }
+            }
+        }
+
+        // Fallback: check for fence gates
+        for (int y = building.minY(); y <= building.maxY(); y++) {
+            for (int x = building.minX(); x <= building.maxX(); x++) {
+                for (int z = building.minZ(); z <= building.maxZ(); z++) {
+                    Block block = world.getBlockAt(x, y, z);
+                    if (block.getType().name().contains("FENCE_GATE")) {
+                        Location doorLoc = new Location(world, x + 0.5, y + 0.1, z + 0.5);
+                        garrisonDoorCache.put(building.objectiveId(), doorLoc);
+                        return doorLoc.clone();
+                    }
+                }
+            }
+        }
+
+        return null; // No door found
     }
 
     // ==================== HELPER METHODS ====================

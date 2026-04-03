@@ -30,16 +30,16 @@ import org.flintstqne.entrenched.Utils.ChatUtil;
 import org.flintstqne.entrenched.Utils.PlaceholderExpansion;
 import org.flintstqne.entrenched.Utils.ScoreboardUtil;
 
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.UUID;
 
 public final class Trenched extends JavaPlugin {
 
-    public static final String WORLD_NAME = "world";
-
     private ConfigManager configManager;
     private boolean bluemapAvailable;
-    private static TeamService teamService;
+    private TeamService teamService;
     private TeamDb teamDb;
     private RoundDb roundDb;
     private RoundService roundService;
@@ -84,7 +84,10 @@ public final class Trenched extends JavaPlugin {
     private DepotListener depotListener;
     private DepotParticleManager depotParticleManager;
 
-    // Discord ↔ Minecraft Linking
+    // Player Settings
+    private org.flintstqne.entrenched.Utils.SettingsCommand settingsCommand;
+
+    // Discord â†” Minecraft Linking
     private LinkDb linkDb;
     private LinkService linkService;
 
@@ -110,6 +113,11 @@ public final class Trenched extends JavaPlugin {
         roundService = new SqlRoundService(roundDb);
         getLogger().info("[Trenched] Round system initialized");
 
+        // If there's an active round with a timestamped world name (e.g. world_1711234567890),
+        // Bukkit won't auto-load it because server.properties still says level-name=world.
+        // Load it from disk now so the rest of the plugin can find it.
+        ensureGameWorldLoaded();
+
         // Get the game world - prefer the world from active round, fall back to config
         World world = roundService.getGameWorld()
                 .orElseGet(() -> Bukkit.getWorld(configManager.getWorldName()));
@@ -124,7 +132,15 @@ public final class Trenched extends JavaPlugin {
 
         // BlueMap integration (only if enabled in config)
         if (configManager.isBlueMapEnabled()) {
-            bluemapAvailable = BlueMapIntegration.initialize(this);
+            bluemapAvailable = BlueMapIntegration.initialize(this,
+                    api -> {
+                        // Fires every time BlueMap finishes loading (including /bluemap reload)
+                        if (gameWorld != null && regionRenderer != null) {
+                            regionRenderer.generateAndPersistNamesForCurrentRound(gameWorld);
+                            regionRenderer.refreshMarkers(gameWorld);
+                        }
+                    },
+                    api -> getLogger().info("BlueMap shutting down â€” markers will be re-created on next load."));
             if (bluemapAvailable) {
                 getLogger().info("BlueMap integration enabled.");
             } else {
@@ -144,12 +160,12 @@ public final class Trenched extends JavaPlugin {
         // Initialize Division system
         divisionDb = new DivisionDb(this);
         divisionService = new SqlDivisionService(divisionDb, roundService, teamService, configManager);
-        getLogger().info("[TerrainGen] Division system initialized");
+        getLogger().info("[Entrenched] Division system initialized");
 
         // Initialize Party system
         partyDb = new PartyDb(this);
         partyService = new SqlPartyService(partyDb, roundService, teamService, configManager);
-        getLogger().info("[TerrainGen] Party system initialized");
+        getLogger().info("[Entrenched] Party system initialized");
 
         // Initialize Region Capture system
         regionDb = new RegionDb(this);
@@ -163,7 +179,7 @@ public final class Trenched extends JavaPlugin {
         regionCaptureListener = new RegionCaptureListener(regionService, teamService, configManager, regionRenderer);
 
         // NOTE: Capture callback is set later, after roadService is initialized
-        getLogger().info("[TerrainGen] Region capture system initialized");
+        getLogger().info("[Entrenched] Region capture system initialized");
 
         // Initialize Objective System (before road service so we can use it in capture callback)
         objectiveDb = new ObjectiveDb(this);
@@ -206,12 +222,12 @@ public final class Trenched extends JavaPlugin {
         objectiveListener = new ObjectiveListener(this, objectiveService, objectiveUIManager, regionService, teamService, configManager);
         ((SqlObjectiveService) objectiveService).setObjectiveListener(objectiveListener);
 
-        // Wire up building destroyed callback — broadcasts specific repair needs to team
+        // Wire up building destroyed callback â€” broadcasts specific repair needs to team
         objectiveService.setBuildingDestroyedCallback((building, regionName, detectionResult) -> {
             for (Player player : Bukkit.getOnlinePlayers()) {
                 Optional<String> playerTeam = teamService.getPlayerTeam(player.getUniqueId());
                 if (playerTeam.isPresent() && playerTeam.get().equalsIgnoreCase(building.team())) {
-                    player.sendMessage(configManager.getPrefix() + org.bukkit.ChatColor.RED + "⚠ [Alert] " +
+                    player.sendMessage(configManager.getPrefix() + org.bukkit.ChatColor.RED + "âš  [Alert] " +
                             building.type().getDisplayName() + " destroyed in " + regionName + "!");
                     player.sendMessage(org.bukkit.ChatColor.GRAY + "  Location: " + org.bukkit.ChatColor.WHITE +
                             building.anchorX() + ", " + building.anchorY() + ", " + building.anchorZ());
@@ -221,17 +237,17 @@ public final class Trenched extends JavaPlugin {
                         java.util.List<String> checklist = detectionResult.getChecklist();
                         for (String line : checklist) {
                             if (line.isEmpty()) continue;
-                            boolean failing = line.startsWith("✗") || line.contains("✗");
-                            boolean isHeader = line.startsWith("§");
+                            boolean failing = line.startsWith("âœ—") || line.contains("âœ—");
+                            boolean isHeader = line.startsWith("Â§");
                             if (failing) {
-                                // Only show failing items — these are what needs repair
+                                // Only show failing items â€” these are what needs repair
                                 player.sendMessage(org.bukkit.ChatColor.RED + "  " + line);
                             } else if (isHeader) {
                                 // Skip variant headers for destroyed building alerts
                             }
-                            // Skip passing items (✓) to keep the alert concise
+                            // Skip passing items (âœ“) to keep the alert concise
                         }
-                        player.sendMessage(org.bukkit.ChatColor.YELLOW + "  🔧 Repair these issues to restore the building!");
+                        player.sendMessage(org.bukkit.ChatColor.YELLOW + "  ðŸ”§ Repair these issues to restore the building!");
                     }
                 }
             }
@@ -246,7 +262,7 @@ public final class Trenched extends JavaPlugin {
         buildingBenefitManager = new BuildingBenefitManager(this, objectiveService, regionService, teamService, roundService, configManager);
         buildingBenefitManager.setRegionRenderer(regionRenderer);
         buildingBenefitManager.start();
-        // Register as event listener — required for the spyglass spotting system
+        // Register as event listener â€” required for the spyglass spotting system
         getServer().getPluginManager().registerEvents(buildingBenefitManager, this);
 
         // Initialize Garrison Spawn Service for quick-travel system
@@ -256,7 +272,7 @@ public final class Trenched extends JavaPlugin {
         garrisonSpawnListener = new GarrisonSpawnListener(garrisonSpawnService);
         getServer().getPluginManager().registerEvents(garrisonSpawnListener, this);
 
-        getLogger().info("[TerrainGen] Objective system initialized");
+        getLogger().info("[Entrenched] Objective system initialized");
 
         // Check if a round is already active, if not start a new one (if enabled in config)
         // This must be done AFTER regionService and regionNotificationManager are initialized
@@ -293,6 +309,14 @@ public final class Trenched extends JavaPlugin {
         newRoundInitializer = new NewRoundInitializer(
                 this, roundService, teamService, teamDb, regionRenderer, scoreboardUtil, configManager, phaseScheduler
         );
+        // Wire up available services immediately
+        newRoundInitializer.setRegionService(regionService);
+        newRoundInitializer.setRegionNotificationManager(regionNotificationManager);
+        newRoundInitializer.setObjectiveService(objectiveService);
+        newRoundInitializer.setEndgameManager(endgameManager);
+        if (placedBlockTracker != null) {
+            newRoundInitializer.setPlacedBlockTracker(placedBlockTracker);
+        }
 
         // Initialize Road/Supply Line system
         roadDb = new RoadDb(this);
@@ -301,7 +325,10 @@ public final class Trenched extends JavaPlugin {
         deathListener = new DeathListener(this, roadService, teamService, configManager);
         supplyPenaltyListener = new SupplyPenaltyListener(roadService, teamService, deathListener);
 
-        // Hook player death → immediately drop building benefit tracking so no spurious exit buff fires
+        // Wire roadService to NewRoundInitializer (created earlier but roadService wasn't available yet)
+        newRoundInitializer.setRoadService(roadService);
+
+        // Hook player death â†’ immediately drop building benefit tracking so no spurious exit buff fires
         deathListener.setDeathCallback(player ->
                 buildingBenefitManager.notifyPlayerDied(player.getUniqueId()));
 
@@ -331,7 +358,8 @@ public final class Trenched extends JavaPlugin {
 
 
         // Connect capture callback to notification manager AND auto-scan for roads
-        final World captureWorld = gameWorld;
+        // NOTE: Use roundService.getGameWorld() dynamically instead of closing over a World
+        // reference, so that after a new round creates a new world, this callback still works.
         sqlRegionService.setCaptureCallback((regionId, newOwner, previousOwner) -> {
             // Broadcast capture notification
             regionNotificationManager.broadcastCapture(regionId, newOwner, previousOwner);
@@ -351,21 +379,57 @@ public final class Trenched extends JavaPlugin {
                 endgameManager.recordCapture(regionId);
             }
 
-            // Auto-scan for existing road blocks in the captured region
-            // This allows pre-existing roads to be automatically recognized
-            // NOTE: Must run on main thread since we access world blocks
-            if (captureWorld != null && newOwner != null) {
+            // Notify divisions whose depots in this region just became vulnerable
+            if (depotService != null && divisionService != null && previousOwner != null) {
+                List<org.flintstqne.entrenched.DivisionLogic.DepotLocation> depotsInRegion =
+                        depotService.getDepotsInRegion(regionId);
+                // Find depots belonging to the previous owner's team â€” they are now vulnerable
+                java.util.Set<Integer> notifiedDivisions = new java.util.HashSet<>();
+                for (org.flintstqne.entrenched.DivisionLogic.DepotLocation depot : depotsInRegion) {
+                    if (notifiedDivisions.contains(depot.divisionId())) continue;
+                    Optional<org.flintstqne.entrenched.DivisionLogic.Division> divOpt =
+                            divisionService.getDivision(depot.divisionId());
+                    if (divOpt.isEmpty()) continue;
+                    org.flintstqne.entrenched.DivisionLogic.Division division = divOpt.get();
+                    // Only alert if the depot's team lost this region (i.e., depot is now vulnerable)
+                    if (!division.team().equalsIgnoreCase(previousOwner)) continue;
+                    notifiedDivisions.add(depot.divisionId());
+                    String regionName = regionNotificationManager.getRegionDisplayName(regionId);
+                    for (org.flintstqne.entrenched.DivisionLogic.DivisionMember member :
+                            divisionService.getMembers(division.divisionId())) {
+                        Player memberPlayer = Bukkit.getPlayer(java.util.UUID.fromString(member.playerUuid()));
+                        if (memberPlayer != null && memberPlayer.isOnline()) {
+                            memberPlayer.sendMessage(configManager.getPrefix() +
+                                    ChatColor.RED + "âš  " + ChatColor.YELLOW +
+                                    "Your division depot in " + ChatColor.WHITE + regionName +
+                                    ChatColor.YELLOW + " is now " + ChatColor.RED + "VULNERABLE" +
+                                    ChatColor.YELLOW + "! Enemies can raid it.");
+                        }
+                    }
+                }
+            }
+
+            // Auto-scan for existing road blocks in the captured region.
+            // Dynamically resolve the current game world so this works after new rounds.
+            World currentGameWorld = roundService.getGameWorld().orElse(null);
+            if (currentGameWorld != null && newOwner != null) {
                 // Delay slightly to ensure capture is fully processed
                 Bukkit.getScheduler().runTaskLater(this, () -> {
-                    int found = roadService.scanRegionForRoads(regionId, newOwner, captureWorld);
+                    int found = roadService.scanRegionForRoads(regionId, newOwner, currentGameWorld);
                     if (found > 0) {
-                        getLogger().info("[TerrainGen] Auto-scanned " + regionId + " on capture: " + found + " road blocks found for " + newOwner);
+                        getLogger().info("[Entrenched] Auto-scanned " + regionId + " on capture: " + found + " road blocks found for " + newOwner);
+                    }
+
+                    // Also recalculate supply for the previous owner â€” they just lost
+                    // a region, so their supply chain may be broken
+                    if (previousOwner != null && !previousOwner.isEmpty()) {
+                        roadService.recalculateSupply(previousOwner);
                     }
                 }, 20L); // 1 second delay
             }
         });
 
-        getLogger().info("[TerrainGen] Road/supply line system initialized");
+        getLogger().info("[Entrenched] Road/supply line system initialized");
 
         // Initialize Merit System
         meritDb = new MeritDb(this);
@@ -383,7 +447,7 @@ public final class Trenched extends JavaPlugin {
         scoreboardUtil.setObjectiveService(objectiveService);
         // Connect scoreboard to endgame manager for endgame state display
         scoreboardUtil.setEndgameManager(endgameManager);
-        getLogger().info("[TerrainGen] Merit system initialized");
+        getLogger().info("[Entrenched] Merit system initialized");
 
         // Start objective UI and listeners (initialized earlier in startup)
         objectiveUIManager.start();
@@ -395,7 +459,7 @@ public final class Trenched extends JavaPlugin {
         // Initialize and register container protection listener
         containerProtectionListener = new ContainerProtectionListener(regionService, teamService, objectiveService, configManager);
         getServer().getPluginManager().registerEvents(containerProtectionListener, this);
-        getLogger().info("[TerrainGen] Container protection system initialized");
+        getLogger().info("[Entrenched] Container protection system initialized");
 
         // Initialize Division Depot System
         if (configManager.isDepotSystemEnabled()) {
@@ -422,9 +486,9 @@ public final class Trenched extends JavaPlugin {
         // Register PlaceholderAPI expansion if available
         if (Bukkit.getPluginManager().getPlugin("PlaceholderAPI") != null) {
             new org.flintstqne.entrenched.Utils.PlaceholderExpansion(meritService, teamService, divisionService, configManager).register();
-            getLogger().info("[TerrainGen] PlaceholderAPI expansion registered");
+            getLogger().info("[Entrenched] PlaceholderAPI expansion registered");
         } else {
-            getLogger().info("[TerrainGen] PlaceholderAPI not found - placeholders not available");
+            getLogger().info("[Entrenched] PlaceholderAPI not found - placeholders not available");
         }
 
         // Initialize Statistics System
@@ -455,7 +519,10 @@ public final class Trenched extends JavaPlugin {
 
         getLogger().info("[Trenched] Statistics system initialized");
 
-        // Initialize Discord ↔ Minecraft linking system (always, so /link works in-game)
+        // Wire statService to NewRoundInitializer (created earlier but statService wasn't available yet)
+        newRoundInitializer.setStatService(statService);
+
+        // Initialize Discord â†” Minecraft linking system (always, so /link works in-game)
         linkDb = new LinkDb(this);
         linkService = new LinkService(linkDb);
         getLogger().info("[Trenched] Discord linking system initialized");
@@ -472,10 +539,10 @@ public final class Trenched extends JavaPlugin {
         // Recalculate supply for both teams on startup to ensure correct values
         // This is especially important after server restarts when road data persists
         Bukkit.getScheduler().runTaskLaterAsynchronously(this, () -> {
-            getLogger().info("[TerrainGen] Recalculating supply levels on startup...");
+            getLogger().info("[Entrenched] Recalculating supply levels on startup...");
             roadService.recalculateSupply("red");
             roadService.recalculateSupply("blue");
-            getLogger().info("[TerrainGen] Supply recalculation complete");
+            getLogger().info("[Entrenched] Supply recalculation complete");
         }, 40L); // 2 second delay to ensure everything is loaded
 
         // Start influence decay scheduler (runs every minute)
@@ -611,6 +678,21 @@ public final class Trenched extends JavaPlugin {
         Objects.requireNonNull(getCommand("unlink"), "Command `unlink` missing from plugin.yml")
                 .setExecutor(linkCommand);
 
+        // Settings command (/settings particles)
+        settingsCommand = new org.flintstqne.entrenched.Utils.SettingsCommand(this);
+        var settingsCmd = Objects.requireNonNull(getCommand("settings"), "Command `settings` missing from plugin.yml");
+        settingsCmd.setExecutor(settingsCommand);
+        settingsCmd.setTabCompleter(settingsCommand);
+
+        // Wire settings into building benefit manager for particle toggle
+        if (buildingBenefitManager != null) {
+            buildingBenefitManager.setSettingsCommand(settingsCommand);
+        }
+        // Wire settings into depot particle manager for particle toggle
+        if (depotParticleManager != null) {
+            depotParticleManager.setSettingsCommand(settingsCommand);
+        }
+
         // Events registration
         getServer().getPluginManager().registerEvents(new TeamListener(teamService, scoreboardUtil, this), this);
         getServer().getPluginManager().registerEvents(new ChatUtil(teamService, divisionService, partyService, chatChannelManager, regionRenderer, configManager, meritService), this);
@@ -627,7 +709,7 @@ public final class Trenched extends JavaPlugin {
             } else {
                 getLogger().warning("World not found; skipping BlueMap scheduling.");
             }
-            getLogger().info("[TerrainGen] Region renderer initialized with round support");
+            getLogger().info("[Entrenched] Region renderer initialized with round support");
 
         }
 
@@ -641,7 +723,7 @@ public final class Trenched extends JavaPlugin {
                 roadService.flushPendingRecalculations();
             }
         }, 100L, 100L); // Initial delay: 100 ticks (5 sec), Period: 100 ticks (5 sec)
-        getLogger().info("[TerrainGen] Road recalculation scheduler started (async)");
+        getLogger().info("[Entrenched] Road recalculation scheduler started (async)");
     }
 
     private void setWorldBorder(World world) {
@@ -654,7 +736,7 @@ public final class Trenched extends JavaPlugin {
         border.setDamageBuffer(configManager.getBorderDamageBuffer());
         border.setWarningDistance(configManager.getBorderWarningDistance());
 
-        getLogger().info("[TerrainGen] World border set: size=" + configManager.getBorderSize() +
+        getLogger().info("[Entrenched] World border set: size=" + configManager.getBorderSize() +
                 ", center=(" + configManager.getBorderCenterX() + ", " + configManager.getBorderCenterZ() + ")");
     }
 
@@ -672,7 +754,7 @@ public final class Trenched extends JavaPlugin {
             Bukkit.dispatchCommand(Bukkit.getConsoleSender(),
                     "chunky start");
 
-            getLogger().info("[TerrainGen] Started Chunky pregeneration: center=(0,0), radius=" +
+            getLogger().info("[Entrenched] Started Chunky pregeneration: center=(0,0), radius=" +
                     radiusChunks + " chunks");
         });
     }
@@ -727,6 +809,11 @@ public final class Trenched extends JavaPlugin {
             }
 
             // TeamListener will schedule a scoreboard update shortly after join; no-op here.
+
+            // Load player settings (particle toggle, etc.)
+            if (settingsCommand != null) {
+                settingsCommand.loadPlayerPreference(player);
+            }
         }
 
         @EventHandler
@@ -738,6 +825,10 @@ public final class Trenched extends JavaPlugin {
             // Cleanup region notification state
             if (regionNotificationManager != null) {
                 regionNotificationManager.onPlayerQuit(event.getPlayer());
+            }
+            // Unload player settings
+            if (settingsCommand != null) {
+                settingsCommand.unloadPlayer(event.getPlayer().getUniqueId());
             }
         }
 
@@ -758,26 +849,200 @@ public final class Trenched extends JavaPlugin {
         }
     }
 
+    /**
+     * If there's an active round whose world name differs from the default (server.properties),
+     * Bukkit won't auto-load it on startup.  This method:
+     * <ol>
+     *   <li>Loads the game world from disk via {@link WorldCreator} so Bukkit knows about it.</li>
+     *   <li>Patches {@code server.properties} so the <em>next</em> restart uses the game world
+     *       directly â€” preventing a stale "world" folder from being created.</li>
+     *   <li>Removes BlueMap's auto-generated map configs for the old "world" so it doesn't
+     *       appear in the BlueMap web UI.</li>
+     * </ol>
+     */
+    private void ensureGameWorldLoaded() {
+        Optional<org.flintstqne.entrenched.RoundLogic.Round> roundOpt = roundService.getCurrentRound();
+        if (roundOpt.isEmpty()) return;
+
+        String worldName = roundOpt.get().worldName();
+        if (worldName == null || worldName.isEmpty()) return;
+
+        // â”€â”€ 1. Load the game world into Bukkit if it isn't already â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        if (Bukkit.getWorld(worldName) == null) {
+            java.io.File worldFolder = new java.io.File(Bukkit.getWorldContainer(), worldName);
+            if (!worldFolder.isDirectory()) {
+                getLogger().warning("[Trenched] Game world folder '" + worldName +
+                        "' not found on disk â€” cannot load. A new round may be needed.");
+                return;
+            }
+
+            getLogger().info("[Trenched] Loading game world '" + worldName + "' from disk...");
+
+            WorldCreator creator = new WorldCreator(worldName);
+            creator.environment(World.Environment.NORMAL);
+
+            String generatorName = configManager.getWorldGenerator();
+            if (generatorName != null && !generatorName.isEmpty()) {
+                creator.generator(generatorName);
+                getLogger().info("[Trenched]   Using generator: " + generatorName);
+            }
+
+            World loaded = Bukkit.createWorld(creator);
+            if (loaded != null) {
+                getLogger().info("[Trenched] Game world '" + worldName + "' loaded successfully (seed=" + loaded.getSeed() + ").");
+            } else {
+                getLogger().severe("[Trenched] Failed to load game world '" + worldName + "'!");
+                return;
+            }
+        } else {
+            getLogger().info("[Trenched] Game world '" + worldName + "' is already loaded.");
+        }
+
+        // â”€â”€ 2. Patch server.properties so the next restart uses the game world â”€â”€â”€â”€
+        updateServerPropertiesLevelName(worldName);
+
+        // â”€â”€ 3. Remove BlueMap map configs for stale "world" so it doesn't render â”€â”€
+        removeStaleBlueMapConfigs(worldName);
+    }
+
+    /**
+     * Rewrites {@code server.properties} to set {@code level-name} to the given world name.
+     * Takes effect on the next server restart â€” prevents the server from auto-creating a
+     * stale "world" folder when the actual game world is {@code world_<timestamp>}.
+     */
+    private void updateServerPropertiesLevelName(String gameWorldName) {
+        java.io.File propsFile = new java.io.File("server.properties");
+        if (!propsFile.exists()) {
+            getLogger().warning("[Trenched] server.properties not found â€” cannot update level-name.");
+            return;
+        }
+
+        try {
+            java.util.Properties props = new java.util.Properties();
+            try (java.io.FileInputStream fis = new java.io.FileInputStream(propsFile)) {
+                props.load(fis);
+            }
+
+            String currentLevel = props.getProperty("level-name", "world");
+            if (currentLevel.equals(gameWorldName)) {
+                return; // Already correct
+            }
+
+            getLogger().info("[Trenched] Updating server.properties level-name: '" +
+                    currentLevel + "' â†’ '" + gameWorldName + "' (takes effect on next restart)");
+
+            // Read the raw file, replace the line, and write back to preserve comments/ordering
+            java.nio.file.Path path = propsFile.toPath();
+            java.util.List<String> lines = java.nio.file.Files.readAllLines(path);
+            java.util.List<String> updated = new java.util.ArrayList<>(lines.size());
+            boolean replaced = false;
+            for (String line : lines) {
+                if (line.startsWith("level-name=")) {
+                    updated.add("level-name=" + gameWorldName);
+                    replaced = true;
+                } else {
+                    updated.add(line);
+                }
+            }
+            if (!replaced) {
+                updated.add("level-name=" + gameWorldName);
+            }
+            java.nio.file.Files.write(path, updated);
+
+        } catch (Exception e) {
+            getLogger().warning("[Trenched] Failed to update server.properties: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Removes BlueMap's auto-generated map configuration files for worlds that are NOT the
+     * active game world.  BlueMap auto-discovers all loaded Bukkit worlds and creates
+     * {@code .conf} files under {@code plugins/BlueMap/maps/}.  Removing the stale configs
+     * and scheduling a BlueMap reload hides the old "world" from the web UI.
+     */
+    private void removeStaleBlueMapConfigs(String activeGameWorld) {
+        java.io.File blueMapMapsDir = new java.io.File("plugins/BlueMap/maps");
+        if (!blueMapMapsDir.isDirectory()) return; // BlueMap not installed or not yet initialized
+
+        java.io.File[] configFiles = blueMapMapsDir.listFiles((dir, name) -> name.endsWith(".conf"));
+        if (configFiles == null) return;
+
+        boolean removedAny = false;
+        for (java.io.File conf : configFiles) {
+            String fileName = conf.getName().replace(".conf", "");
+            // BlueMap names its default map configs after the world, e.g. "world.conf",
+            // "world_nether.conf", "world_the_end.conf".  Remove any that start with
+            // the default "world" name but DON'T match the active game world.
+            if (fileName.startsWith("world") && !fileName.startsWith(activeGameWorld)) {
+                if (conf.delete()) {
+                    getLogger().info("[Trenched] Removed stale BlueMap map config: " + conf.getName());
+                    removedAny = true;
+                }
+            }
+        }
+
+        // Also clean up BlueMap's web/maps data directory for the stale world
+        java.io.File blueMapWebMaps = new java.io.File("plugins/BlueMap/web/maps");
+        if (blueMapWebMaps.isDirectory()) {
+            java.io.File[] webDirs = blueMapWebMaps.listFiles(java.io.File::isDirectory);
+            if (webDirs != null) {
+                for (java.io.File dir : webDirs) {
+                    if (dir.getName().startsWith("world") && !dir.getName().startsWith(activeGameWorld)) {
+                        getLogger().info("[Trenched] Removing stale BlueMap web data: " + dir.getName());
+                        deleteDirectory(dir);
+                        removedAny = true;
+                    }
+                }
+            }
+        }
+
+        if (removedAny) {
+            // Schedule a BlueMap reload after 5 seconds to pick up the config changes.
+            // This must run after BlueMap has finished its own initialization.
+            Bukkit.getScheduler().runTaskLater(this, () -> {
+                getLogger().info("[Trenched] Triggering BlueMap reload to clear stale world maps...");
+                Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "bluemap reload");
+            }, 20L * 10); // 10 seconds
+        }
+    }
+
+    /**
+     * Recursively deletes a directory and all its contents.
+     */
+    private void deleteDirectory(java.io.File dir) {
+        java.io.File[] children = dir.listFiles();
+        if (children != null) {
+            for (java.io.File child : children) {
+                if (child.isDirectory()) {
+                    deleteDirectory(child);
+                } else {
+                    child.delete();
+                }
+            }
+        }
+        dir.delete();
+    }
+
     private void checkAndInitializeRound(World world) {
         Optional<org.flintstqne.entrenched.RoundLogic.Round> currentRound = roundService.getCurrentRound();
 
         if (currentRound.isPresent()) {
             org.flintstqne.entrenched.RoundLogic.Round round = currentRound.get();
-            getLogger().info("[TerrainGen] ========================================");
-            getLogger().info("[TerrainGen] Continuing with existing round:");
-            getLogger().info("[TerrainGen]   Round ID: " + round.roundId());
-            getLogger().info("[TerrainGen]   Status: " + round.status());
-            getLogger().info("[TerrainGen]   Phase: " + round.currentPhase());
-            getLogger().info("[TerrainGen]   World Seed: " + round.worldSeed());
-            getLogger().info("[TerrainGen] ========================================");
+            getLogger().info("[Entrenched] ========================================");
+            getLogger().info("[Entrenched] Continuing with existing round:");
+            getLogger().info("[Entrenched]   Round ID: " + round.roundId());
+            getLogger().info("[Entrenched]   Status: " + round.status());
+            getLogger().info("[Entrenched]   Phase: " + round.currentPhase());
+            getLogger().info("[Entrenched]   World Seed: " + round.worldSeed());
+            getLogger().info("[Entrenched] ========================================");
 
             // Load region names from database for this existing round
             if (regionRenderer != null) {
                 boolean loaded = regionRenderer.loadNamesForCurrentRound();
                 if (loaded) {
-                    getLogger().info("[TerrainGen] Region names loaded from database");
+                    getLogger().info("[Entrenched] Region names loaded from database");
                 } else {
-                    getLogger().info("[TerrainGen] No saved region names found - generating and persisting now");
+                    getLogger().info("[Entrenched] No saved region names found - generating and persisting now");
                     regionRenderer.generateAndPersistNamesForCurrentRound(world);
                 }
             }
@@ -785,8 +1050,8 @@ public final class Trenched extends JavaPlugin {
             // Start region notification manager for existing round
             regionNotificationManager.start();
         } else {
-            getLogger().info("[TerrainGen] ========================================");
-            getLogger().info("[TerrainGen] No active round found - starting new round");
+            getLogger().info("[Entrenched] ========================================");
+            getLogger().info("[Entrenched] No active round found - starting new round");
 
             // Use the world seed if available, otherwise generate a random one
             long worldSeed = (world != null) ? world.getSeed() : System.currentTimeMillis();
@@ -799,17 +1064,17 @@ public final class Trenched extends JavaPlugin {
                     configManager.getRegionRedHome(),
                     configManager.getRegionBlueHome()
             );
-            getLogger().info("[TerrainGen] Regions initialized for new round");
+            getLogger().info("[Entrenched] Regions initialized for new round");
 
             // Start region notification manager
             regionNotificationManager.start();
 
-            getLogger().info("[TerrainGen]   New Round ID: " + newRound.roundId());
-            getLogger().info("[TerrainGen]   Status: " + newRound.status());
-            getLogger().info("[TerrainGen]   Phase: " + newRound.currentPhase());
-            getLogger().info("[TerrainGen]   World Seed: " + newRound.worldSeed());
-            getLogger().info("[TerrainGen] Round started automatically!");
-            getLogger().info("[TerrainGen] ========================================");
+            getLogger().info("[Entrenched]   New Round ID: " + newRound.roundId());
+            getLogger().info("[Entrenched]   Status: " + newRound.status());
+            getLogger().info("[Entrenched]   Phase: " + newRound.currentPhase());
+            getLogger().info("[Entrenched]   World Seed: " + newRound.worldSeed());
+            getLogger().info("[Entrenched] Round started automatically!");
+            getLogger().info("[Entrenched] ========================================");
         }
     }
 
@@ -828,6 +1093,9 @@ public final class Trenched extends JavaPlugin {
 
     @Override
     public void onDisable() {
+        // Unregister BlueMap lifecycle callbacks
+        BlueMapIntegration.shutdown();
+
         if (scoreboardUtil != null) scoreboardUtil.stopUpdateTask();
         if (objectiveUIManager != null) objectiveUIManager.stop();
         if (objectiveListener != null) objectiveListener.stop();
@@ -865,11 +1133,12 @@ public final class Trenched extends JavaPlugin {
         if (objectiveDb != null) objectiveDb.close();
         if (roadDb != null) roadDb.close();
         if (regionDb != null) regionDb.close();
+        if (meritDb != null) meritDb.close();
         if (partyDb != null) partyDb.close();
         if (divisionDb != null) divisionDb.close();
         if (teamDb != null) teamDb.close();
         if (roundDb != null) roundDb.close();
-        getLogger().info("TerrainGen disabled.");
+        getLogger().info("Entrenched disabled.");
     }
 
     /**
@@ -908,6 +1177,13 @@ public final class Trenched extends JavaPlugin {
     }
 
     /**
+     * Gets the player settings command, or null if not initialized.
+     */
+    public org.flintstqne.entrenched.Utils.SettingsCommand getSettingsCommand() {
+        return settingsCommand;
+    }
+
+    /**
      * Starts the influence decay scheduler.
      * Runs every minute to:
      * - Decay IP in contested regions with no activity
@@ -917,7 +1193,7 @@ public final class Trenched extends JavaPlugin {
         double decayRate = configManager.getRegionInfluenceDecayPerMinute();
 
         if (decayRate <= 0) {
-            getLogger().info("[TerrainGen] Influence decay disabled (rate = 0)");
+            getLogger().info("[Entrenched] Influence decay disabled (rate = 0)");
             return;
         }
 
@@ -934,7 +1210,7 @@ public final class Trenched extends JavaPlugin {
 
         }, 1200L, 1200L); // Initial delay: 1 minute, repeat every 1 minute
 
-        getLogger().info("[TerrainGen] Influence decay scheduler started (rate: " + decayRate + " IP/minute)");
+        getLogger().info("[Entrenched] Influence decay scheduler started (rate: " + decayRate + " IP/minute)");
     }
 
     /**
@@ -943,6 +1219,9 @@ public final class Trenched extends JavaPlugin {
      */
     private void handleRoundEnd(String winner) {
         getLogger().info("[Endgame] Round ended - winner: " + winner);
+
+        // Capture round reference BEFORE ending it (endRound clears the active round)
+        Optional<org.flintstqne.entrenched.RoundLogic.Round> roundOpt = roundService.getCurrentRound();
 
         // Stop the phase scheduler
         if (phaseScheduler != null) {
@@ -970,7 +1249,149 @@ public final class Trenched extends JavaPlugin {
             getLogger().info("[PlacedBlocks] Cleared all tracking data for round end");
         }
 
-        // TODO: Future - store round stats, display summary, etc.
+        // Save round-end stats (MVP, rounds_won, round metadata)
+        if (statService != null && roundOpt.isPresent()) {
+            org.flintstqne.entrenched.RoundLogic.Round round = roundOpt.get();
+            long endTime = System.currentTimeMillis();
+            statService.saveRoundEnd(round.roundId(), winner, round.startTime(), endTime);
+            getLogger().info("[Stats] Round " + round.roundId() + " end stats saved");
+
+            // Broadcast round-end summary to all players
+            broadcastRoundSummary(round.roundId(), winner, round.startTime(), endTime);
+        }
+    }
+
+    /**
+     * Broadcasts a round-end summary to all online players.
+     */
+    private void broadcastRoundSummary(int roundId, String winner, long startTime, long endTime) {
+        long durationMinutes = (endTime - startTime) / (1000 * 60);
+        long hours = durationMinutes / 60;
+        long mins = durationMinutes % 60;
+        String durationStr = hours > 0 ? hours + "h " + mins + "m" : mins + "m";
+
+        // Header
+        net.kyori.adventure.text.Component divider = net.kyori.adventure.text.Component.text(
+                "â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”", net.kyori.adventure.text.format.NamedTextColor.GOLD);
+
+        net.kyori.adventure.text.Component header = net.kyori.adventure.text.Component.text(
+                "âš” ROUND OVER âš”", net.kyori.adventure.text.format.NamedTextColor.GOLD)
+                .decorate(net.kyori.adventure.text.format.TextDecoration.BOLD);
+
+        // Winner line
+        net.kyori.adventure.text.Component winnerLine;
+        if ("DRAW".equalsIgnoreCase(winner)) {
+            winnerLine = net.kyori.adventure.text.Component.text("Result: ", net.kyori.adventure.text.format.NamedTextColor.GRAY)
+                    .append(net.kyori.adventure.text.Component.text("DRAW", net.kyori.adventure.text.format.NamedTextColor.YELLOW)
+                            .decorate(net.kyori.adventure.text.format.TextDecoration.BOLD));
+        } else {
+            net.kyori.adventure.text.format.NamedTextColor winColor = "RED".equalsIgnoreCase(winner)
+                    ? net.kyori.adventure.text.format.NamedTextColor.RED
+                    : net.kyori.adventure.text.format.NamedTextColor.BLUE;
+            winnerLine = net.kyori.adventure.text.Component.text("Winner: ", net.kyori.adventure.text.format.NamedTextColor.GRAY)
+                    .append(net.kyori.adventure.text.Component.text(winner.toUpperCase() + " TEAM", winColor)
+                            .decorate(net.kyori.adventure.text.format.TextDecoration.BOLD));
+        }
+
+        // Duration
+        net.kyori.adventure.text.Component durationLine = net.kyori.adventure.text.Component.text(
+                "Duration: ", net.kyori.adventure.text.format.NamedTextColor.GRAY)
+                .append(net.kyori.adventure.text.Component.text(durationStr, net.kyori.adventure.text.format.NamedTextColor.WHITE));
+
+        // Territory counts
+        int[] territory = endgameManager != null ? endgameManager.getTerritoryCount() : new int[]{0, 0};
+        net.kyori.adventure.text.Component territoryLine = net.kyori.adventure.text.Component.text(
+                "Territory: ", net.kyori.adventure.text.format.NamedTextColor.GRAY)
+                .append(net.kyori.adventure.text.Component.text(territory[0] + " ", net.kyori.adventure.text.format.NamedTextColor.RED))
+                .append(net.kyori.adventure.text.Component.text("vs ", net.kyori.adventure.text.format.NamedTextColor.GRAY))
+                .append(net.kyori.adventure.text.Component.text(territory[1] + " ", net.kyori.adventure.text.format.NamedTextColor.BLUE))
+                .append(net.kyori.adventure.text.Component.text("regions", net.kyori.adventure.text.format.NamedTextColor.GRAY));
+
+        // MVP
+        UUID mvpUuid = statService.calculateMVP(roundId);
+        net.kyori.adventure.text.Component mvpLine;
+        if (mvpUuid != null) {
+            org.bukkit.entity.Player mvpPlayer = Bukkit.getPlayer(mvpUuid);
+            String mvpName = mvpPlayer != null ? mvpPlayer.getName() : "Unknown";
+            // Try to get name from stats if player is offline
+            if (mvpPlayer == null) {
+                java.util.Optional<org.flintstqne.entrenched.StatLogic.PlayerStats> mvpStats =
+                        statService.getPlayerStats(mvpUuid);
+                if (mvpStats.isPresent()) {
+                    mvpName = mvpStats.get().getLastKnownName();
+                }
+            }
+            java.util.Optional<org.flintstqne.entrenched.StatLogic.PlayerStats> roundStats =
+                    statService.getPlayerRoundStats(mvpUuid, roundId);
+            String scoreStr = roundStats.map(s -> String.format(" (%.0f pts)", s.getMVPScore())).orElse("");
+
+            mvpLine = net.kyori.adventure.text.Component.text("MVP: ", net.kyori.adventure.text.format.NamedTextColor.GRAY)
+                    .append(net.kyori.adventure.text.Component.text("â˜… " + mvpName + scoreStr,
+                            net.kyori.adventure.text.format.NamedTextColor.GOLD)
+                            .decorate(net.kyori.adventure.text.format.TextDecoration.BOLD));
+        } else {
+            mvpLine = net.kyori.adventure.text.Component.text("MVP: ", net.kyori.adventure.text.format.NamedTextColor.GRAY)
+                    .append(net.kyori.adventure.text.Component.text("None", net.kyori.adventure.text.format.NamedTextColor.DARK_GRAY));
+        }
+
+        // Team stats
+        org.flintstqne.entrenched.StatLogic.TeamStats redStats = statService.getTeamStats("red", roundId);
+        org.flintstqne.entrenched.StatLogic.TeamStats blueStats = statService.getTeamStats("blue", roundId);
+
+        net.kyori.adventure.text.Component redLine = net.kyori.adventure.text.Component.text(
+                "RED: ", net.kyori.adventure.text.format.NamedTextColor.RED)
+                .append(net.kyori.adventure.text.Component.text(String.format("%.0f kills | %.0f objectives | %d players",
+                        redStats.getTotal(org.flintstqne.entrenched.StatLogic.StatCategory.KILLS),
+                        redStats.getTotal(org.flintstqne.entrenched.StatLogic.StatCategory.OBJECTIVES_COMPLETED),
+                        redStats.playerCount()), net.kyori.adventure.text.format.NamedTextColor.WHITE));
+
+        net.kyori.adventure.text.Component blueLine = net.kyori.adventure.text.Component.text(
+                "BLU: ", net.kyori.adventure.text.format.NamedTextColor.BLUE)
+                .append(net.kyori.adventure.text.Component.text(String.format("%.0f kills | %.0f objectives | %d players",
+                        blueStats.getTotal(org.flintstqne.entrenched.StatLogic.StatCategory.KILLS),
+                        blueStats.getTotal(org.flintstqne.entrenched.StatLogic.StatCategory.OBJECTIVES_COMPLETED),
+                        blueStats.playerCount()), net.kyori.adventure.text.format.NamedTextColor.WHITE));
+
+        // Send title + chat summary to all players
+        for (org.bukkit.entity.Player player : Bukkit.getOnlinePlayers()) {
+            // Title
+            net.kyori.adventure.text.Component titleMain;
+            if ("DRAW".equalsIgnoreCase(winner)) {
+                titleMain = net.kyori.adventure.text.Component.text("DRAW",
+                        net.kyori.adventure.text.format.NamedTextColor.YELLOW)
+                        .decorate(net.kyori.adventure.text.format.TextDecoration.BOLD);
+            } else {
+                net.kyori.adventure.text.format.NamedTextColor winColor = "RED".equalsIgnoreCase(winner)
+                        ? net.kyori.adventure.text.format.NamedTextColor.RED
+                        : net.kyori.adventure.text.format.NamedTextColor.BLUE;
+                titleMain = net.kyori.adventure.text.Component.text(winner.toUpperCase() + " WINS!",
+                        winColor).decorate(net.kyori.adventure.text.format.TextDecoration.BOLD);
+            }
+
+            net.kyori.adventure.text.Component titleSub = net.kyori.adventure.text.Component.text(
+                    "Round " + roundId + " Complete", net.kyori.adventure.text.format.NamedTextColor.GRAY);
+
+            player.showTitle(net.kyori.adventure.title.Title.title(titleMain, titleSub,
+                    net.kyori.adventure.title.Title.Times.times(
+                            java.time.Duration.ofMillis(500),
+                            java.time.Duration.ofSeconds(5),
+                            java.time.Duration.ofSeconds(2))));
+
+            // Chat summary
+            player.sendMessage(divider);
+            player.sendMessage(header);
+            player.sendMessage(winnerLine);
+            player.sendMessage(durationLine);
+            player.sendMessage(territoryLine);
+            player.sendMessage(mvpLine);
+            player.sendMessage(net.kyori.adventure.text.Component.empty());
+            player.sendMessage(redLine);
+            player.sendMessage(blueLine);
+            player.sendMessage(divider);
+
+            // Sound effects
+            player.playSound(player.getLocation(), org.bukkit.Sound.UI_TOAST_CHALLENGE_COMPLETE, 1.0f, 1.0f);
+        }
     }
 
     /**

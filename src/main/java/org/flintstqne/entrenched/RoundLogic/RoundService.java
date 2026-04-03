@@ -22,6 +22,13 @@ public interface RoundService {
 
     PhaseResult advancePhase();
 
+    /**
+     * Sets the phase directly for the current round (admin command).
+     * @param phase The target phase number
+     * @return true if the phase was set successfully
+     */
+    boolean setPhase(int phase);
+
     void endRound(String winningTeam);
 
     Map<String, String> getRegionNames(int roundId);

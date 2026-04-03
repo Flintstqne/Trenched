@@ -256,8 +256,11 @@ public final class AdminCommand implements CommandExecutor, TabCompleter {
                         sender.sendMessage(ChatColor.RED + "Phase must be between 1 and " + configManager.getMaxPhases());
                         break;
                     }
-                    // Set phase directly (would need to add this method to RoundService)
-                    sender.sendMessage(configManager.getPrefix() + ChatColor.GREEN + "Phase set to: " + phase);
+                    if (roundService.setPhase(phase)) {
+                        sender.sendMessage(configManager.getPrefix() + ChatColor.GREEN + "Phase set to: " + phase);
+                    } else {
+                        sender.sendMessage(ChatColor.RED + "Failed to set phase — no active round.");
+                    }
                 } catch (NumberFormatException e) {
                     sender.sendMessage(ChatColor.RED + "Invalid phase number.");
                 }
@@ -276,7 +279,7 @@ public final class AdminCommand implements CommandExecutor, TabCompleter {
             default -> {
                 sender.sendMessage(ChatColor.RED + "Unknown phase action: " + action);
             }
-        }// Set phase directly (would need to add this method to RoundService)
+        }// end switch
         return true;
     }
 
@@ -1671,7 +1674,7 @@ public final class AdminCommand implements CommandExecutor, TabCompleter {
                     // Now batch insert all found blocks WITHOUT triggering recalculation
                     int registered = 0;
                     for (int[] coords : foundBlocks) {
-                        roadService.insertRoadBlockWithoutRecalculation(coords[0], coords[1], coords[2], playerUuid, team);
+                        roadService.insertRoadBlockWithoutRecalculation(coords[0], coords[1], coords[2], playerUuid, team, false);
                         registered++;
                     }
 

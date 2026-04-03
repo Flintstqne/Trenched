@@ -70,11 +70,11 @@ public final class SqlRoadService implements RoadService {
 
         long now = System.currentTimeMillis();
 
-        // Insert into database
-        db.insertRoadBlock(roundId, regionId, x, y, z, playerUuid.toString(), team, now);
+        // Insert into database - player-placed blocks are always marked as such
+        db.insertRoadBlock(roundId, regionId, x, y, z, playerUuid.toString(), team, now, true);
 
         // Update cache
-        RoadBlock block = new RoadBlock(x, y, z, regionId, playerUuid.toString(), team, now);
+        RoadBlock block = new RoadBlock(x, y, z, regionId, playerUuid.toString(), team, now, true);
         roadBlockCache.put(block.toKey(), block);
 
         log("Road block placed at " + x + "," + y + "," + z + " by " + team + " in " + regionId);
@@ -84,7 +84,7 @@ public final class SqlRoadService implements RoadService {
     }
 
     @Override
-    public void insertRoadBlockWithoutRecalculation(int x, int y, int z, UUID playerUuid, String team) {
+    public void insertRoadBlockWithoutRecalculation(int x, int y, int z, UUID playerUuid, String team, boolean playerPlaced) {
         int roundId = getCurrentRoundId();
         if (roundId < 0) {
             logger.warning("[RoadService] Cannot register road block - no active round!");
@@ -100,10 +100,10 @@ public final class SqlRoadService implements RoadService {
         long now = System.currentTimeMillis();
 
         // Insert into database
-        db.insertRoadBlock(roundId, regionId, x, y, z, playerUuid.toString(), team, now);
+        db.insertRoadBlock(roundId, regionId, x, y, z, playerUuid.toString(), team, now, playerPlaced);
 
         // Update cache
-        RoadBlock block = new RoadBlock(x, y, z, regionId, playerUuid.toString(), team, now);
+        RoadBlock block = new RoadBlock(x, y, z, regionId, playerUuid.toString(), team, now, playerPlaced);
         roadBlockCache.put(block.toKey(), block);
 
         // NO recalculation - caller must call recalculateSupply() when done
@@ -257,17 +257,72 @@ public final class SqlRoadService implements RoadService {
         // Clear supply cache for this team
         supplyCache.entrySet().removeIf(e -> e.getKey().endsWith(":" + team));
 
+        // First pass: find all road-connected regions via BFS from home.
+        // This is more efficient than calculating supply for each region independently,
+        // because getConnectedRegions does a single BFS instead of N separate findRoadPathToHome calls.
+        Set<String> roadConnected = getConnectedRegions(team);
+
         // Calculate supply for each region
         for (RegionStatus region : ownedRegions) {
-            SupplyLevel level = calculateSupplyLevel(region.regionId(), team);
+            String regionId = region.regionId();
+            SupplyLevel level;
+
+            if (regionId.equals(homeRegion)) {
+                level = SupplyLevel.SUPPLIED; // Home is always supplied
+            } else if (roadConnected.contains(regionId)) {
+                // Road-connected - check for internal gaps
+                if (hasRoadGapsInRegion(regionId, team)) {
+                    level = SupplyLevel.PARTIAL;
+                } else {
+                    level = SupplyLevel.SUPPLIED;
+                }
+            } else {
+                // Not road-connected - check for alternative supply paths
+                level = calculateSupplyLevelWithoutRoad(regionId, team);
+            }
+
             boolean connected = level == SupplyLevel.SUPPLIED || level == SupplyLevel.PARTIAL;
 
             // Update database cache
-            db.updateSupplyStatus(roundId, region.regionId(), team, level, connected);
+            db.updateSupplyStatus(roundId, regionId, team, level, connected);
 
             // Update memory cache
-            supplyCache.put(region.regionId() + ":" + team, level);
+            supplyCache.put(regionId + ":" + team, level);
         }
+    }
+
+    /**
+     * Calculates supply level for a region that has no direct road connection.
+     * Used by recalculateSupply when a region is not in the road-connected set.
+     */
+    private SupplyLevel calculateSupplyLevelWithoutRoad(String regionId, String team) {
+        // Check if any adjacent regions are owned (not isolated)
+        boolean hasAdjacentOwned = false;
+        for (String adjacent : regionService.getAdjacentRegions(regionId)) {
+            Optional<RegionStatus> adjStatus = regionService.getRegionStatus(adjacent);
+            if (adjStatus.isPresent() && adjStatus.get().isOwnedBy(team)) {
+                hasAdjacentOwned = true;
+                break;
+            }
+        }
+
+        if (!hasAdjacentOwned) {
+            return SupplyLevel.ISOLATED;
+        }
+
+        // Check if there's an alternative region-based path (without roads)
+        if (!configManager.isRequireRoadForSupply() && hasRegionPathToHome(regionId, team)) {
+            return SupplyLevel.PARTIAL;
+        }
+
+        return SupplyLevel.UNSUPPLIED;
+    }
+
+    /**
+     * Returns true if connectivity queries should only consider player-placed blocks.
+     */
+    private boolean requirePlayerPlaced() {
+        return configManager.isRequirePlayerPlacedRoads();
     }
 
     private SupplyLevel calculateSupplyLevel(String regionId, String team) {
@@ -311,7 +366,8 @@ public final class SqlRoadService implements RoadService {
         }
 
         // Check if there's an alternative region-based path (without roads)
-        if (hasRegionPathToHome(regionId, team)) {
+        // Only grant PARTIAL if the config allows supply without roads
+        if (!configManager.isRequireRoadForSupply() && hasRegionPathToHome(regionId, team)) {
             // Has region path but no road - partial supply
             return SupplyLevel.PARTIAL;
         }
@@ -378,11 +434,16 @@ public final class SqlRoadService implements RoadService {
         if (homeRegion == null) return false;
         if (regionId.equals(homeRegion)) return false; // Home never has gaps
 
-        // Get all road blocks in this region
-        List<RoadBlock> blocks = db.getRoadBlocksInRegion(roundId, regionId, team);
+        // Get all road blocks in this region (filtered by player-placed if configured)
+        List<RoadBlock> blocks = db.getRoadBlocksInRegion(roundId, regionId, team, requirePlayerPlaced());
+
+        // Minimum block threshold depends on whether we're filtering to player-placed only.
+        // Player-placed roads are intentional, so even small counts are meaningful.
+        // Auto-scanned blocks include terrain noise, so we need higher thresholds.
+        int minBlocksForGapCheck = requirePlayerPlaced() ? 5 : 20;
 
         // If few blocks, assume no meaningful gap
-        if (blocks.size() < 20) return false;
+        if (blocks.size() < minBlocksForGapCheck) return false;
 
         // Find the entry region (the adjacent supplied region toward home)
         String entryRegion = findEntryRegion(regionId, team);
@@ -446,23 +507,29 @@ public final class SqlRoadService implements RoadService {
             }
         }
 
-        // VERY lenient gap detection:
-        // Only flag a gap if LESS THAN 15% of blocks are reachable from entry
-        // AND there are at least 100 blocks total
-        // This threshold is intentionally very low because auto-scanning picks up
-        // many scattered terrain blocks that aren't part of the actual road
+        // Gap detection thresholds depend on whether we're using player-placed-only mode.
+        // Player-placed blocks are intentional - disconnections are real gaps.
+        // Auto-scanned blocks include terrain noise requiring very lenient thresholds.
         double reachablePercent = (double) reachable.size() / blocks.size();
+        boolean playerPlacedOnly = requirePlayerPlaced();
 
         logger.info("[RoadService] hasRoadGapsInRegion " + regionId + ": " +
                 reachable.size() + "/" + blocks.size() + " reachable (" +
                 String.format("%.1f%%", reachablePercent * 100) + "), entryBlocks=" + entryBlocks.size() +
-                ", entryRegion=" + entryRegion);
+                ", entryRegion=" + entryRegion + ", playerPlacedOnly=" + playerPlacedOnly);
 
-        // Only detect gaps if:
-        // 1. Less than 15% reachable (very severe disconnection)
-        // 2. At least 100 blocks total (significant road network)
-        // 3. At least 10 entry blocks (road actually reaches the border)
-        if (reachablePercent < 0.15 && blocks.size() >= 100 && entryBlocks.size() >= 10) {
+        boolean hasGap;
+        if (playerPlacedOnly) {
+            // Tighter thresholds for player-placed roads:
+            // Gap if less than 60% reachable, at least 5 total blocks, at least 1 entry block
+            hasGap = reachablePercent < 0.60 && blocks.size() >= 5 && entryBlocks.size() >= 1;
+        } else {
+            // Lenient thresholds for auto-scanned roads (includes terrain noise):
+            // Gap only if less than 15% reachable, at least 100 total, at least 10 entry blocks
+            hasGap = reachablePercent < 0.15 && blocks.size() >= 100 && entryBlocks.size() >= 10;
+        }
+
+        if (hasGap) {
             logger.info("[RoadService] Gap detected in " + regionId + ": only " +
                     String.format("%.1f%%", reachablePercent * 100) + " reachable (" +
                     reachable.size() + "/" + blocks.size() + ")");
@@ -496,6 +563,7 @@ public final class SqlRoadService implements RoadService {
     /**
      * Quick check if there are road blocks at the border between two regions.
      * This is a fast check that doesn't do full pathfinding.
+     * Uses COUNT query for efficiency instead of loading all blocks.
      */
     private boolean hasRoadBlocksAtBorder(String region1, String region2, String team) {
         int roundId = getCurrentRoundId();
@@ -504,20 +572,9 @@ public final class SqlRoadService implements RoadService {
         int[] border = getBorderArea(region1, region2);
         if (border == null) return false;
 
-        // Just check if there are ANY blocks in the border area for both regions
-        List<RoadBlock> borderBlocks = db.getRoadBlocksInArea(roundId, border[0], border[1], border[2], border[3], team);
-
-        boolean hasRegion1Blocks = false;
-        boolean hasRegion2Blocks = false;
-
-        for (RoadBlock block : borderBlocks) {
-            String blockRegion = getRegionIdForLocation(block.x(), block.z());
-            if (region1.equals(blockRegion)) hasRegion1Blocks = true;
-            if (region2.equals(blockRegion)) hasRegion2Blocks = true;
-            if (hasRegion1Blocks && hasRegion2Blocks) return true;
-        }
-
-        return false;
+        // Use count query - much faster than loading all blocks just to check presence
+        int count = db.countRoadBlocksInArea(roundId, border[0], border[1], border[2], border[3], team, requirePlayerPlaced());
+        return count > 0;
     }
 
     // ==================== ROAD CONNECTIVITY ====================
@@ -643,14 +700,9 @@ public final class SqlRoadService implements RoadService {
         int xzRadius = configManager.getSupplyAdjacencyRadius();
         int yTolerance = configManager.getSupplyYTolerance();
 
-        // Get all road blocks in this region
-        List<RoadBlock> allBlocks = db.getRoadBlocksInRegion(roundId, regionId, team);
+        // Get all road blocks in this region (filtered by player-placed if configured)
+        List<RoadBlock> allBlocks = db.getRoadBlocksInRegion(roundId, regionId, team, requirePlayerPlaced());
         if (allBlocks.isEmpty()) return false;
-
-        // Performance optimization: for large road networks, assume connected
-        if (allBlocks.size() > 1000) {
-            return true; // Assume connected to avoid freeze
-        }
 
         // Get the border areas
         int[] entryBorder = getBorderArea(regionId, entryRegion);
@@ -678,7 +730,7 @@ public final class SqlRoadService implements RoadService {
         Set<String> exitKeys = exitBlocks.stream().map(RoadBlock::toKey).collect(Collectors.toSet());
         Set<String> visited = new HashSet<>();
         Queue<String> bfsQueue = new LinkedList<>();
-        int maxIterations = 2000; // Limit to prevent freezes
+        int maxIterations = Math.max(allBlocks.size() * 2, 5000); // Scale with block count
         int iterations = 0;
 
         // Start from all entry blocks
@@ -854,10 +906,11 @@ public final class SqlRoadService implements RoadService {
             return false;
         }
 
+        boolean playerPlacedOnly = requirePlayerPlaced();
         int minX = border[0], maxX = border[1], minZ = border[2], maxZ = border[3];
 
-        // Get road blocks in the border area
-        List<RoadBlock> borderBlocks = db.getRoadBlocksInArea(roundId, minX, maxX, minZ, maxZ, team);
+        // Get road blocks in the border area (filtered by player-placed if configured)
+        List<RoadBlock> borderBlocks = db.getRoadBlocksInArea(roundId, minX, maxX, minZ, maxZ, team, playerPlacedOnly);
 
         int xzRadius = configManager.getSupplyAdjacencyRadius();
         int yTolerance = configManager.getSupplyYTolerance();
@@ -894,7 +947,7 @@ public final class SqlRoadService implements RoadService {
                     visited.add(key);
                 }
 
-                int maxIterations = 500; // Limit to prevent freezes
+                int maxIterations = 2000; // Increased limit for thorough checking
                 int iterations = 0;
 
                 while (!queue.isEmpty() && iterations < maxIterations) {
@@ -919,10 +972,7 @@ public final class SqlRoadService implements RoadService {
                     }
                 }
 
-                // If we exhausted iterations and visited many blocks, assume connected
-                if (iterations >= maxIterations && visited.size() > 100) {
-                    return true; // Assume connected for large road networks
-                }
+                // No "assume connected" shortcut - if BFS couldn't find a path, it's not connected
             }
         }
 
@@ -930,17 +980,17 @@ public final class SqlRoadService implements RoadService {
         // Look for road blocks NEAR the border that could connect via pathfinding
         // This handles cases where the road doesn't quite reach the border line
 
-        // Get all road blocks in both regions
-        List<RoadBlock> region1Blocks = db.getRoadBlocksInRegion(roundId, region1, team);
-        List<RoadBlock> region2Blocks = db.getRoadBlocksInRegion(roundId, region2, team);
+        // Get all road blocks in both regions (filtered by player-placed if configured)
+        List<RoadBlock> region1Blocks = db.getRoadBlocksInRegion(roundId, region1, team, playerPlacedOnly);
+        List<RoadBlock> region2Blocks = db.getRoadBlocksInRegion(roundId, region2, team, playerPlacedOnly);
 
         if (region1Blocks.isEmpty() || region2Blocks.isEmpty()) {
             return false;
         }
 
         // Find the closest blocks to the border in each region
-        // Extended border area - look further into each region
-        int extendedWidth = configManager.getSupplyBorderWidth() * 3; // Triple the normal width
+        // Extended border area - look a bit further into each region (2x, tighter than before)
+        int extendedWidth = configManager.getSupplyBorderWidth() * 2;
         int[] extendedBorder = getExtendedBorderArea(region1, region2, extendedWidth);
         if (extendedBorder == null) return false;
 
@@ -958,15 +1008,15 @@ public final class SqlRoadService implements RoadService {
         }
 
         // Check if any block from region1 is within adjacency radius of any block in region2
-        // This allows roads that don't perfectly align at the border but are close enough
+        // Tightened: use normal adjacency radius instead of doubled
         for (RoadBlock b1 : region1NearBorder) {
             for (RoadBlock b2 : region2NearBorder) {
                 int dx = Math.abs(b1.x() - b2.x());
                 int dz = Math.abs(b1.z() - b2.z());
                 int dy = Math.abs(b1.y() - b2.y());
 
-                // If blocks are within extended adjacency range, consider them connected
-                if (dx <= xzRadius * 2 && dz <= xzRadius * 2 && dy <= yTolerance) {
+                // If blocks are within adjacency range, consider them connected
+                if (dx <= xzRadius && dz <= xzRadius && dy <= yTolerance) {
                     return true;
                 }
             }
@@ -1533,6 +1583,18 @@ public final class SqlRoadService implements RoadService {
             return 0;
         }
 
+        // When player-placed-only mode is active, auto-scanning terrain blocks is pointless
+        // since they won't count for supply connectivity. But we still recalculate supply
+        // so that existing player-placed road blocks (e.g. from a previous capture) are recognized.
+        if (requirePlayerPlaced()) {
+            log("Skipping terrain auto-scan for " + regionId + " - require-player-placed-roads is enabled");
+            // Recalculate supply so existing player-placed blocks from this team are recognized
+            // This handles the recapture scenario: Red builds road → Blue captures → Red recaptures
+            // Red's old road blocks still exist in DB and should reconnect supply
+            recalculateSupply(team);
+            return 0;
+        }
+
         if (world == null) {
             logger.warning("[RoadService] Cannot scan region - world is null!");
             return 0;
@@ -1569,8 +1631,11 @@ public final class SqlRoadService implements RoadService {
         final int AIR_THRESHOLD = 10;
         final int SOLID_THRESHOLD = 10;
 
-        int foundCount = 0;
         UUID systemUuid = UUID.fromString("00000000-0000-0000-0000-000000000000"); // System-placed
+        long now = System.currentTimeMillis();
+
+        // Collect blocks for batch insert instead of inserting one at a time
+        List<int[]> newBlocks = new ArrayList<>();
 
         // Scan the region for path blocks
         for (int x = minX; x <= maxX; x++) {
@@ -1588,8 +1653,7 @@ public final class SqlRoadService implements RoadService {
                         if (pathBlocks.contains(type)) {
                             // Check if already registered
                             if (!isRoadBlock(x, y, z)) {
-                                insertRoadBlockWithoutRecalculation(x, y, z, systemUuid, team);
-                                foundCount++;
+                                newBlocks.add(new int[]{x, y, z});
                             }
                         }
                     }
@@ -1604,8 +1668,7 @@ public final class SqlRoadService implements RoadService {
                     if (pathBlocks.contains(type)) {
                         // Check if already registered
                         if (!isRoadBlock(x, y, z)) {
-                            insertRoadBlockWithoutRecalculation(x, y, z, systemUuid, team);
-                            foundCount++;
+                            newBlocks.add(new int[]{x, y, z});
                         }
                         consecutiveSolid = 0;
                     } else if (type.isAir()) {
@@ -1617,8 +1680,22 @@ public final class SqlRoadService implements RoadService {
             }
         }
 
-        // Recalculate supply once at the end
-        if (foundCount > 0) {
+        // Batch insert all found blocks in a single transaction
+        int foundCount = 0;
+        if (!newBlocks.isEmpty()) {
+            foundCount = db.batchInsertRoadBlocks(roundId, newBlocks, regionId,
+                    systemUuid.toString(), team, now, false,
+                    coords -> getRegionIdForLocation(coords[0], coords[2]));
+
+            // Update in-memory cache for the batch
+            for (int[] c : newBlocks) {
+                String blockRegion = getRegionIdForLocation(c[0], c[2]);
+                if (blockRegion != null) {
+                    RoadBlock rb = new RoadBlock(c[0], c[1], c[2], blockRegion, systemUuid.toString(), team, now, false);
+                    roadBlockCache.put(rb.toKey(), rb);
+                }
+            }
+
             recalculateSupply(team);
             logger.info("[RoadService] Auto-scanned " + regionId + " for " + team + ": found " + foundCount + " road blocks");
         }
@@ -1739,6 +1816,9 @@ public final class SqlRoadService implements RoadService {
 
     /**
      * Scans a rectangular area for path blocks and registers them.
+     * Auto-scanned blocks are marked as NOT player-placed, so they won't count
+     * for supply connectivity when require-player-placed-roads is enabled.
+     * Uses batch inserts for significantly better performance.
      */
     private int scanAreaForRoads(int minX, int maxX, int minZ, int maxZ,
                                   org.bukkit.World world, Set<org.bukkit.Material> pathBlocks,
@@ -1746,7 +1826,9 @@ public final class SqlRoadService implements RoadService {
         final int START_Y = 52;
         final int AIR_THRESHOLD = 100; // High threshold to catch elevated roads/bridges
         final int SOLID_THRESHOLD = 10;
-        int foundCount = 0;
+
+        // Collect blocks for batch insert instead of one-by-one
+        List<int[]> newBlocks = new ArrayList<>();
 
         for (int x = minX; x <= maxX; x++) {
             for (int z = minZ; z <= maxZ; z++) {
@@ -1762,8 +1844,7 @@ public final class SqlRoadService implements RoadService {
                         consecutiveAir = 0;
                         if (pathBlocks.contains(type)) {
                             if (!isRoadBlock(x, y, z)) {
-                                insertRoadBlockWithoutRecalculation(x, y, z, systemUuid, team);
-                                foundCount++;
+                                newBlocks.add(new int[]{x, y, z});
                             }
                         }
                     }
@@ -1777,8 +1858,7 @@ public final class SqlRoadService implements RoadService {
 
                     if (pathBlocks.contains(type)) {
                         if (!isRoadBlock(x, y, z)) {
-                            insertRoadBlockWithoutRecalculation(x, y, z, systemUuid, team);
-                            foundCount++;
+                            newBlocks.add(new int[]{x, y, z});
                         }
                         consecutiveSolid = 0;
                     } else if (type.isAir()) {
@@ -1790,7 +1870,27 @@ public final class SqlRoadService implements RoadService {
             }
         }
 
-        return foundCount;
+        // Batch insert all found blocks in a single transaction
+        if (!newBlocks.isEmpty()) {
+            int roundId = getCurrentRoundId();
+            if (roundId < 0) return 0;
+            long now = System.currentTimeMillis();
+
+            db.batchInsertRoadBlocks(roundId, newBlocks, null,
+                    systemUuid.toString(), team, now, false,
+                    coords -> getRegionIdForLocation(coords[0], coords[2]));
+
+            // Update in-memory cache
+            for (int[] c : newBlocks) {
+                String regionId = getRegionIdForLocation(c[0], c[2]);
+                if (regionId != null) {
+                    RoadBlock rb = new RoadBlock(c[0], c[1], c[2], regionId, systemUuid.toString(), team, now, false);
+                    roadBlockCache.put(rb.toKey(), rb);
+                }
+            }
+        }
+
+        return newBlocks.size();
     }
 
     /**

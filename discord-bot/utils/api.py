@@ -51,10 +51,6 @@ class StatsAPI:
     async def _save_cache(self) -> None:
         """Persist the player cache to disk asynchronously."""
         try:
-            # Use to_thread to avoid blocking the event loop on file IO
-            await asyncio.to_thread(self._cache_file.write_text, json.dumps(self._player_cache, ensure_ascii=False, indent=2), 'utf-8')
-        except TypeError:
-            # Fallback for Python versions where to_thread/write_text signature may differ
             def _write():
                 with self._cache_file.open('w', encoding='utf-8') as f:
                     json.dump(self._player_cache, f, ensure_ascii=False, indent=2)
@@ -125,7 +121,7 @@ class StatsAPI:
                     return data
 
             except asyncio.TimeoutError:
-                logger.warning(f"API request timed out (attempt %s): %s", attempt, endpoint)
+                logger.warning("API request timed out (attempt %s): %s", attempt, endpoint)
                 if attempt == max_retries:
                     raise APIError(0, "Request timed out — the server may be down.")
                 await asyncio.sleep(base_backoff * (2 ** (attempt - 1)))
@@ -138,7 +134,7 @@ class StatsAPI:
                 await asyncio.sleep(base_backoff * (2 ** (attempt - 1)))
                 continue
             except aiohttp.ClientError as e:
-                logger.warning(f"API request failed (attempt %s): %s", attempt, e)
+                logger.warning("API request failed (attempt %s): %s", attempt, e)
                 if attempt == max_retries:
                     raise APIError(0, f"Connection failed: {e}")
                 await asyncio.sleep(base_backoff * (2 ** (attempt - 1)))

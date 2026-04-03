@@ -231,10 +231,8 @@ public class ObjectiveListener implements Listener {
             ));
         }
 
-        // Tick the objectives
-        if (!playerData.isEmpty()) {
-            objectiveService.tickHoldGroundObjectives(playerData);
-        }
+        // Tick the objectives (always call, even if empty, to reset progress for disconnected players)
+        objectiveService.tickHoldGroundObjectives(playerData);
     }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
@@ -743,6 +741,17 @@ public class ObjectiveListener implements Listener {
     @EventHandler
     public void onPlayerQuit(PlayerQuitEvent event) {
         uiManager.onPlayerQuit(event.getPlayer());
+
+        // Handle intel carrier disconnecting — treat like death so intel is dropped
+        // and recoverable instead of becoming permanently stuck.
+        Player player = event.getPlayer();
+        String regionId = regionService.getRegionIdForLocation(
+                player.getLocation().getBlockX(),
+                player.getLocation().getBlockZ()
+        );
+        if (regionId != null) {
+            objectiveService.onIntelCarrierDeath(player.getUniqueId(), regionId);
+        }
     }
 
     // ==================== INVENTORY EVENTS ====================
@@ -952,7 +961,7 @@ public class ObjectiveListener implements Listener {
      * tracking so we only track blocks relevant to structure detection.
      */
     private boolean isNearBuildingObjective(String regionId, int x, int y, int z) {
-        int radius = config.getBuildingDetectionRadius() + 2; // small buffer
+        int radius = config.getBuildingMaxExpansionRadius() + 2; // max expansion + small buffer
         int radiusSq = radius * radius;
 
         // Check active building objectives

@@ -691,7 +691,12 @@ public final class SqlRegionService implements RegionService {
 
     @Override
     public boolean isConnectedToHome(String regionId, String team) {
-        // TODO: Replace with physical road connectivity check
+        // Use RoadService if available for actual road-based connectivity
+        if (roadService != null) {
+            return roadService.isConnectedToHome(regionId, team);
+        }
+
+        // Fallback: simple region adjacency as a placeholder
         String homeRegion = getHomeRegion(team);
         if (homeRegion == null) return false;
         if (regionId.equals(homeRegion)) return true;
@@ -793,18 +798,18 @@ public final class SqlRegionService implements RegionService {
         return false;
     }
 
-    // ==================== DEFENSE OPERATIONS ====================
+    // ==================== DEFENSE OPERATIONS (deprecated) ====================
 
+    @Deprecated
     @Override
     public double getDefenseBonus(String regionId) {
-        // Defense bonuses removed - only fortification period provides protection
-        // This method kept for interface compatibility
         return 0;
     }
 
+    @Deprecated
     @Override
     public void updateDefenseStructures(String regionId, int count) {
-        // Defense structures removed - this method kept for interface compatibility
+        // No-op: defense structures removed
     }
 
     // ==================== DECAY ====================

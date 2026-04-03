@@ -14,7 +14,6 @@ import de.bluecolored.bluemap.api.math.Shape;
 import org.bukkit.Location;
 import org.bukkit.World;
 import org.bukkit.plugin.java.JavaPlugin;
-import org.bukkit.scheduler.BukkitTask;
 import org.flintstqne.entrenched.RegionLogic.RegionService;
 import org.flintstqne.entrenched.RegionLogic.RegionStatus;
 import org.flintstqne.entrenched.RoundLogic.Round;
@@ -35,9 +34,7 @@ public class RegionRenderer {
     private static final String MARKER_SET_ID = "major-regions";
     private static final String MARKER_SET_LABEL = "Major Regions";
 
-    private static final long POLL_PERIOD_TICKS = 20L;
-    private static final int MAX_POLLS = 60;
-    // How often to refresh markers once BlueMap is available (30 seconds)
+    // How often to refresh markers (30 seconds)
     private static final long MAP_UPDATE_PERIOD_TICKS = 20L * 30L;
 
     // Defaults (gray)
@@ -146,42 +143,22 @@ public class RegionRenderer {
         return getRegionName(regionId);
     }
 
+    /**
+     * Schedules a repeating marker-refresh task for the given world.
+     * If the BlueMap API is already available the first refresh fires immediately;
+     * otherwise, the task will silently no-op until BlueMapAPI becomes available
+     * (the {@link BlueMapIntegration} lifecycle callback will trigger the first real refresh).
+     */
     public void scheduleUpdateForOverworld(World world) {
-        final int[] polls = {0};
-        final BukkitTask[] taskRef = {null};
+        // Schedule repeating refresh — refreshMarkers() already guards against missing API
+        plugin.getServer().getScheduler().runTaskTimer(plugin, () -> refreshMarkers(world),
+                0L, MAP_UPDATE_PERIOD_TICKS);
 
-        taskRef[0] = plugin.getServer().getScheduler().runTaskTimer(plugin, () -> {
-            polls[0]++;
-
-            Optional<BlueMapAPI> apiOpt = BlueMapAPI.getInstance();
-            if (apiOpt.isEmpty()) {
-                if (polls[0] >= MAX_POLLS) cancelTask(taskRef[0]);
-                return;
-            }
-
-            BlueMapAPI api = apiOpt.get();
-            Optional<BlueMapMap> mapOpt = findMapForWorld(api, world);
-
-            if (mapOpt.isEmpty()) {
-                if (polls[0] >= MAX_POLLS) cancelTask(taskRef[0]);
-                return;
-            }
-
-            cancelTask(taskRef[0]);
-
-            plugin.getServer().getScheduler().runTaskTimer(plugin, () -> refreshMarkers(world),
-                    0L, MAP_UPDATE_PERIOD_TICKS);
-
-            refreshMarkers(world);
-
-        }, 0L, POLL_PERIOD_TICKS);
+        // Also do an immediate one-shot refresh attempt
+        refreshMarkers(world);
     }
 
 
-
-    private void cancelTask(BukkitTask task) {
-        if (task != null && !task.isCancelled()) task.cancel();
-    }
 
     private Optional<BlueMapMap> findMapForWorld(BlueMapAPI api, World world) {
         String worldName = world.getName().toLowerCase(Locale.ROOT);

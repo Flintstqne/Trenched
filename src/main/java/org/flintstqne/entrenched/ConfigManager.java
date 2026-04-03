@@ -75,6 +75,14 @@ public final class ConfigManager {
         return config.getString("world.name", "world");
     }
 
+    /**
+     * Gets the world generator string (e.g., "Terra:OVERWORLD").
+     * Returns empty string if not set (vanilla generation).
+     */
+    public String getWorldGenerator() {
+        return config.getString("world.generator", "");
+    }
+
     public double getBorderSize() {
         return config.getDouble("world.border-size", 1024.0);
     }
@@ -226,9 +234,6 @@ public final class ConfigManager {
         return config.getBoolean("parties.features.party-chat", true);
     }
 
-    public boolean isPartyCompassEnabled() {
-        return config.getBoolean("parties.features.compass-to-party", true);
-    }
 
     // ==================== Division Depot Settings ====================
 
@@ -389,6 +394,22 @@ public final class ConfigManager {
         return config.getBoolean("regions.supply.gap-detection-enabled", false);
     }
 
+    /**
+     * When true, only blocks explicitly placed by players count for road supply calculations.
+     * World-generated blocks (village paths, etc.) are excluded from connectivity checks.
+     */
+    public boolean isRequirePlayerPlacedRoads() {
+        return config.getBoolean("regions.supply.require-player-placed-roads", true);
+    }
+
+    /**
+     * When true, regions MUST have a physical road connection to get any supply benefit.
+     * When false, regions with contiguous owned territory (but no road) get PARTIAL supply.
+     */
+    public boolean isRequireRoadForSupply() {
+        return config.getBoolean("regions.supply.require-road-for-supply", true);
+    }
+
     public int getSupplyPartialRespawnDelay() {
         return config.getInt("regions.supply.partial-supply-respawn-delay", 5);
     }
@@ -499,6 +520,15 @@ public final class ConfigManager {
         return config.getInt("regions.objectives.building-detection-radius", 16);
     }
 
+    /**
+     * Maximum radius the adaptive building scan can expand to.
+     * The scan starts at {@link #getBuildingDetectionRadius()} and grows outward
+     * in shells when construction blocks are found near the scan edge.
+     */
+    public int getBuildingMaxExpansionRadius() {
+        return config.getInt("regions.objectives.building-max-expansion-radius", 48);
+    }
+
     public int getBuildingDetectionVerticalRange() {
         return config.getInt("regions.objectives.building-detection-vertical-range", 12);
     }
@@ -537,14 +567,6 @@ public final class ConfigManager {
         return config.getLong("regions.objectives.player-placed-cleanup-interval", 5);
     }
 
-    /**
-     * Gets the minimum total items required for Resource Depot completion.
-     * @deprecated Use getResourceDepotMinItemsPerContainer() instead - we now check per container
-     */
-    @Deprecated
-    public int getResourceDepotMinItems() {
-        return config.getInt("regions.objectives.resource-depot-min-items", 100);
-    }
 
     /**
      * Gets whether objective boss bars should be shown when near an objective.

@@ -44,8 +44,8 @@ public class StatApiServer {
 
     private HttpServer server;
 
-    // Rate limiting: API key -> list of request timestamps
-    private final Map<String, LinkedList<Long>> rateLimitMap = new ConcurrentHashMap<>();
+    // Rate limiting: API key -> list of request timestamps (thread-safe via synchronization)
+    private final Map<String, java.util.concurrent.ConcurrentLinkedDeque<Long>> rateLimitMap = new ConcurrentHashMap<>();
     private long lastRateLimitPrune = System.currentTimeMillis();
     private static final long PRUNE_INTERVAL_MS = 300_000; // 5 minutes
 
@@ -123,13 +123,11 @@ public class StatApiServer {
         int limit = config.getStatApiRateLimit();
         long windowMs = 60_000; // 1 minute
 
-        LinkedList<Long> timestamps = rateLimitMap.computeIfAbsent(apiKey, k -> new LinkedList<>());
+        java.util.concurrent.ConcurrentLinkedDeque<Long> timestamps =
+                rateLimitMap.computeIfAbsent(apiKey, k -> new java.util.concurrent.ConcurrentLinkedDeque<>());
         long now = System.currentTimeMillis();
 
         // Remove old timestamps for this key.
-        // Use a single null-safe assignment instead of the two-step isEmpty()+peekFirst()
-        // pattern: peekFirst() returns null when the list is empty (or when another thread
-        // has concurrently drained it), and auto-unboxing null to long throws NPE.
         Long head;
         while ((head = timestamps.peekFirst()) != null && head < now - windowMs) {
             timestamps.pollFirst();
@@ -172,6 +170,8 @@ public class StatApiServer {
         byte[] bytes = json.getBytes(StandardCharsets.UTF_8);
 
         exchange.getResponseHeaders().set("Content-Type", "application/json");
+        // NOTE: Wide-open CORS for development convenience. In production with an exposed port,
+        // consider restricting to the Discord bot's origin or removing this header entirely.
         exchange.getResponseHeaders().set("Access-Control-Allow-Origin", "*");
         exchange.sendResponseHeaders(code, bytes.length);
 
@@ -385,6 +385,7 @@ public class StatApiServer {
             Map<String, Object> response = new LinkedHashMap<>();
             response.put("uuid", stats.getUuid().toString());
             response.put("username", stats.getLastKnownName());
+            response.put("hasStats", true);
             response.put("lastSeen", Instant.ofEpochMilli(stats.getLastLogin()).toString());
 
             if (roundId != null) {
@@ -1314,12 +1315,19 @@ public class StatApiServer {
 
                 String mcUuid = mcUuidOpt.get();
                 UUID uuid = UUID.fromString(mcUuid);
-                String playerName = Bukkit.getOfflinePlayer(uuid).getName();
+
+                // Use our stored username first (reliable across restarts on offline-mode),
+                // then fallback to Bukkit's offline cache, then to raw UUID.
+                String playerName = linkService.getMcUsername(uuid)
+                        .orElseGet(() -> {
+                            String n = Bukkit.getOfflinePlayer(uuid).getName();
+                            return n != null ? n : mcUuid;
+                        });
 
                 Map<String, Object> response = new LinkedHashMap<>();
                 response.put("discord_id", discordId);
                 response.put("mc_uuid", mcUuid);
-                response.put("mc_username", playerName != null ? playerName : mcUuid);
+                response.put("mc_username", playerName);
 
                 if (teamService != null) {
                     Optional<String> teamOpt = teamService.getPlayerTeam(uuid);
@@ -1373,8 +1381,16 @@ public class StatApiServer {
             if (result == LinkService.VerifyResult.OK) {
                 linkService.getMcUuid(discordId.trim()).ifPresent(uuid -> {
                     response.put("mc_uuid", uuid);
-                    String name = Bukkit.getOfflinePlayer(UUID.fromString(uuid)).getName();
-                    response.put("mc_username", name != null ? name : uuid);
+                    UUID mcUuid = UUID.fromString(uuid);
+                    org.bukkit.entity.Player online = Bukkit.getPlayer(mcUuid);
+                    String name = (online != null)
+                            ? online.getName()
+                            : Bukkit.getOfflinePlayer(mcUuid).getName();
+                    if (name == null) name = uuid;
+                    response.put("mc_username", name);
+
+                    // Persist the resolved name for offline-mode server resilience
+                    linkService.updateMcUsername(mcUuid, name);
                 });
                 sendResponse(exchange, 200, response);
             } else {

@@ -64,6 +64,16 @@ public final class SqlRoundService implements RoundService {
     }
 
     @Override
+    public boolean setPhase(int phase) {
+        Optional<Round> currentOpt = getCurrentRound();
+        if (currentOpt.isEmpty()) return false;
+        Round current = currentOpt.get();
+        if (current.status() == Round.RoundStatus.COMPLETED) return false;
+        db.updatePhase(current.roundId(), phase);
+        return true;
+    }
+
+    @Override
     public void endRound(String winningTeam) {
         getCurrentRound().ifPresent(round ->
                 db.completeRound(round.roundId(), winningTeam)

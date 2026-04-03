@@ -5,12 +5,20 @@ import org.bukkit.entity.Player;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.flintstqne.entrenched.BlueMapHook.RegionRenderer;
 import org.flintstqne.entrenched.ConfigManager;
+import org.flintstqne.entrenched.ObjectiveLogic.ObjectiveService;
+import org.flintstqne.entrenched.ObjectiveLogic.PlacedBlockTracker;
+import org.flintstqne.entrenched.RegionLogic.RegionNotificationManager;
+import org.flintstqne.entrenched.RegionLogic.RegionService;
+import org.flintstqne.entrenched.RoadLogic.RoadService;
 import org.flintstqne.entrenched.TeamLogic.TeamService;
 import org.flintstqne.entrenched.TeamLogic.TeamDb;
 import org.flintstqne.entrenched.Utils.ScoreboardUtil;
 
 import java.io.File;
+import java.io.IOException;
 import java.util.Random;
+
+import org.bukkit.configuration.file.YamlConfiguration;
 
 /**
  * Handles the complete new round initialization flow:
@@ -37,6 +45,15 @@ public class NewRoundInitializer {
     private final ConfigManager configManager;
     private final PhaseScheduler phaseScheduler;
 
+    // Optional services set via setters (avoids circular dependency in constructor)
+    private RegionService regionService;
+    private RegionNotificationManager regionNotificationManager;
+    private ObjectiveService objectiveService;
+    private RoadService roadService;
+    private RoundEndgameManager endgameManager;
+    private PlacedBlockTracker placedBlockTracker;
+    private org.flintstqne.entrenched.StatLogic.StatService statService;
+
     private boolean initializationInProgress = false;
 
     public NewRoundInitializer(
@@ -56,6 +73,36 @@ public class NewRoundInitializer {
         this.regionRenderer = regionRenderer;
         this.configManager = configManager;
         this.phaseScheduler = phaseScheduler;
+    }
+
+    // ==================== Service Setters ====================
+
+    public void setRegionService(RegionService regionService) {
+        this.regionService = regionService;
+    }
+
+    public void setRegionNotificationManager(RegionNotificationManager regionNotificationManager) {
+        this.regionNotificationManager = regionNotificationManager;
+    }
+
+    public void setObjectiveService(ObjectiveService objectiveService) {
+        this.objectiveService = objectiveService;
+    }
+
+    public void setRoadService(RoadService roadService) {
+        this.roadService = roadService;
+    }
+
+    public void setEndgameManager(RoundEndgameManager endgameManager) {
+        this.endgameManager = endgameManager;
+    }
+
+    public void setPlacedBlockTracker(PlacedBlockTracker placedBlockTracker) {
+        this.placedBlockTracker = placedBlockTracker;
+    }
+
+    public void setStatService(org.flintstqne.entrenched.StatLogic.StatService statService) {
+        this.statService = statService;
     }
 
     public boolean isInitializationInProgress() {
@@ -163,18 +210,35 @@ public class NewRoundInitializer {
         roundService.setWorldName(newRound.roundId(), world.getName());
         log("World name saved: " + world.getName());
 
-        // Step 9: Reset team spawns to new world heights
-        log("Step 9: Resetting team spawns...");
+        // Step 9: Initialize regions for the new round
+        log("Step 9: Initializing regions...");
+        if (regionService != null) {
+            regionService.initializeRegionsForRound(
+                    newRound.roundId(),
+                    configManager.getRegionRedHome(),
+                    configManager.getRegionBlueHome()
+            );
+            log("Regions initialized for round " + newRound.roundId());
+        } else {
+            log("WARNING: RegionService not set - regions NOT initialized!");
+        }
+
+        // Step 10: Reset team spawns to new world heights
+        log("Step 10: Resetting team spawns...");
         resetTeamSpawns(world);
 
-        // Step 10: Generate and persist region names
-        log("Step 10: Generating region names...");
+        // Step 11: Reset all game services for the new round
+        log("Step 11: Resetting game services...");
+        resetGameServices();
+
+        // Step 12: Generate and persist region names
+        log("Step 12: Generating region names...");
         if (regionRenderer != null) {
             regionRenderer.generateAndPersistNamesForCurrentRound(world);
             log("Region names generated and persisted");
 
-            // Step 11: Refresh BlueMap markers
-            log("Step 11: Refreshing BlueMap markers...");
+            // Step 13: Refresh BlueMap markers
+            log("Step 13: Refreshing BlueMap markers...");
             try {
                 regionRenderer.refreshMarkers(world);
                 log("BlueMap markers refreshed");
@@ -185,31 +249,85 @@ public class NewRoundInitializer {
             log("RegionRenderer not available - skipping region names and BlueMap");
         }
 
-        // Step 12: Disable whitelist
-        log("Step 12: Disabling whitelist...");
+        // Step 14: Restart notification/endgame managers
+        log("Step 14: Starting managers for new round...");
+        if (regionNotificationManager != null) {
+            regionNotificationManager.start();
+            log("Region notification manager started");
+        }
+        if (endgameManager != null) {
+            endgameManager.start();
+            log("Endgame manager started");
+        }
+
+        // Step 15: Disable whitelist
+        log("Step 15: Disabling whitelist...");
         Bukkit.setWhitelist(false);
         log("Whitelist disabled - players can now join");
 
-        // Step 13: Start phase scheduler for auto phase advancement
-        log("Step 13: Starting phase scheduler...");
+        // Step 16: Start phase scheduler for auto phase advancement
+        // Step 16: Starting phase scheduler..
+        log("Step 16: Starting phase scheduler...");
         if (phaseScheduler != null) {
             phaseScheduler.start();
             log("Phase scheduler started");
         }
 
+        // Step 17: Reload BlueMap so it picks up the new world map config
+        log("Step 17: Reloading BlueMap for new world...");
+        Bukkit.getScheduler().runTaskLater(plugin, () -> {
+            if (Bukkit.getPluginManager().getPlugin("BlueMap") != null) {
+                Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "bluemap reload");
+                log("BlueMap reload triggered for new world: " + world.getName());
+            }
+        }, 20L * 5); // 5 second delay to let BlueMap settle
+
         // Complete!
         log("========================================");
         log("NEW ROUND INITIALIZATION COMPLETE");
         log("Round ID: " + newRound.roundId());
+        log("World: " + world.getName());
         log("World Seed: " + worldSeed);
         log("Phase: " + newRound.currentPhase());
-        log("========================================");;
+        log("========================================");
 
         initializationInProgress = false;
 
         initiator.sendMessage(ChatColor.GREEN + "New round " + newRound.roundId() + " initialized successfully!");
+        initiator.sendMessage(ChatColor.GRAY + "World: " + world.getName());
         initiator.sendMessage(ChatColor.GRAY + "World seed: " + worldSeed);
         initiator.sendMessage(ChatColor.GRAY + "Players can now rejoin.");
+    }
+
+    /**
+     * Resets all game services to clean state for the new round.
+     */
+    private void resetGameServices() {
+        // Clear placed block tracking
+        if (placedBlockTracker != null) {
+            placedBlockTracker.clearAll();
+            log("  Placed block tracker cleared");
+        }
+
+        // Clear road/supply data
+        if (roadService != null) {
+            roadService.clearAllData();
+            log("  Road/supply data cleared");
+        }
+
+        // Stop endgame manager (will be restarted after setup)
+        if (endgameManager != null) {
+            endgameManager.stop();
+            log("  Endgame manager stopped (will restart)");
+        }
+
+        // Stop region notification manager (will be restarted after setup)
+        if (regionNotificationManager != null) {
+            regionNotificationManager.stop();
+            log("  Region notification manager stopped (will restart)");
+        }
+
+        log("  Game services reset complete");
     }
 
     private void kickAllPlayers(String message) {
@@ -222,6 +340,7 @@ public class NewRoundInitializer {
 
     /**
      * Creates a fresh game world with a unique name and random seed.
+     * Uses the configured world generator (e.g., Terra) if set.
      * This approach avoids the issue of not being able to unload the main "world".
      */
     private void createFreshGameWorld(java.util.function.Consumer<World> onComplete) {
@@ -232,9 +351,13 @@ public class NewRoundInitializer {
         // Generate random seed
         long newSeed = new Random().nextLong();
 
+        // Get configured generator (e.g., "Terra:OVERWORLD")
+        String generatorName = configManager.getWorldGenerator();
+
         log("Creating fresh game world:");
         log("  World name: " + uniqueWorldName);
         log("  Random seed: " + newSeed);
+        log("  Generator: " + (generatorName.isEmpty() ? "VANILLA" : generatorName));
 
         // Schedule world creation
         Bukkit.getScheduler().runTask(plugin, () -> {
@@ -242,6 +365,12 @@ public class NewRoundInitializer {
             creator.seed(newSeed);
             creator.environment(World.Environment.NORMAL);
             creator.type(WorldType.NORMAL);
+
+            // Set world generator if configured (e.g., Terra:OVERWORLD)
+            if (!generatorName.isEmpty()) {
+                creator.generator(generatorName);
+                log("  Using custom generator: " + generatorName);
+            }
 
             World newWorld = Bukkit.createWorld(creator);
 
@@ -257,6 +386,31 @@ public class NewRoundInitializer {
                     log("  WARNING: Seed mismatch! Expected " + newSeed + " but got " + newWorld.getSeed());
                 }
 
+                // Verify generator was applied
+                if (!generatorName.isEmpty()) {
+                    if (newWorld.getGenerator() != null) {
+                        log("  Generator verified: " + newWorld.getGenerator().getClass().getSimpleName());
+                    } else {
+                        log("  WARNING: Custom generator was requested but world.getGenerator() returned null!");
+                        log("  This likely means the generator plugin (e.g., Terra) is not loaded.");
+                        log("  The world will use VANILLA generation.");
+                    }
+                }
+
+                // Set world spawn to 0,0 so players spawn at origin
+                int spawnY = newWorld.getHighestBlockYAt(0, 0) + 1;
+                newWorld.setSpawnLocation(0, spawnY, 0);
+                log("  World spawn set to (0, " + spawnY + ", 0)");
+
+                // Update bukkit.yml so the generator persists across server restarts
+                updateBukkitYml(uniqueWorldName, generatorName);
+
+                // Update server.properties level-name so the correct world loads on restart
+                updateServerPropertiesLevelName(uniqueWorldName);
+
+                // Create a BlueMap map config so the new world gets rendered
+                createBlueMapMapConfig(uniqueWorldName);
+
                 // Clean up old game worlds in the background
                 scheduleOldWorldCleanup(baseWorldName, uniqueWorldName);
 
@@ -269,6 +423,151 @@ public class NewRoundInitializer {
                 onComplete.accept(null);
             }
         });
+    }
+
+    /**
+     * Updates bukkit.yml to register the generator for the new world.
+     * This ensures the correct generator is used if the server restarts.
+     *
+     * @param worldName     the unique world name (e.g. "world_1748567890123")
+     * @param generatorName the generator string (e.g. "Terra:MAP"), may be empty for vanilla
+     */
+    private void updateBukkitYml(String worldName, String generatorName) {
+        File bukkitYml = new File(Bukkit.getWorldContainer(), "bukkit.yml");
+        if (!bukkitYml.exists()) {
+            // Fall back to server root (worldContainer is often "." which is the server root)
+            bukkitYml = new File("bukkit.yml");
+        }
+
+        try {
+            YamlConfiguration bukkitConfig = YamlConfiguration.loadConfiguration(bukkitYml);
+
+            if (generatorName != null && !generatorName.isEmpty()) {
+                bukkitConfig.set("worlds." + worldName + ".generator", generatorName);
+                log("bukkit.yml: Registered generator '" + generatorName + "' for world '" + worldName + "'");
+            } else {
+                // Even for vanilla, ensure the world section exists so Bukkit loads it
+                if (!bukkitConfig.contains("worlds." + worldName)) {
+                    bukkitConfig.createSection("worlds." + worldName);
+                    log("bukkit.yml: Created section for world '" + worldName + "' (vanilla generator)");
+                }
+            }
+
+            bukkitConfig.save(bukkitYml);
+            log("bukkit.yml saved successfully");
+        } catch (IOException e) {
+            log("ERROR: Failed to update bukkit.yml: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+
+    /**
+     * Removes a world entry from bukkit.yml (called during old world cleanup).
+     *
+     * @param worldName the world name to remove
+     */
+    private void removeBukkitYmlEntry(String worldName) {
+        File bukkitYml = new File(Bukkit.getWorldContainer(), "bukkit.yml");
+        if (!bukkitYml.exists()) {
+            bukkitYml = new File("bukkit.yml");
+        }
+        if (!bukkitYml.exists()) return;
+
+        try {
+            YamlConfiguration bukkitConfig = YamlConfiguration.loadConfiguration(bukkitYml);
+
+            if (bukkitConfig.contains("worlds." + worldName)) {
+                bukkitConfig.set("worlds." + worldName, null);
+                bukkitConfig.save(bukkitYml);
+                log("bukkit.yml: Removed entry for old world '" + worldName + "'");
+            }
+        } catch (IOException e) {
+            log("WARNING: Failed to clean bukkit.yml entry for '" + worldName + "': " + e.getMessage());
+        }
+    }
+
+    /**
+     * Rewrites {@code server.properties} to set {@code level-name} to the given world name.
+     * Ensures the correct world loads automatically on the next server restart.
+     */
+    private void updateServerPropertiesLevelName(String worldName) {
+        java.io.File propsFile = new java.io.File("server.properties");
+        if (!propsFile.exists()) {
+            log("server.properties not found — cannot update level-name.");
+            return;
+        }
+
+        try {
+            java.util.Properties props = new java.util.Properties();
+            try (java.io.FileInputStream fis = new java.io.FileInputStream(propsFile)) {
+                props.load(fis);
+            }
+
+            String currentLevel = props.getProperty("level-name", "world");
+            if (currentLevel.equals(worldName)) {
+                return; // Already correct
+            }
+
+            log("Updating server.properties level-name: '" + currentLevel + "' → '" + worldName + "'");
+
+            // Read the raw file, replace the line, and write back to preserve comments/ordering
+            java.nio.file.Path path = propsFile.toPath();
+            java.util.List<String> lines = java.nio.file.Files.readAllLines(path);
+            java.util.List<String> updated = new java.util.ArrayList<>(lines.size());
+            boolean replaced = false;
+            for (String line : lines) {
+                if (line.startsWith("level-name=")) {
+                    updated.add("level-name=" + worldName);
+                    replaced = true;
+                } else {
+                    updated.add(line);
+                }
+            }
+            if (!replaced) {
+                updated.add("level-name=" + worldName);
+            }
+            java.nio.file.Files.write(path, updated);
+            log("server.properties updated successfully");
+
+        } catch (Exception e) {
+            log("WARNING: Failed to update server.properties: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Creates a BlueMap map configuration file for the new world so that BlueMap
+     * knows to render it.  The file is written to {@code plugins/BlueMap/maps/<worldName>.conf}
+     * in HOCON format.  A subsequent {@code /bluemap reload} (triggered after round setup
+     * completes) makes BlueMap pick it up.
+     *
+     * @param worldName the unique world name (e.g. "world_1748567890123")
+     */
+    private void createBlueMapMapConfig(String worldName) {
+        File pluginsDir = plugin.getDataFolder().getParentFile();
+        File mapsDir = new File(pluginsDir, "BlueMap/maps");
+
+        if (!mapsDir.exists()) {
+            if (!mapsDir.mkdirs()) {
+                log("WARNING: Could not create BlueMap maps directory: " + mapsDir.getAbsolutePath());
+                return;
+            }
+        }
+
+        File confFile = new File(mapsDir, worldName + ".conf");
+        try {
+            // Minimal HOCON config — BlueMap fills in all defaults for unspecified fields
+            String conf = String.join("\n",
+                    "# Auto-generated by Entrenched for round world: " + worldName,
+                    "world: \"" + worldName + "\"",
+                    "name: \"Entrenched\"",
+                    "sorting: 0",
+                    ""
+            );
+            java.nio.file.Files.writeString(confFile.toPath(), conf);
+            log("BlueMap map config created: " + confFile.getName());
+        } catch (IOException e) {
+            log("WARNING: Failed to create BlueMap map config: " + e.getMessage());
+        }
     }
 
     /**
@@ -307,6 +606,9 @@ public class NewRoundInitializer {
                     // Delete the folder
                     log("Deleting old world folder: " + folderName);
                     deleteWorldFolderWithRetry(folder, 3);
+
+                    // Remove the old world entry from bukkit.yml
+                    removeBukkitYmlEntry(folderName);
 
                     if (!folder.exists()) {
                         log("  Successfully deleted: " + folderName);
@@ -360,16 +662,14 @@ public class NewRoundInitializer {
     private void deleteWorldFolderWithRetry(File folder, int retries) {
         if (folder == null || !folder.exists()) return;
 
-        // Try to delete, if it fails and we have retries left, wait and try again
+        // Try to delete, if it fails and we have retries left, schedule async retry
         if (!deleteWorldFolder(folder)) {
             if (retries > 0) {
                 log("Some files couldn't be deleted, retrying in 1 second... (" + retries + " retries left)");
-                try {
-                    Thread.sleep(1000);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                }
-                deleteWorldFolderWithRetry(folder, retries - 1);
+                // Use async task instead of Thread.sleep to avoid blocking main thread
+                Bukkit.getScheduler().runTaskLaterAsynchronously(plugin, () -> {
+                    deleteWorldFolderWithRetry(folder, retries - 1);
+                }, 20L); // 1 second delay
             } else {
                 log("WARNING: Could not delete all files in world folder after retries");
             }

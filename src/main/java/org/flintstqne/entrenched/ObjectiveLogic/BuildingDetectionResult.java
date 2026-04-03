@@ -27,7 +27,10 @@ public record BuildingDetectionResult(
         int maxX,
         int maxY,
         int maxZ,
-        int bedCount
+        int bedCount,
+        int componentCount,
+        int anchoredCount,
+        int totalRelevantBlocks
 ) {
     public int getProgressPercent() {
         return (int) Math.round(Math.max(0.0, Math.min(1.0, progressRatio)) * 100.0);

@@ -29,6 +29,7 @@ public class DepotParticleManager {
 
     private BukkitTask particleTask;
     private boolean running = false;
+    private org.flintstqne.entrenched.Utils.SettingsCommand settingsCommand;
 
     public DepotParticleManager(JavaPlugin plugin, DepotService depotService,
                                  DivisionService divisionService, TeamService teamService,
@@ -69,6 +70,13 @@ public class DepotParticleManager {
     }
 
     /**
+     * Sets the settings command for per-player particle toggle checks.
+     */
+    public void setSettingsCommand(org.flintstqne.entrenched.Utils.SettingsCommand settingsCommand) {
+        this.settingsCommand = settingsCommand;
+    }
+
+    /**
      * Shows particles for all active depots.
      */
     private void showAllDepotParticles() {
@@ -89,12 +97,22 @@ public class DepotParticleManager {
 
     /**
      * Shows particles for a single depot.
+     * Skips players who have disabled particles via /settings.
      */
     private void showDepotParticles(DepotLocation depot, String team) {
         World world = Bukkit.getWorld(depot.world());
         if (world == null) return;
 
         Location loc = new Location(world, depot.x() + 0.5, depot.y() + 1.0, depot.z() + 0.5);
+
+        // Check if any nearby player can see particles (optimization: skip if none)
+        java.util.Collection<Player> nearbyPlayers = world.getNearbyPlayers(loc, 32);
+        if (settingsCommand != null) {
+            nearbyPlayers = nearbyPlayers.stream()
+                    .filter(p -> settingsCommand.areParticlesEnabled(p.getUniqueId()))
+                    .toList();
+        }
+        if (nearbyPlayers.isEmpty()) return;
 
         // Check if depot is vulnerable
         boolean vulnerable = depotService.isDepotVulnerable(depot);

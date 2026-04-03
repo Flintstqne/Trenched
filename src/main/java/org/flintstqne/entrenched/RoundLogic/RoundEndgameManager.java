@@ -526,10 +526,9 @@ public class RoundEndgameManager {
     // ==================== HELPER METHODS ====================
 
     private boolean isHomeRegion(String regionId) {
-        // Home regions are typically corners: A1, A4, D1, D4
-        // This should match your region configuration
-        return "A1".equalsIgnoreCase(regionId) || "A4".equalsIgnoreCase(regionId) ||
-               "D1".equalsIgnoreCase(regionId) || "D4".equalsIgnoreCase(regionId);
+        String redHome = config.getRegionRedHome();
+        String blueHome = config.getRegionBlueHome();
+        return regionId.equalsIgnoreCase(redHome) || regionId.equalsIgnoreCase(blueHome);
     }
 
     private boolean isAdjacentToBothTeams(String regionId) {
@@ -546,8 +545,8 @@ public class RoundEndgameManager {
     }
 
     private int getCaptureCount(String regionId) {
-        // This would require tracking capture history - simplified for now
-        return 0;
+        Optional<RegionStatus> statusOpt = regionService.getRegionStatus(regionId);
+        return statusOpt.map(RegionStatus::timesCaptured).orElse(0);
     }
 
     private long getOwnedSince(String regionId) {

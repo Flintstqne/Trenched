@@ -10,7 +10,8 @@ public record RoadBlock(
         String regionId,
         String placedByUuid,
         String team,
-        long placedAt
+        long placedAt,
+        boolean playerPlaced
 ) {
     /**
      * Creates a block key for map lookups.

@@ -32,8 +32,9 @@ public interface RoadService {
      * @param z Block Z coordinate
      * @param playerUuid Player who placed the block
      * @param team Team of the player
+     * @param playerPlaced true if explicitly placed by a player, false if auto-scanned from world
      */
-    void insertRoadBlockWithoutRecalculation(int x, int y, int z, UUID playerUuid, String team);
+    void insertRoadBlockWithoutRecalculation(int x, int y, int z, UUID playerUuid, String team, boolean playerPlaced);
 
     /**
      * Records a path block removal/destruction.
