@@ -18,7 +18,7 @@ public final class TeamBootstrap {
     }
 
     public static TeamService createService(TeamDb db, World world) {
-        SqlTeamService service = new SqlTeamService(db);
+        TeamService service = new TeamService(db);
 
         // Ensure canonical teams exist with default colors
         TeamWorldSeeder.seedDefaults(service, db, world, RED_DEFAULT, BLUE_DEFAULT);

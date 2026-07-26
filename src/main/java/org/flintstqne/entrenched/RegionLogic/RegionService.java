@@ -1,15 +1,25 @@
 package org.flintstqne.entrenched.RegionLogic;
 
+import org.bukkit.Bukkit;
+import org.flintstqne.entrenched.ConfigManager;
+import org.flintstqne.entrenched.RoadLogic.RoadService;
+import org.flintstqne.entrenched.RoadLogic.SupplyLevel;
+import org.flintstqne.entrenched.RoundLogic.Round;
+import org.flintstqne.entrenched.RoundLogic.RoundService;
+import org.flintstqne.entrenched.StatLogic.StatListener;
+
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.logging.Logger;
 
 /**
- * Service interface for region capture operations.
+ * SQL-backed implementation of RegionService.
  */
-public interface RegionService {
+public final class RegionService {
 
     // ==================== RESULT ENUMS ====================
 
-    enum CaptureResult {
+    public enum CaptureResult {
         SUCCESS,
         REGION_NOT_FOUND,
         REGION_FORTIFIED,
@@ -19,7 +29,7 @@ public interface RegionService {
         INSUFFICIENT_INFLUENCE
     }
 
-    enum InfluenceResult {
+    public enum InfluenceResult {
         SUCCESS,
         REGION_NOT_FOUND,
         REGION_FORTIFIED,
@@ -30,228 +40,1110 @@ public interface RegionService {
         NOT_ADJACENT  // Region is not adjacent to any friendly territory
     }
 
-    // ==================== INITIALIZATION ====================
+
+    private static final int GRID_SIZE = 4;
+    private static final int REGION_BLOCKS = 512;
+    private static final int HALF_SIZE = (GRID_SIZE * REGION_BLOCKS) / 2;
+
+    private final RegionDb db;
+    private final RoundService roundService;
+    private final ConfigManager configManager;
+    private final Logger logger;
+
+    // Road service for supply calculations (optional, set after construction)
+    private RoadService roadService;
+
+    // Cache for region statuses (refreshed periodically) - ConcurrentHashMap for thread safety
+    private final Map<String, RegionStatus> regionCache = new ConcurrentHashMap<>();
+    private long lastCacheRefresh = 0;
+    private static final long CACHE_TTL_MS = 5000; // 5 seconds
+
+    // Capture callback for notifications
+    private CaptureCallback captureCallback;
+
+    // Heat callback for endgame overtime target selection
+    private HeatCallback heatCallback;
+
+    // Stat listener for tracking IP earned
+    private StatListener statListener;
+
+    // Track defensive blocks that earned IP: "regionId" -> Map of "x,y,z" -> [team, pointsEarned]
+    // When broken by same team, subtract the points to prevent place/break farming
+    private final Map<String, Map<String, PlacedBlockRecord>> defensiveBlockTracking = new HashMap<>();
+
+    // Track torches that earned IP
+    private final Map<String, Map<String, PlacedBlockRecord>> torchTracking = new HashMap<>();
+
+    // Track workstations that earned IP
+    private final Map<String, Map<String, PlacedBlockRecord>> workstationTracking = new HashMap<>();
+
+    // Record for tracking block placements that earned IP
+    private record PlacedBlockRecord(String team, double points, long placedAt) {}
 
     /**
-     * Initializes all regions for a new round.
-     * Sets home regions for each team.
+     * Callback interface for capture events.
      */
-    void initializeRegionsForRound(int roundId, String redHome, String blueHome);
+    @FunctionalInterface
+    public interface CaptureCallback {
+        void onRegionCaptured(String regionId, String newOwner, String previousOwner);
+    }
+
+    /**
+     * Callback interface for heat events (used for endgame overtime target selection).
+     */
+    @FunctionalInterface
+    public interface HeatCallback {
+        void onHeatGenerated(String regionId, double heat);
+    }
+
+    public RegionService(RegionDb db, RoundService roundService, ConfigManager configManager) {
+        this.db = db;
+        this.roundService = roundService;
+        this.configManager = configManager;
+        this.logger = Bukkit.getLogger();
+    }
+
+    /**
+     * Sets the capture callback for notifications.
+     */
+    public void setCaptureCallback(CaptureCallback callback) {
+        this.captureCallback = callback;
+    }
+
+    /**
+     * Sets the heat callback for endgame overtime target selection.
+     */
+    public void setHeatCallback(HeatCallback callback) {
+        this.heatCallback = callback;
+    }
+
+    /**
+     * Sets the road service for supply calculations.
+     * Called after construction to avoid circular dependency.
+     */
+    public void setRoadService(RoadService roadService) {
+        this.roadService = roadService;
+    }
+
+    /**
+     * Sets the stat listener for tracking IP earned.
+     */
+    public void setStatListener(org.flintstqne.entrenched.StatLogic.StatListener listener) {
+        this.statListener = listener;
+    }
+
+    private Optional<Round> getCurrentRound() {
+        return roundService.getCurrentRound();
+    }
+
+    private int getCurrentRoundId() {
+        return getCurrentRound().map(Round::roundId).orElse(-1);
+    }
+
+    private void log(String message) {
+        logger.info("[RegionService] " + message);
+    }
+
+    // ==================== INITIALIZATION ====================
+    public void initializeRegionsForRound(int roundId, String redHome, String blueHome) {
+        log("Initializing regions for round " + roundId);
+
+        // Initialize all 16 regions (A1-D4)
+        for (int row = 0; row < GRID_SIZE; row++) {
+            for (int col = 0; col < GRID_SIZE; col++) {
+                char rowLabel = (char) ('A' + row);
+                String regionId = rowLabel + String.valueOf(col + 1);
+
+                String owner = null;
+                RegionState state = RegionState.NEUTRAL;
+
+                if (regionId.equals(redHome)) {
+                    owner = "red";
+                    state = RegionState.PROTECTED;
+                    log("  " + regionId + " = RED HOME (PROTECTED)");
+                } else if (regionId.equals(blueHome)) {
+                    owner = "blue";
+                    state = RegionState.PROTECTED;
+                    log("  " + regionId + " = BLUE HOME (PROTECTED)");
+                } else {
+                    log("  " + regionId + " = NEUTRAL");
+                }
+
+                db.initializeRegion(regionId, roundId, owner, state);
+            }
+        }
+
+        refreshCache();
+        log("Region initialization complete");
+    }
 
     // ==================== REGION QUERIES ====================
+    public Optional<RegionStatus> getRegionStatus(String regionId) {
+        refreshCacheIfNeeded();
+        RegionStatus cached = regionCache.get(regionId);
+        if (cached != null) {
+            return Optional.of(cached);
+        }
 
-    /**
-     * Gets the current status of a region.
-     */
-    Optional<RegionStatus> getRegionStatus(String regionId);
+        // Fallback: query database directly if cache miss
+        int roundId = getCurrentRoundId();
+        if (roundId < 0) return Optional.empty();
 
-    /**
-     * Gets all region statuses for the current round.
-     */
-    List<RegionStatus> getAllRegionStatuses();
+        Optional<RegionStatus> fromDb = db.getRegionStatus(regionId, roundId);
+        // Update cache with the result
+        fromDb.ifPresent(status -> regionCache.put(regionId, status));
+        return fromDb;
+    }
+    public List<RegionStatus> getAllRegionStatuses() {
+        refreshCacheIfNeeded();
+        return new ArrayList<>(regionCache.values());
+    }
+    public List<RegionStatus> getRegionsByOwner(String team) {
+        refreshCacheIfNeeded();
+        // Create a copy to avoid ConcurrentModificationException when iterating async
+        return new ArrayList<>(regionCache.values()).stream()
+                .filter(r -> r.isOwnedBy(team))
+                .toList();
+    }
+    public String getRegionIdForLocation(int blockX, int blockZ) {
+        int gridX = (blockX + HALF_SIZE) / REGION_BLOCKS;
+        int gridZ = (blockZ + HALF_SIZE) / REGION_BLOCKS;
 
-    /**
-     * Gets all regions owned by a team.
-     */
-    List<RegionStatus> getRegionsByOwner(String team);
+        if (gridX < 0 || gridX >= GRID_SIZE || gridZ < 0 || gridZ >= GRID_SIZE) {
+            return null;
+        }
 
-    /**
-     * Gets the region ID for given block coordinates.
-     */
-    String getRegionIdForLocation(int blockX, int blockZ);
-
-    /**
-     * Counts regions owned by a team.
-     */
-    int countRegionsOwned(String team);
+        char rowLabel = (char) ('A' + gridZ);
+        return rowLabel + String.valueOf(gridX + 1);
+    }
+    public int countRegionsOwned(String team) {
+        return (int) getRegionsByOwner(team).size();
+    }
 
     // ==================== INFLUENCE OPERATIONS ====================
 
     /**
-     * Adds influence points for a team in a region.
-     * Handles anti-spam, rate limiting, and triggers capture if threshold reached.
-     *
-     * @param playerUuid The player performing the action
-     * @param regionId   The region ID
-     * @param team       The team gaining influence
-     * @param action     The action type
-     * @param multiplier Optional multiplier (e.g., for reduced repeat kill points)
-     * @return Result of the operation
-     */
-    InfluenceResult addInfluence(UUID playerUuid, String regionId, String team, InfluenceAction action, double multiplier);
-
-    /**
      * Adds influence with default multiplier (1.0).
      */
-    default InfluenceResult addInfluence(UUID playerUuid, String regionId, String team, InfluenceAction action) {
+    public InfluenceResult addInfluence(UUID playerUuid, String regionId, String team, InfluenceAction action) {
         return addInfluence(playerUuid, regionId, team, action, 1.0);
     }
 
-    /**
-     * Gets the influence points for a team in a region.
-     */
-    double getInfluence(String regionId, String team);
+    public InfluenceResult addInfluence(UUID playerUuid, String regionId, String team, InfluenceAction action, double multiplier) {
+        int roundId = getCurrentRoundId();
+        if (roundId < 0) return InfluenceResult.NO_ACTIVE_ROUND;
+
+        Optional<RegionStatus> statusOpt = getRegionStatus(regionId);
+        if (statusOpt.isEmpty()) return InfluenceResult.REGION_NOT_FOUND;
+
+        RegionStatus status = statusOpt.get();
+
+        // Check if region can be influenced
+        if (status.isFortified()) return InfluenceResult.REGION_FORTIFIED;
+        if (status.state() == RegionState.PROTECTED && status.isOwnedBy(team)) {
+            return InfluenceResult.REGION_PROTECTED; // Can't gain influence in own protected region
+        }
+
+        // Validate action type for region state
+        if (status.state() == RegionState.NEUTRAL && action.isEnemyRegionOnly()) {
+            return InfluenceResult.INVALID_ACTION;
+        }
+        if (status.isOwnedBy(team)) {
+            return InfluenceResult.INVALID_ACTION; // Can't gain influence in own region
+        }
+
+        // Check adjacency requirement - must have at least one adjacent friendly region
+        if (!isAdjacentToTeam(regionId, team)) {
+            return InfluenceResult.NOT_ADJACENT;
+        }
+
+        // Check rate limiting for certain actions
+        if (isRateLimited(playerUuid, regionId, roundId, action)) {
+            return InfluenceResult.RATE_LIMITED;
+        }
+
+        // Calculate points
+        double points = getPointsForAction(action) * multiplier;
+        if (points <= 0) return InfluenceResult.SUCCESS; // No points but not an error
+
+        // Add influence
+        double currentInfluence = status.getInfluence(team);
+        double newInfluence = currentInfluence + points;
+
+        // Update database
+        if ("red".equalsIgnoreCase(team)) {
+            db.updateInfluence(regionId, roundId, newInfluence, status.blueInfluence());
+        } else {
+            db.updateInfluence(regionId, roundId, status.redInfluence(), newInfluence);
+        }
+
+        // Track player stats
+        db.addInfluenceEarned(playerUuid.toString(), regionId, roundId, points);
+
+        // Record stat for IP earned
+        if (statListener != null && points > 0) {
+            org.bukkit.entity.Player player = Bukkit.getPlayer(playerUuid);
+            String playerName = player != null ? player.getName() : playerUuid.toString();
+            statListener.recordIPEarned(playerUuid, playerName, points);
+        }
+
+        // Update rate limit tracking
+        updateRateLimit(playerUuid, regionId, roundId, action);
+
+        // Update state if needed
+        updateRegionState(regionId, status, team);
+
+        // Check for capture
+        checkAndProcessCapture(regionId, team);
+
+        // Invalidate cache
+        invalidateCache(regionId);
+
+        // Notify heat callback for endgame overtime target selection
+        if (heatCallback != null && points > 0) {
+            heatCallback.onHeatGenerated(regionId, points);
+        }
+
+        return InfluenceResult.SUCCESS;
+    }
 
     /**
-     * Gets the influence required to capture a region.
+     * Removes influence points from a team in a region.
+     * Used for anti-farming when a player breaks their own defensive blocks.
      */
-    double getInfluenceRequired(String regionId, String capturingTeam);
+    private void removeInfluence(String regionId, String team, double points) {
+        int roundId = getCurrentRoundId();
+        if (roundId < 0) return;
 
-    /**
-     * Calculates the kill point multiplier based on repeat kills.
-     */
-    double getKillMultiplier(UUID killerUuid, UUID victimUuid, String regionId);
+        Optional<RegionStatus> statusOpt = getRegionStatus(regionId);
+        if (statusOpt.isEmpty()) return;
+
+        RegionStatus status = statusOpt.get();
+
+        // Calculate new influence (don't go below 0)
+        double currentInfluence = status.getInfluence(team);
+        double newInfluence = Math.max(0, currentInfluence - points);
+
+        // Update database
+        if ("red".equalsIgnoreCase(team)) {
+            db.updateInfluence(regionId, roundId, newInfluence, status.blueInfluence());
+        } else {
+            db.updateInfluence(regionId, roundId, status.redInfluence(), newInfluence);
+        }
+
+        // Invalidate cache
+        invalidateCache(regionId);
+    }
+
+    private double getPointsForAction(InfluenceAction action) {
+        return switch (action) {
+            case KILL_ENEMY, KILL_ENEMY_REPEAT -> configManager.getRegionKillPoints();
+            case PLACE_BANNER -> configManager.getRegionBannerPlacePoints();
+            case REMOVE_ENEMY_BANNER -> configManager.getRegionBannerRemovePoints();
+            case MINE_ENEMY_BLOCK -> configManager.getRegionMineEnemyBlocksPoints();
+            case PLACE_DEFENSIVE_BLOCK -> configManager.getRegionDefensiveBlockPoints();
+            case PLACE_WORKSTATION -> configManager.getRegionWorkstationPoints();
+            case PLACE_TORCH -> configManager.getRegionTorchPoints();
+            case KILL_MOB -> configManager.getRegionMobKillPoints();
+            default -> action.getDefaultPoints();
+        };
+    }
+
+    private boolean isRateLimited(UUID playerUuid, String regionId, int roundId, InfluenceAction action) {
+        // Rate limit block mining actions (per second)
+        if (action == InfluenceAction.MINE_ENEMY_BLOCK) {
+            int cap = configManager.getRegionMineCapPerSecond();
+            int count = db.getActionCount(playerUuid.toString(), regionId, roundId, "mine", 1000);
+            return count >= cap;
+        }
+        // Rate limit defensive blocks (per second)
+        if (action == InfluenceAction.PLACE_DEFENSIVE_BLOCK) {
+            int cap = configManager.getRegionDefensiveCapPerSecond();
+            int count = db.getActionCount(playerUuid.toString(), regionId, roundId, "defensive", 1000);
+            return count >= cap;
+        }
+        // Rate limit workstations (per minute) - prevents crafting table spam
+        if (action == InfluenceAction.PLACE_WORKSTATION) {
+            int cap = configManager.getRegionWorkstationCapPerMinute();
+            int count = db.getActionCount(playerUuid.toString(), regionId, roundId, "workstation", 60000);
+            return count >= cap;
+        }
+        // Rate limit torches (per minute)
+        if (action == InfluenceAction.PLACE_TORCH) {
+            int cap = configManager.getRegionTorchCapPerMinute();
+            int count = db.getActionCount(playerUuid.toString(), regionId, roundId, "torch", 60000);
+            return count >= cap;
+        }
+        return false;
+    }
+
+    private void updateRateLimit(UUID playerUuid, String regionId, int roundId, InfluenceAction action) {
+        String actionType = switch (action) {
+            case MINE_ENEMY_BLOCK -> "mine";
+            case PLACE_DEFENSIVE_BLOCK -> "defensive";
+            case PLACE_WORKSTATION -> "workstation";
+            case PLACE_TORCH -> "torch";
+            default -> null;
+        };
+
+        if (actionType != null) {
+            // Use appropriate time window (seconds vs minutes)
+            int windowMs = (action == InfluenceAction.PLACE_WORKSTATION || action == InfluenceAction.PLACE_TORCH)
+                    ? 60000 : 1000;
+            db.incrementActionCount(playerUuid.toString(), regionId, roundId, actionType, windowMs);
+        }
+    }
+
+    private void updateRegionState(String regionId, RegionStatus status, String attackingTeam) {
+        int roundId = getCurrentRoundId();
+
+        // If neutral region has any influence, it stays neutral until captured
+        if (status.state() == RegionState.NEUTRAL) {
+            return;
+        }
+
+        // If owned region is being attacked, mark as contested
+        if (status.state() == RegionState.OWNED && !status.isOwnedBy(attackingTeam)) {
+            double attackerInfluence = status.getInfluence(attackingTeam);
+            if (attackerInfluence > 0) {
+                db.updateRegionState(regionId, roundId, RegionState.CONTESTED);
+
+                // Record stat for region contested (top contributor gets credit)
+                if (statListener != null) {
+                    db.getTopContributor(regionId, roundId).ifPresent(topContributorUuid -> {
+                        try {
+                            java.util.UUID uuid = java.util.UUID.fromString(topContributorUuid);
+                            org.bukkit.entity.Player player = Bukkit.getPlayer(uuid);
+                            String playerName = player != null ? player.getName() : topContributorUuid;
+                            statListener.recordRegionContested(uuid, playerName);
+                        } catch (IllegalArgumentException ignored) {}
+                    });
+                }
+            }
+        }
+    }
+    public double getInfluence(String regionId, String team) {
+        return getRegionStatus(regionId)
+                .map(s -> s.getInfluence(team))
+                .orElse(0.0);
+    }
+    public double getInfluenceRequired(String regionId, String capturingTeam) {
+        Optional<RegionStatus> statusOpt = getRegionStatus(regionId);
+        if (statusOpt.isEmpty()) return Double.MAX_VALUE;
+
+        RegionStatus status = statusOpt.get();
+
+        double neutralThreshold = configManager.getRegionNeutralCaptureThreshold();
+        double enemyThreshold = configManager.getRegionEnemyCaptureThreshold();
+
+        return status.getInfluenceRequired(neutralThreshold, enemyThreshold);
+    }
+    public double getKillMultiplier(UUID killerUuid, UUID victimUuid, String regionId) {
+        int roundId = getCurrentRoundId();
+        if (roundId < 0) return 1.0;
+
+        int killCount = db.getKillCount(killerUuid.toString(), victimUuid.toString(), regionId, roundId);
+        if (killCount == 0) return 1.0;
+
+        // Each subsequent kill of same player reduces points by 50%
+        double reduction = configManager.getRegionKillSamePlayerReduction();
+        return Math.pow(reduction, killCount);
+    }
 
     // ==================== CAPTURE OPERATIONS ====================
 
-    /**
-     * Attempts to capture a region for a team.
-     * Should be called automatically when influence threshold is reached.
-     */
-    CaptureResult captureRegion(String regionId, String team);
+    private void checkAndProcessCapture(String regionId, String team) {
+        double influence = getInfluence(regionId, team);
+        double required = getInfluenceRequired(regionId, team);
 
-    /**
-     * Checks if a team can attack a region (adjacency rules).
-     */
-    boolean canAttackRegion(String regionId, String team);
+        if (influence >= required) {
+            captureRegion(regionId, team);
+        }
+    }
+    public CaptureResult captureRegion(String regionId, String team) {
+        int roundId = getCurrentRoundId();
+        if (roundId < 0) return CaptureResult.REGION_NOT_FOUND;
 
-    /**
-     * Gets adjacent regions to a given region.
-     */
-    List<String> getAdjacentRegions(String regionId);
+        Optional<RegionStatus> statusOpt = getRegionStatus(regionId);
+        if (statusOpt.isEmpty()) return CaptureResult.REGION_NOT_FOUND;
 
-    /**
-     * Checks if a region is adjacent to any region owned by a team.
-     */
-    boolean isAdjacentToTeam(String regionId, String team);
+        RegionStatus status = statusOpt.get();
+
+        // Validation checks
+        if (status.isFortified()) return CaptureResult.REGION_FORTIFIED;
+        if (status.state() == RegionState.PROTECTED) return CaptureResult.REGION_PROTECTED;
+        if (status.isOwnedBy(team)) return CaptureResult.ALREADY_OWNED;
+        if (!canAttackRegion(regionId, team)) return CaptureResult.NOT_ADJACENT;
+
+        // Store previous owner for notification
+        String previousOwner = status.ownerTeam();
+
+        // Calculate fortification end time
+        long fortificationMinutes = configManager.getRegionFortificationMinutes();
+        Long fortifiedUntil = System.currentTimeMillis() + (fortificationMinutes * 60 * 1000);
+
+        // Perform capture
+        db.captureRegion(regionId, roundId, team, RegionState.FORTIFIED, fortifiedUntil);
+        invalidateCache(regionId);
+
+        log("Region " + regionId + " captured by " + team + "! Fortified for " + fortificationMinutes + " minutes.");
+
+        // Clear all block tracking for this region (no longer relevant after capture)
+        defensiveBlockTracking.remove(regionId);
+        torchTracking.remove(regionId);
+        workstationTracking.remove(regionId);
+
+        // Record stat for region capture (award to top IP contributor)
+        if (statListener != null) {
+            db.getTopContributor(regionId, roundId).ifPresent(topContributorUuid -> {
+                try {
+                    java.util.UUID uuid = java.util.UUID.fromString(topContributorUuid);
+                    org.bukkit.entity.Player player = Bukkit.getPlayer(uuid);
+                    String playerName = player != null ? player.getName() : topContributorUuid;
+                    statListener.recordRegionCaptured(uuid, playerName);
+                } catch (IllegalArgumentException ignored) {}
+            });
+        }
+
+        // Notify via callback
+        if (captureCallback != null) {
+            captureCallback.onRegionCaptured(regionId, team, previousOwner);
+        }
+
+        return CaptureResult.SUCCESS;
+    }
+    public boolean canAttackRegion(String regionId, String team) {
+        // Check adjacency rules
+        if (!configManager.isRegionStrictAdjacency()) {
+            return true; // No adjacency rules
+        }
+
+        return isAdjacentToTeam(regionId, team);
+    }
+    public List<String> getAdjacentRegions(String regionId) {
+        List<String> adjacent = new ArrayList<>();
+        if (regionId == null || regionId.length() < 2) return adjacent;
+
+        char row = regionId.charAt(0);
+        int col = Integer.parseInt(regionId.substring(1));
+
+        // North (row - 1)
+        if (row > 'A') {
+            adjacent.add(String.valueOf((char)(row - 1)) + col);
+        }
+        // South (row + 1)
+        if (row < 'D') {
+            adjacent.add(String.valueOf((char)(row + 1)) + col);
+        }
+        // West (col - 1)
+        if (col > 1) {
+            adjacent.add(String.valueOf(row) + (col - 1));
+        }
+        // East (col + 1)
+        if (col < 4) {
+            adjacent.add(String.valueOf(row) + (col + 1));
+        }
+
+        // Diagonal adjacency (if allowed)
+        if (configManager.isRegionAllowDiagonal()) {
+            if (row > 'A' && col > 1) adjacent.add(String.valueOf((char)(row - 1)) + (col - 1));
+            if (row > 'A' && col < 4) adjacent.add(String.valueOf((char)(row - 1)) + (col + 1));
+            if (row < 'D' && col > 1) adjacent.add(String.valueOf((char)(row + 1)) + (col - 1));
+            if (row < 'D' && col < 4) adjacent.add(String.valueOf((char)(row + 1)) + (col + 1));
+        }
+
+        return adjacent;
+    }
+    public boolean isAdjacentToTeam(String regionId, String team) {
+        for (String adjacentId : getAdjacentRegions(regionId)) {
+            Optional<RegionStatus> adjacentStatus = getRegionStatus(adjacentId);
+            if (adjacentStatus.isPresent() && adjacentStatus.get().isOwnedBy(team)) {
+                return true;
+            }
+        }
+        return false;
+    }
 
     // ==================== ADMIN OPERATIONS ====================
+    public void captureRegion(String regionId, String team, long fortifyUntil) {
+        int roundId = getCurrentRoundId();
+        if (roundId < 0) return;
 
-    /**
-     * Force captures a region for a team (admin command).
-     */
-    void captureRegion(String regionId, String team, long fortifyUntil);
+        db.captureRegion(regionId, roundId, team, RegionState.FORTIFIED, fortifyUntil);
+        invalidateCache(regionId);
+    }
+    public void resetRegion(String regionId) {
+        int roundId = getCurrentRoundId();
+        if (roundId < 0) return;
 
-    /**
-     * Resets a region to neutral state (admin command).
-     */
-    void resetRegion(String regionId);
+        db.updateRegionOwner(regionId, roundId, null);
+        db.updateRegionState(regionId, roundId, RegionState.NEUTRAL);
+        db.updateInfluence(regionId, roundId, 0, 0);
+        invalidateCache(regionId);
+    }
+    public void setRegionState(String regionId, RegionState state) {
+        int roundId = getCurrentRoundId();
+        if (roundId < 0) return;
 
-    /**
-     * Sets a region's state directly (admin command).
-     */
-    void setRegionState(String regionId, RegionState state);
+        db.updateRegionState(regionId, roundId, state);
+        invalidateCache(regionId);
+    }
+    public void setRegionOwner(String regionId, String team) {
+        int roundId = getCurrentRoundId();
+        if (roundId < 0) return;
 
-    /**
-     * Sets a region's owner directly without triggering capture logic (admin command).
-     */
-    void setRegionOwner(String regionId, String team);
+        db.updateRegionOwner(regionId, roundId, team);
+        invalidateCache(regionId);
+    }
+    public void resetInfluence(String regionId) {
+        int roundId = getCurrentRoundId();
+        if (roundId < 0) return;
 
-    /**
-     * Resets influence points for both teams in a region (admin command).
-     */
-    void resetInfluence(String regionId);
+        db.updateInfluence(regionId, roundId, 0, 0);
+        invalidateCache(regionId);
+    }
+    public void addInfluence(String regionId, String team, double amount, UUID playerUuid) {
+        int roundId = getCurrentRoundId();
+        if (roundId < 0) return;
 
-    /**
-     * Adds influence directly without player context (admin command).
-     */
-    void addInfluence(String regionId, String team, double amount, UUID playerUuid);
+        Optional<RegionStatus> statusOpt = getRegionStatus(regionId);
+        if (statusOpt.isEmpty()) return;
 
-    /**
-     * Reduces influence for a team in a region.
-     * Used when defenders successfully counter objectives.
-     */
-    void reduceInfluence(String regionId, String team, double amount);
+        RegionStatus status = statusOpt.get();
+        double newRed = status.redInfluence();
+        double newBlue = status.blueInfluence();
 
-    /**
-     * Initializes/resets all regions with team homes.
-     */
-    void initializeRegions(String redHome, String blueHome);
+        if ("red".equalsIgnoreCase(team)) {
+            newRed += amount;
+        } else if ("blue".equalsIgnoreCase(team)) {
+            newBlue += amount;
+        }
+
+        db.updateInfluence(regionId, roundId, newRed, newBlue);
+        invalidateCache(regionId);
+
+        // Track player stats if provided
+        if (playerUuid != null) {
+            db.addInfluenceEarned(playerUuid.toString(), regionId, roundId, amount);
+        }
+
+        // Update region state (OWNED -> CONTESTED if enemy is gaining influence)
+        // Need to refresh status after influence update
+        Optional<RegionStatus> updatedStatusOpt = getRegionStatus(regionId);
+        if (updatedStatusOpt.isPresent()) {
+            updateRegionState(regionId, updatedStatusOpt.get(), team);
+        }
+
+        // Check for capture
+        checkAndProcessCapture(regionId, team);
+    }
+    public void reduceInfluence(String regionId, String team, double amount) {
+        reduceEnemyInfluence(regionId, team, amount, null);
+    }
+    public void initializeRegions(String redHome, String blueHome) {
+        int roundId = getCurrentRoundId();
+        if (roundId < 0) return;
+        initializeRegionsForRound(roundId, redHome, blueHome);
+    }
 
     // ==================== SUPPLY LINE OPERATIONS ====================
+    // NOTE: These are temporary implementations. The full physical road system
+    // will track actual path blocks placed by players.
+    public double getSupplyEfficiency(String regionId, String team) {
+        // Use RoadService if available for actual road-based supply
+        if (roadService != null) {
+            SupplyLevel level = roadService.getSupplyLevel(regionId, team);
+            return switch (level) {
+                case SUPPLIED -> 1.0;
+                case PARTIAL -> 0.5;
+                case UNSUPPLIED -> 0.25;
+                case ISOLATED -> 0.0;
+            };
+        }
 
-    /**
-     * Calculates supply efficiency for a region (0.0 to 1.0).
-     * Based on shortest path to home region.
-     */
-    double getSupplyEfficiency(String regionId, String team);
+        // Fallback: simple region adjacency as a placeholder
+        String homeRegion = getHomeRegion(team);
+        if (homeRegion == null) return 0;
+        if (regionId.equals(homeRegion)) return 1.0; // Home is always 100%
 
-    /**
-     * Checks if a region is connected to its team's home.
-     */
-    boolean isConnectedToHome(String regionId, String team);
+        // Check if connected via owned regions (placeholder for road system)
+        int distance = findShortestPath(regionId, homeRegion, team);
+        if (distance < 0) return 0; // Not connected = Unsupplied
 
-    /**
-     * Gets all regions that would be cut off if a region is captured.
-     */
-    List<String> getRegionsThatWouldBeCutOff(String regionId, String team);
+        // Simple: if connected, return 1.0 (Supplied)
+        // The physical road system will provide more nuanced supply levels
+        return 1.0;
+    }
+    public boolean isConnectedToHome(String regionId, String team) {
+        // Use RoadService if available for actual road-based connectivity
+        if (roadService != null) {
+            return roadService.isConnectedToHome(regionId, team);
+        }
+
+        // Fallback: simple region adjacency as a placeholder
+        String homeRegion = getHomeRegion(team);
+        if (homeRegion == null) return false;
+        if (regionId.equals(homeRegion)) return true;
+        return findShortestPath(regionId, homeRegion, team) >= 0;
+    }
+
+    private String getHomeRegion(String team) {
+        if ("red".equalsIgnoreCase(team)) {
+            return configManager.getRegionRedHome();
+        } else if ("blue".equalsIgnoreCase(team)) {
+            return configManager.getRegionBlueHome();
+        }
+        return null;
+    }
+
+    private int findShortestPath(String from, String to, String team) {
+        if (from.equals(to)) return 0;
+
+        Queue<String> queue = new LinkedList<>();
+        Map<String, Integer> distances = new HashMap<>();
+
+        queue.add(from);
+        distances.put(from, 0);
+
+        while (!queue.isEmpty()) {
+            String current = queue.poll();
+            int currentDist = distances.get(current);
+
+            for (String adjacent : getAdjacentRegions(current)) {
+                if (distances.containsKey(adjacent)) continue;
+
+                Optional<RegionStatus> adjacentStatus = getRegionStatus(adjacent);
+                if (adjacentStatus.isEmpty()) continue;
+
+                // Can only traverse through owned regions
+                if (!adjacentStatus.get().isOwnedBy(team)) continue;
+
+                if (adjacent.equals(to)) {
+                    return currentDist + 1;
+                }
+
+                distances.put(adjacent, currentDist + 1);
+                queue.add(adjacent);
+            }
+        }
+
+        return -1; // Not connected
+    }
+    public List<String> getRegionsThatWouldBeCutOff(String regionId, String team) {
+        // Temporarily remove region from consideration
+        List<String> cutOffRegions = new ArrayList<>();
+        String homeRegion = getHomeRegion(team);
+
+        for (RegionStatus status : getRegionsByOwner(team)) {
+            if (status.regionId().equals(regionId)) continue;
+            if (status.regionId().equals(homeRegion)) continue;
+
+            // Check if this region would still be connected without the target region
+            if (!wouldBeConnectedWithout(status.regionId(), regionId, team)) {
+                cutOffRegions.add(status.regionId());
+            }
+        }
+
+        return cutOffRegions;
+    }
+
+    private boolean wouldBeConnectedWithout(String regionId, String excludeRegion, String team) {
+        String homeRegion = getHomeRegion(team);
+        if (homeRegion == null || regionId.equals(homeRegion)) return true;
+
+        Queue<String> queue = new LinkedList<>();
+        Set<String> visited = new HashSet<>();
+
+        queue.add(regionId);
+        visited.add(regionId);
+
+        while (!queue.isEmpty()) {
+            String current = queue.poll();
+
+            for (String adjacent : getAdjacentRegions(current)) {
+                if (visited.contains(adjacent)) continue;
+                if (adjacent.equals(excludeRegion)) continue;
+
+                Optional<RegionStatus> adjacentStatus = getRegionStatus(adjacent);
+                if (adjacentStatus.isEmpty()) continue;
+                if (!adjacentStatus.get().isOwnedBy(team)) continue;
+
+                if (adjacent.equals(homeRegion)) {
+                    return true;
+                }
+
+                visited.add(adjacent);
+                queue.add(adjacent);
+            }
+        }
+
+        return false;
+    }
 
     // ==================== DEFENSE OPERATIONS (deprecated) ====================
 
-    /**
-     * Gets the total defense bonus for a region.
-     * @deprecated Defense bonuses removed — only fortification period provides protection.
-     */
     @Deprecated
-    double getDefenseBonus(String regionId);
+    public double getDefenseBonus(String regionId) {
+        return 0;
+    }
 
-    /**
-     * Updates defense structure count for a region.
-     * @deprecated Defense structures removed — method is a no-op.
-     */
     @Deprecated
-    void updateDefenseStructures(String regionId, int count);
+    public void updateDefenseStructures(String regionId, int count) {
+        // No-op: defense structures removed
+    }
 
     // ==================== DECAY ====================
+    public void applyInfluenceDecay() {
+        int roundId = getCurrentRoundId();
+        if (roundId < 0) return;
+
+        double decayPerMinute = configManager.getRegionInfluenceDecayPerMinute();
+
+        for (RegionStatus status : getAllRegionStatuses()) {
+            if (status.state() == RegionState.CONTESTED) {
+                double newRed = Math.max(0, status.redInfluence() - decayPerMinute);
+                double newBlue = Math.max(0, status.blueInfluence() - decayPerMinute);
+                db.updateInfluence(status.regionId(), roundId, newRed, newBlue);
+
+                // If both influences are 0, return to OWNED state
+                if (newRed == 0 && newBlue == 0 && status.ownerTeam() != null) {
+                    db.updateRegionState(status.regionId(), roundId, RegionState.OWNED);
+                }
+            }
+        }
+
+        refreshCache();
+    }
+    public void updateFortificationStatus() {
+        int roundId = getCurrentRoundId();
+        if (roundId < 0) return;
+
+        long now = System.currentTimeMillis();
+
+        for (RegionStatus status : getAllRegionStatuses()) {
+            if (status.state() == RegionState.FORTIFIED && status.fortifiedUntil() != null) {
+                if (now >= status.fortifiedUntil()) {
+                    db.updateRegionState(status.regionId(), roundId, RegionState.OWNED);
+                    log("Region " + status.regionId() + " fortification ended.");
+                }
+            }
+        }
+
+        refreshCache();
+    }
+
+    // ==================== EVENT HANDLERS ====================
+    public void onPlayerKill(UUID killerUuid, UUID victimUuid, String killerTeam, String victimTeam, int blockX, int blockZ) {
+        String regionId = getRegionIdForLocation(blockX, blockZ);
+        if (regionId == null) return;
+
+        int roundId = getCurrentRoundId();
+        if (roundId < 0) return;
+
+        // Only award points for killing enemies
+        if (killerTeam.equalsIgnoreCase(victimTeam)) return;
+
+        Optional<RegionStatus> statusOpt = getRegionStatus(regionId);
+        if (statusOpt.isEmpty()) return;
+
+        RegionStatus status = statusOpt.get();
+
+        // Calculate multiplier based on repeat kills
+        double multiplier = getKillMultiplier(killerUuid, victimUuid, regionId);
+
+        // Record the kill for future multiplier calculations
+        db.recordKill(killerUuid.toString(), victimUuid.toString(), regionId, roundId);
+        db.incrementPlayerStat(killerUuid.toString(), regionId, roundId, "kills");
+        db.incrementPlayerStat(victimUuid.toString(), regionId, roundId, "deaths");
+
+        // DEFENDER KILL: If killer owns this region (CONTESTED), reduce enemy influence
+        if (status.isOwnedBy(killerTeam) && status.state() == RegionState.CONTESTED) {
+            double killPoints = configManager.getRegionKillPoints() * multiplier;
+            boolean regionDefended = reduceEnemyInfluence(regionId, victimTeam, killPoints, killerUuid);
+
+            // Record stat for IP denied (defensive action)
+            if (statListener != null) {
+                org.bukkit.entity.Player defenderPlayer = org.bukkit.Bukkit.getPlayer(killerUuid);
+                String defenderName = defenderPlayer != null ? defenderPlayer.getName() : killerUuid.toString();
+                statListener.recordIPDenied(killerUuid, defenderName, killPoints);
+
+                // If this kill cleared enemy influence and returned region to OWNED, credit the defender
+                if (regionDefended) {
+                    statListener.recordRegionDefended(killerUuid, defenderName);
+                }
+            }
+
+            // Notify defender
+            org.bukkit.entity.Player killer = org.bukkit.Bukkit.getPlayer(killerUuid);
+            if (killer != null) {
+                killer.sendMessage(configManager.getPrefix() + org.bukkit.ChatColor.GREEN +
+                        "-" + (int)killPoints + " enemy IP " +
+                        org.bukkit.ChatColor.GRAY + "- Defending territory!");
+            }
+            return;
+        }
+
+        // ATTACKER KILL: Can only earn kill points in enemy or neutral regions
+        if (status.isOwnedBy(killerTeam)) return;
+
+        // Add influence for attacker
+        InfluenceAction action = multiplier < 1.0 ? InfluenceAction.KILL_ENEMY_REPEAT : InfluenceAction.KILL_ENEMY;
+        addInfluence(killerUuid, regionId, killerTeam, action, multiplier);
+    }
 
     /**
-     * Applies influence decay to all contested regions.
-     * Should be called periodically.
+     * Reduces enemy influence in a contested region.
+     * Used when defenders kill attackers.
+     * @return true if this reduction cleared enemy influence and returned region to OWNED
      */
-    void applyInfluenceDecay();
+    private boolean reduceEnemyInfluence(String regionId, String enemyTeam, double amount, UUID defenderUuid) {
+        int roundId = getCurrentRoundId();
+        if (roundId < 0) return false;
+
+        Optional<RegionStatus> statusOpt = getRegionStatus(regionId);
+        if (statusOpt.isEmpty()) return false;
+
+        RegionStatus status = statusOpt.get();
+        double newRed = status.redInfluence();
+        double newBlue = status.blueInfluence();
+
+        if ("red".equalsIgnoreCase(enemyTeam)) {
+            newRed = Math.max(0, newRed - amount);
+        } else if ("blue".equalsIgnoreCase(enemyTeam)) {
+            newBlue = Math.max(0, newBlue - amount);
+        }
+
+        db.updateInfluence(regionId, roundId, newRed, newBlue);
+        invalidateCache(regionId);
+
+        // Check if enemy influence is now 0 - return to OWNED state
+        if (newRed == 0 && newBlue == 0 && status.ownerTeam() != null) {
+            db.updateRegionState(regionId, roundId, RegionState.OWNED);
+            invalidateCache(regionId);
+
+            logger.info("Region " + regionId + " returned to OWNED after defenders cleared enemy influence");
+
+            // Broadcast to server
+            org.bukkit.Bukkit.broadcastMessage(configManager.getPrefix() +
+                    org.bukkit.ChatColor.GREEN + "Region " + regionId + " has been successfully defended by " +
+                    (status.ownerTeam().equalsIgnoreCase("red") ? org.bukkit.ChatColor.RED : org.bukkit.ChatColor.BLUE) +
+                    status.ownerTeam().toUpperCase() + org.bukkit.ChatColor.GREEN + "!");
+
+            return true; // Region was defended
+        }
+
+        return false;
+    }
+    public void onBlockPlace(UUID playerUuid, String team, int blockX, int blockY, int blockZ, String blockType) {
+        String regionId = getRegionIdForLocation(blockX, blockZ);
+        if (regionId == null) return;
+
+        int roundId = getCurrentRoundId();
+        if (roundId < 0) return;
+
+        Optional<RegionStatus> statusOpt = getRegionStatus(regionId);
+        if (statusOpt.isEmpty()) return;
+
+        RegionStatus status = statusOpt.get();
+
+        // Only earn points in neutral or enemy regions
+        if (status.isOwnedBy(team)) return;
+
+        // Track stats
+        db.incrementPlayerStat(playerUuid.toString(), regionId, roundId, "blocks_placed");
+
+        // Determine action type
+        InfluenceAction action = null;
+        if (status.state() == RegionState.NEUTRAL) {
+            if (isDefensiveBlock(blockType)) {
+                action = InfluenceAction.PLACE_DEFENSIVE_BLOCK;
+            } else if (isTorch(blockType)) {
+                action = InfluenceAction.PLACE_TORCH;
+            } else if (isWorkstation(blockType)) {
+                action = InfluenceAction.PLACE_WORKSTATION;
+            }
+        }
+
+        if (action != null) {
+            InfluenceResult result = addInfluence(playerUuid, regionId, team, action);
+
+            // Track all IP-earning blocks for anti-farming (remove IP when broken by same team)
+            if (result == InfluenceResult.SUCCESS) {
+                String blockKey = blockX + "," + blockY + "," + blockZ;
+                double points = getPointsForAction(action);
+                PlacedBlockRecord record = new PlacedBlockRecord(team, points, System.currentTimeMillis());
+
+                switch (action) {
+                    case PLACE_DEFENSIVE_BLOCK -> defensiveBlockTracking
+                            .computeIfAbsent(regionId, k -> new HashMap<>())
+                            .put(blockKey, record);
+                    case PLACE_TORCH -> torchTracking
+                            .computeIfAbsent(regionId, k -> new HashMap<>())
+                            .put(blockKey, record);
+                    case PLACE_WORKSTATION -> workstationTracking
+                            .computeIfAbsent(regionId, k -> new HashMap<>())
+                            .put(blockKey, record);
+                    default -> {}
+                }
+            }
+        }
+    }
+    public void onBlockBreak(UUID playerUuid, String team, int blockX, int blockY, int blockZ, boolean wasPlayerPlaced, String placedByTeam) {
+        String regionId = getRegionIdForLocation(blockX, blockZ);
+        if (regionId == null) return;
+
+        int roundId = getCurrentRoundId();
+        if (roundId < 0) return;
+
+        Optional<RegionStatus> statusOpt = getRegionStatus(regionId);
+        if (statusOpt.isEmpty()) return;
+
+        RegionStatus status = statusOpt.get();
+
+        // Track stats
+        db.incrementPlayerStat(playerUuid.toString(), regionId, roundId, "blocks_mined");
+
+        // Check all tracking maps for anti-farming - remove IP if same team breaks their placed blocks
+        String blockKey = blockX + "," + blockY + "," + blockZ;
+        checkAndRemoveTrackedBlock(regionId, team, blockKey, defensiveBlockTracking, "defensive block");
+        checkAndRemoveTrackedBlock(regionId, team, blockKey, torchTracking, "torch");
+        checkAndRemoveTrackedBlock(regionId, team, blockKey, workstationTracking, "workstation");
+
+        // Only earn points for mining enemy blocks in enemy regions
+        if (wasPlayerPlaced && placedByTeam != null && !placedByTeam.equalsIgnoreCase(team)) {
+            if (!status.isOwnedBy(team) && status.state() != RegionState.NEUTRAL) {
+                addInfluence(playerUuid, regionId, team, InfluenceAction.MINE_ENEMY_BLOCK);
+            }
+        }
+    }
 
     /**
-     * Updates fortification status for all regions.
-     * Removes fortification when time expires.
+     * Checks if a broken block was tracked for IP and removes the IP if broken by the same team.
      */
-    void updateFortificationStatus();
+    private void checkAndRemoveTrackedBlock(String regionId, String team, String blockKey,
+                                            Map<String, Map<String, PlacedBlockRecord>> trackingMap, String blockTypeName) {
+        Map<String, PlacedBlockRecord> regionBlocks = trackingMap.get(regionId);
+        if (regionBlocks == null) return;
 
-    // ==================== EVENTS ====================
+        PlacedBlockRecord record = regionBlocks.remove(blockKey);
+        if (record != null && record.team().equalsIgnoreCase(team)) {
+            // Same team broke a block they placed - remove the IP
+            removeInfluence(regionId, team, record.points());
+            log("Removed " + record.points() + " IP from " + team + " in " + regionId +
+                " - " + blockTypeName + " broken (anti-farm)");
+        }
 
-    /**
-     * Called when a player kills another player.
-     */
-    void onPlayerKill(UUID killerUuid, UUID victimUuid, String killerTeam, String victimTeam, int blockX, int blockZ);
+        // Clean up empty maps
+        if (regionBlocks.isEmpty()) {
+            trackingMap.remove(regionId);
+        }
+    }
+    public void onBannerPlace(UUID playerUuid, String team, int blockX, int blockZ) {
+        String regionId = getRegionIdForLocation(blockX, blockZ);
+        if (regionId == null) return;
 
-    /**
-     * Called when a player places a block.
-     */
-    void onBlockPlace(UUID playerUuid, String team, int blockX, int blockY, int blockZ, String blockType);
+        int roundId = getCurrentRoundId();
+        if (roundId < 0) return;
 
-    /**
-     * Called when a player breaks a block.
-     */
-    void onBlockBreak(UUID playerUuid, String team, int blockX, int blockY, int blockZ, boolean wasPlayerPlaced, String placedByTeam);
+        Optional<RegionStatus> statusOpt = getRegionStatus(regionId);
+        if (statusOpt.isEmpty()) return;
 
-    /**
-     * Called when a player places a banner.
-     */
-    void onBannerPlace(UUID playerUuid, String team, int blockX, int blockZ);
+        RegionStatus status = statusOpt.get();
 
-    /**
-     * Called when a player removes an enemy banner.
-     */
-    void onBannerRemove(UUID playerUuid, String team, int blockX, int blockZ, String bannerTeam);
+        // Can place banner in neutral or enemy regions
+        if (status.isOwnedBy(team)) return;
 
-    /**
-     * Called when a player removes their own team's banner that earned IP.
-     * Deducts IP as anti-cheese protection.
-     */
-    void onOwnBannerRemove(UUID playerUuid, String team, int blockX, int blockZ);
+        // Track stats
+        db.incrementPlayerStat(playerUuid.toString(), regionId, roundId, "banners_placed");
 
-    /**
-     * Called when a player kills a mob.
-     */
-    void onMobKill(UUID playerUuid, String team, int blockX, int blockZ);
+        // Record stat for banner placed
+        if (statListener != null) {
+            org.bukkit.entity.Player player = Bukkit.getPlayer(playerUuid);
+            String playerName = player != null ? player.getName() : playerUuid.toString();
+            statListener.recordBannerPlaced(playerUuid, playerName);
+        }
+
+        addInfluence(playerUuid, regionId, team, InfluenceAction.PLACE_BANNER);
+    }
+    public void onBannerRemove(UUID playerUuid, String team, int blockX, int blockZ, String bannerTeam) {
+        String regionId = getRegionIdForLocation(blockX, blockZ);
+        if (regionId == null) return;
+
+        // Only award points for removing enemy banners
+        if (team.equalsIgnoreCase(bannerTeam)) return;
+
+        addInfluence(playerUuid, regionId, team, InfluenceAction.REMOVE_ENEMY_BANNER);
+    }
+    public void onOwnBannerRemove(UUID playerUuid, String team, int blockX, int blockZ) {
+        String regionId = getRegionIdForLocation(blockX, blockZ);
+        if (regionId == null) return;
+
+        // Deduct the banner placement IP as anti-cheese protection
+        int bannerPoints = configManager.getRegionBannerPlacePoints();
+        addInfluence(regionId, team, -bannerPoints, playerUuid);
+
+        logger.info("[Regions] " + playerUuid + " broke own banner in " + regionId +
+                ", deducted " + bannerPoints + " IP");
+    }
+    public void onMobKill(UUID playerUuid, String team, int blockX, int blockZ) {
+        String regionId = getRegionIdForLocation(blockX, blockZ);
+        if (regionId == null) return;
+
+        Optional<RegionStatus> statusOpt = getRegionStatus(regionId);
+        if (statusOpt.isEmpty()) return;
+
+        RegionStatus status = statusOpt.get();
+
+        // Only earn points in neutral regions
+        if (status.state() != RegionState.NEUTRAL) return;
+
+        addInfluence(playerUuid, regionId, team, InfluenceAction.KILL_MOB);
+    }
+
+    // ==================== HELPER METHODS ====================
+
+    private boolean isDefensiveBlock(String blockType) {
+        return blockType.contains("WALL") || blockType.contains("FENCE") ||
+               blockType.contains("COBBLESTONE") || blockType.contains("STONE_BRICK") ||
+               blockType.contains("BRICK") || blockType.contains("OBSIDIAN");
+    }
+
+    private boolean isTorch(String blockType) {
+        return blockType.contains("TORCH");
+    }
+
+    private boolean isWorkstation(String blockType) {
+        return blockType.contains("CRAFTING") || blockType.contains("FURNACE") ||
+               blockType.contains("ANVIL") || blockType.contains("SMITHING") ||
+               blockType.contains("ENCHANTING") || blockType.contains("BREWING");
+    }
+
+    // ==================== CACHE MANAGEMENT ====================
+
+    private void refreshCacheIfNeeded() {
+        if (System.currentTimeMillis() - lastCacheRefresh > CACHE_TTL_MS) {
+            refreshCache();
+        }
+    }
+
+    private void refreshCache() {
+        int roundId = getCurrentRoundId();
+        if (roundId < 0) return;
+
+        regionCache.clear();
+        for (RegionStatus status : db.getAllRegionStatuses(roundId)) {
+            regionCache.put(status.regionId(), status);
+        }
+        lastCacheRefresh = System.currentTimeMillis();
+    }
+
+    private void invalidateCache(String regionId) {
+        int roundId = getCurrentRoundId();
+        if (roundId < 0) return;
+
+        db.getRegionStatus(regionId, roundId).ifPresent(status ->
+            regionCache.put(regionId, status)
+        );
+    }
 }
 

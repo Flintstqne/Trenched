@@ -20,7 +20,6 @@ import org.flintstqne.entrenched.RoadLogic.*;
 import org.flintstqne.entrenched.RoundLogic.RoundCommand;
 import org.flintstqne.entrenched.RoundLogic.RoundDb;
 import org.flintstqne.entrenched.RoundLogic.RoundService;
-import org.flintstqne.entrenched.RoundLogic.SqlRoundService;
 import org.flintstqne.entrenched.RoundLogic.NewRoundInitializer;
 import org.flintstqne.entrenched.RoundLogic.PhaseScheduler;
 import org.flintstqne.entrenched.RoundLogic.EndgameDb;
@@ -110,7 +109,7 @@ public final class Trenched extends JavaPlugin {
         // Initialize database and round service first so we can get the game world
         teamDb = TeamBootstrap.createDb(this);
         roundDb = new RoundDb(this);
-        roundService = new SqlRoundService(roundDb);
+        roundService = new RoundService(roundDb);
         getLogger().info("[Trenched] Round system initialized");
 
         // If there's an active round with a timestamped world name (e.g. world_1711234567890),
@@ -159,18 +158,17 @@ public final class Trenched extends JavaPlugin {
 
         // Initialize Division system
         divisionDb = new DivisionDb(this);
-        divisionService = new SqlDivisionService(divisionDb, roundService, teamService, configManager);
+        divisionService = new DivisionService(divisionDb, roundService, teamService, configManager);
         getLogger().info("[Entrenched] Division system initialized");
 
         // Initialize Party system
         partyDb = new PartyDb(this);
-        partyService = new SqlPartyService(partyDb, roundService, teamService, configManager);
+        partyService = new PartyService(partyDb, roundService, teamService, configManager);
         getLogger().info("[Entrenched] Party system initialized");
 
         // Initialize Region Capture system
         regionDb = new RegionDb(this);
-        SqlRegionService sqlRegionService = new SqlRegionService(regionDb, roundService, configManager);
-        regionService = sqlRegionService;
+        regionService = new RegionService(regionDb, roundService, configManager);
 
         // Instantiate RegionRenderer AFTER regionService so it can color captured regions
         regionRenderer = new RegionRenderer(this, roundService, regionService);
@@ -183,7 +181,7 @@ public final class Trenched extends JavaPlugin {
 
         // Initialize Objective System (before road service so we can use it in capture callback)
         objectiveDb = new ObjectiveDb(this);
-        objectiveService = new SqlObjectiveService(this, objectiveDb, roundService, regionService, configManager);
+        objectiveService = new ObjectiveService(this, objectiveDb, roundService, regionService, configManager);
 
         // Initialize player-placed block tracking for structure detection
         if (configManager.isPlayerPlacedTrackingEnabled()) {
@@ -205,7 +203,7 @@ public final class Trenched extends JavaPlugin {
                         .anyMatch(b -> b.regionId().equals(regionId));
             });
             placedBlockTracker.start();
-            ((SqlObjectiveService) objectiveService).setPlacedBlockTracker(placedBlockTracker);
+            objectiveService.setPlacedBlockTracker(placedBlockTracker);
 
             // Load tracked blocks for regions that already have active building objectives
             loadTrackedBlocksForActiveObjectives();
@@ -214,13 +212,13 @@ public final class Trenched extends JavaPlugin {
         }
 
         // Wire up division and team services for assassination objective (avoids circular dependency)
-        ((SqlObjectiveService) objectiveService).setDivisionService(divisionService);
-        ((SqlObjectiveService) objectiveService).setTeamService(teamService);
-        ((SqlObjectiveService) objectiveService).setRegionRenderer(regionRenderer);
+        objectiveService.setDivisionService(divisionService);
+        objectiveService.setTeamService(teamService);
+        objectiveService.setRegionRenderer(regionRenderer);
 
         objectiveUIManager = new ObjectiveUIManager(this, objectiveService, regionService, roundService, teamService, configManager);
         objectiveListener = new ObjectiveListener(this, objectiveService, objectiveUIManager, regionService, teamService, configManager);
-        ((SqlObjectiveService) objectiveService).setObjectiveListener(objectiveListener);
+        objectiveService.setObjectiveListener(objectiveListener);
 
         // Wire up building destroyed callback â€” broadcasts specific repair needs to team
         objectiveService.setBuildingDestroyedCallback((building, regionName, detectionResult) -> {
@@ -295,7 +293,7 @@ public final class Trenched extends JavaPlugin {
         phaseScheduler.setEndgameManager(endgameManager);
 
         // Wire up heat callback for endgame overtime target selection
-        sqlRegionService.setHeatCallback((regionId, heat) -> {
+        regionService.setHeatCallback((regionId, heat) -> {
             if (endgameManager != null) {
                 endgameManager.recordHeat(regionId, heat);
             }
@@ -320,7 +318,7 @@ public final class Trenched extends JavaPlugin {
 
         // Initialize Road/Supply Line system
         roadDb = new RoadDb(this);
-        roadService = new SqlRoadService(roadDb, roundService, regionService, configManager);
+        roadService = new RoadService(roadDb, roundService, regionService, configManager);
         roadListener = new RoadListener(this, roadService, teamService, regionService, configManager, regionRenderer);
         deathListener = new DeathListener(this, roadService, teamService, configManager);
         supplyPenaltyListener = new SupplyPenaltyListener(roadService, teamService, deathListener);
@@ -343,7 +341,7 @@ public final class Trenched extends JavaPlugin {
         scoreboardUtil.setRoadService(roadService);
 
         // Connect road service to region service for accurate supply calculations
-        sqlRegionService.setRoadService(roadService);
+        regionService.setRoadService(roadService);
 
         // NOTE: Stat listener is wired to region service later after stat system initialization
 
@@ -360,7 +358,7 @@ public final class Trenched extends JavaPlugin {
         // Connect capture callback to notification manager AND auto-scan for roads
         // NOTE: Use roundService.getGameWorld() dynamically instead of closing over a World
         // reference, so that after a new round creates a new world, this callback still works.
-        sqlRegionService.setCaptureCallback((regionId, newOwner, previousOwner) -> {
+        regionService.setCaptureCallback((regionId, newOwner, previousOwner) -> {
             // Broadcast capture notification
             regionNotificationManager.broadcastCapture(regionId, newOwner, previousOwner);
 
@@ -433,7 +431,7 @@ public final class Trenched extends JavaPlugin {
 
         // Initialize Merit System
         meritDb = new MeritDb(this);
-        meritService = new SqlMeritService(meritDb, configManager);
+        meritService = new MeritService(meritDb, configManager);
         meritListener = new MeritListener(this, meritService, teamService, regionService, roundService, configManager);
 
         // Initialize nametag manager for rank display above heads
@@ -464,7 +462,7 @@ public final class Trenched extends JavaPlugin {
         // Initialize Division Depot System
         if (configManager.isDepotSystemEnabled()) {
             depotItem = new DepotItem(this);
-            depotService = new SqlDepotService(this, divisionDb, divisionService, regionService, teamService, roundService, configManager);
+            depotService = new DepotService(this, divisionDb, divisionService, regionService, teamService, roundService, configManager);
             depotRecipes = new DepotRecipes(this, depotItem);
             depotRecipes.registerRecipes();
             depotListener = new DepotListener(this, depotService, divisionService, teamService, regionService, configManager, depotItem);
@@ -493,15 +491,15 @@ public final class Trenched extends JavaPlugin {
 
         // Initialize Statistics System
         statDb = new org.flintstqne.entrenched.StatLogic.StatDb(this);
-        statService = new org.flintstqne.entrenched.StatLogic.SqlStatService(this, statDb, roundService, configManager);
+        statService = new org.flintstqne.entrenched.StatLogic.StatService(this, statDb, roundService, configManager);
         statListener = new org.flintstqne.entrenched.StatLogic.StatListener(this, statService, teamService, regionService, roundService, configManager);
         statListener.setDivisionService(divisionService);
         getServer().getPluginManager().registerEvents(statListener, this);
-        ((org.flintstqne.entrenched.StatLogic.SqlStatService) statService).start();
+        statService.start();
         statListener.startTimeTracking();
 
         // Wire stat listener to objective service for objective completion tracking
-        ((org.flintstqne.entrenched.ObjectiveLogic.SqlObjectiveService) objectiveService).setStatListener(statListener);
+        objectiveService.setStatListener(statListener);
 
         // Wire stat listener to objective listener for defensive objective tracking (TNT defusal, etc.)
         objectiveListener.setStatListener(statListener);
@@ -512,7 +510,7 @@ public final class Trenched extends JavaPlugin {
         }
 
         // Wire stat listener to region service for IP earned tracking
-        ((org.flintstqne.entrenched.RegionLogic.SqlRegionService) regionService).setStatListener(statListener);
+        regionService.setStatListener(statListener);
 
         // Wire stat listener to road listener for road build/damage tracking
         roadListener.setStatListener(statListener);

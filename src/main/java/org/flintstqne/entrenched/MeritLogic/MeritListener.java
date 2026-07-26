@@ -77,8 +77,8 @@ public class MeritListener implements Listener {
         meritService.getOrCreatePlayerData(uuid);
 
         // Award first login achievement if applicable
-        if (isFirstLogin && meritService instanceof SqlMeritService sqlMeritService) {
-            sqlMeritService.checkFirstLoginAchievement(uuid);
+        if (isFirstLogin) {
+            meritService.checkFirstLoginAchievement(uuid);
         }
 
         // Track session start

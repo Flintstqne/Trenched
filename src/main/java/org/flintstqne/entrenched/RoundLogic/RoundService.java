@@ -1,47 +1,110 @@
 package org.flintstqne.entrenched.RoundLogic;
 
+import org.bukkit.Bukkit;
 import org.bukkit.World;
 
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
-public interface RoundService {
+public final class RoundService {
 
-    Optional<Round> getCurrentRound();
+    private final RoundDb db;
 
-    Round startNewRound(long worldSeed);
+    public RoundService(RoundDb db) {
+        this.db = db;
+    }
 
-    void setWorldName(int roundId, String worldName);
+    public Optional<Round> getCurrentRound() {
+        return db.getCurrentRound();
+    }
+
+    public Round startNewRound(long worldSeed) {
+        int roundId = db.createRound(worldSeed);
+        db.updateRoundStatus(roundId, Round.RoundStatus.ACTIVE);
+        return db.getRound(roundId).orElseThrow();
+    }
+
+    public void setWorldName(int roundId, String worldName) {
+        db.setWorldName(roundId, worldName);
+    }
 
     /**
      * Gets the current game world for the active round.
      * Falls back to default world name from config if no world name is stored.
      */
-    Optional<World> getGameWorld();
+    public Optional<World> getGameWorld() {
+        return getCurrentRound()
+                .map(round -> {
+                    String worldName = round.worldName();
+                    if (worldName != null && !worldName.isEmpty()) {
+                        return Bukkit.getWorld(worldName);
+                    }
+                    // Fallback to default "world" if no world name stored
+                    return Bukkit.getWorld("world");
+                });
+    }
 
-    PhaseResult advancePhase();
+    public PhaseResult advancePhase() {
+        Optional<Round> currentOpt = getCurrentRound();
+        if (currentOpt.isEmpty()) return PhaseResult.NO_ACTIVE_ROUND;
+
+        Round current = currentOpt.get();
+        if (current.status() == Round.RoundStatus.COMPLETED) {
+            return PhaseResult.ALREADY_ENDED;
+        }
+
+        if (current.currentPhase() >= 3) {
+            return PhaseResult.ROUND_ENDED;
+        }
+
+        db.updatePhase(current.roundId(), current.currentPhase() + 1);
+        return PhaseResult.ADVANCED;
+    }
 
     /**
      * Sets the phase directly for the current round (admin command).
      * @param phase The target phase number
      * @return true if the phase was set successfully
      */
-    boolean setPhase(int phase);
+    public boolean setPhase(int phase) {
+        Optional<Round> currentOpt = getCurrentRound();
+        if (currentOpt.isEmpty()) return false;
+        Round current = currentOpt.get();
+        if (current.status() == Round.RoundStatus.COMPLETED) return false;
+        db.updatePhase(current.roundId(), phase);
+        return true;
+    }
 
-    void endRound(String winningTeam);
+    public void endRound(String winningTeam) {
+        getCurrentRound().ifPresent(round ->
+                db.completeRound(round.roundId(), winningTeam)
+        );
+    }
 
-    Map<String, String> getRegionNames(int roundId);
+    public Map<String, String> getRegionNames(int roundId) {
+        return db.loadRegionNames(roundId);
+    }
 
-    void setRegionNames(int roundId, Map<String, String> names);
+    public void setRegionNames(int roundId, Map<String, String> names) {
+        db.saveRegionNames(roundId, names);
+    }
 
-    boolean isRoundActive();
+    public boolean isRoundActive() {
+        return getCurrentRound()
+                .map(r -> r.status() == Round.RoundStatus.ACTIVE)
+                .orElse(false);
+    }
 
-    Optional<Round> getRound(int roundId);
+    public Optional<Round> getRound(int roundId) {
+        return db.getRound(roundId);
+    }
 
-    List<Round> getRoundHistory();
+    public List<Round> getRoundHistory() {
+        return db.getRoundHistory();
+    }
 
-    enum PhaseResult {
+    public enum PhaseResult {
         ADVANCED,
         ROUND_ENDED,
         NO_ACTIVE_ROUND,
